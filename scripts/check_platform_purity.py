@@ -8,7 +8,7 @@
 
 ## 为什么要这个脚本
 
-「Windows 版不含 wayvr / pipewire」「Linux 版不含 WASAPI 那套」这两条要求，
+「Windows 版不含 pipewire / openxr」「Linux 版不含 WASAPI 那套」这两条要求，
 如果只写在构建脚本的注释里，迟早有人加个 `--hidden-import` 就破了 ——
 而且破了没有任何征兆，只是 exe 悄悄变胖、或者在别的机器上冒出莫名其妙的报错。
 

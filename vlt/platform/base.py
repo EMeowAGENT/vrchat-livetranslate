@@ -7,16 +7,16 @@ Windows 与 Linux 做「同一件事」用的是完全不同的机制：
 | 能力 | Windows | Linux |
 |---|---|---|
 | 麦克风采集 | sounddevice（WASAPI） | sounddevice（ALSA → PipeWire） |
-| 系统声采集（听别人说话） | pyaudiowpatch（WASAPI loopback） | `parec` 读 `<sink>.monitor` |
-| 译音虚拟声卡 | PortAudio 打开 VB-Cable / VoiceMeeter | PipeWire loopback 声明 + `pw-cat` |
-| 手腕屏 | pyopenvr 的 IVROverlay | WayVR 自定义面板 + `wayvrctl` IPC |
+| 系统声采集（听别人说话） | pyaudiowpatch（WASAPI loopback） | `pw-record` 抓 `<sink>` 的 monitor |
+| 译音虚拟声卡 | PortAudio 打开 VB-Cable / VoiceMeeter | PipeWire 运行期声明 + `pw-cat` 写入 |
+| 手腕屏 | pyopenvr 的 IVROverlay | 自建 OpenXR overlay（XR_EXTX_overlay + EGL_MNDX） |
 | 可写目录 | `%APPDATA%` | `$XDG_DATA_HOME` |
 | 打开文件夹 | `os.startfile` | `xdg-open` |
 
 这一层的目标是：**让共享代码（engine / gui / app）看不到平台差异**，
 并让平台独占的实现各自独立成模块，从而能在打包时被 `--exclude-module` 干净剔除
 （见 `scripts/build_exe.py` 的 `EXCLUDE_WIN` 与 AppImage 构建脚本的反向排除）。
-「Windows 产物里不允许出现 wayvr / pipewire 相关内容」这条靠
+「Windows 产物里不允许出现 pipewire / openxr 相关内容」这条靠
 「模块边界 + 构建排除 + 自动校验」结构性保证，不靠人记。
 
 ## 边界约定（重要，别破坏）

@@ -9,5 +9,6 @@ openvr>=1.26.701          # SteamVR overlay（手腕屏）
 #
 # ⚠️ 这三个都是 Windows 独占，**不要**加进公共 requirements.txt：
 #   - PyAudioWPatch / pycaw 在 Linux 上没有 wheel
-#   - openvr 的 Linux 用法另说：Linux 侧手腕屏走 WayVR（外部程序 + IPC，见
-#     vlt/output/wayvr.py），不需要 Python 的 openvr 绑定
+#   - openvr 的 Linux 用法另说：Linux 侧手腕屏走**自建 OpenXR**
+#     （vlt/output/openxr_overlay.py + requirements-linux.txt 的 pyopenxr），
+#     不需要 Python 的 openvr 绑定

@@ -3,13 +3,17 @@
 # 用法：pip install -r requirements-linux.txt
 -r requirements.txt
 
-# 目前**没有任何 Linux 独占的 Python 依赖**，这不是遗漏，是设计结果：
+# 手腕屏 → **自建 OpenXR overlay**（vlt/output/openxr_overlay.py）：我们的进程作为
+# XR_EXTX_overlay 会话直接连 Monado / WiVRn 的合成器，不依赖 WayVR 之类的第三方管理器。
+# 需要 pyopenxr（它会顺带拖进 PyOpenGL / glfw —— 我们只用它调 xr.*，
+# GL/EGL 绑定是纯 ctypes 调 libEGL / libwayland-client）。
+pyopenxr>=1.1.6301
+
+# 其余 Linux 功能都不需要额外的 Python 包：
+#   * 系统声采集 → `pw-record` 子进程读 PCM（PipeWire 原生，monitor 语义）
+#   * 虚拟声卡   → 运行期声明 PipeWire 节点（capture 侧用 Audio/Sink/Internal）＋ `pw-cat` 写入
+#   * 麦克风     → sounddevice（在公共依赖里），PortAudio 走 ALSA
 #
-#   * 手腕屏     → 走 WayVR（外部程序）。我们只调 `wayvrctl` 改文本，不需要 PyOpenXR /
-#                  PyOpenGL / 图形绑定 —— 渲染全由 WayVR 负责。
-#   * 系统声采集 → 走 `parec`（pipewire-pulse 提供），子进程读 PCM，不需要 Python 侧绑定。
-#   * 虚拟声卡   → PipeWire 原生声明（libpipewire-module-loopback），用 `pw-cat` 写入。
-#   * 麦克风     → sounddevice（已在公共依赖里），PortAudio 走 ALSA 即可。
-#
-# 需要系统层具备（非 pip 依赖，由 setup.sh 检查）：
-#   pipewire + pipewire-pulse、wayvr + wayvrctl
+# 需要系统层具备（非 pip 依赖，setup.sh 会体检）：
+#   pipewire（pw-dump / pw-record / pw-cat）
+#   OpenXR 运行时（Monado 或 WiVRn）＋ libEGL ＋ libwayland-client

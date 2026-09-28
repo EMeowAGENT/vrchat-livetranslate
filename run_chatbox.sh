@@ -2,7 +2,7 @@
 # 我说中文 → 译文进 VRChat chatbox 气泡（与 run_chatbox.bat 对应）。
 #
 # 这条腿**完全不依赖 VR**：chatbox 走的是 VRChat 的 OSC（UDP 127.0.0.1:9000），
-# 所以 Linux 上不装 WayVR 也能用。
+# 所以 Linux 上不需要 OpenXR 运行时（Monado / WiVRn）也能用。
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 PY=".venv/bin/python"

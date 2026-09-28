@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VRChat 实时同传 —— Linux 环境安装
 #
-# 做的事：建 Python 3.11 虚拟环境 → 装依赖 → 体检系统层依赖（PipeWire / WayVR）→ 提示下一步
+# 做的事：建 Python 3.11 虚拟环境 → 装依赖 → 体检系统层依赖（PipeWire / OpenXR）→ 提示下一步
 #
 # 为什么单独钉 3.11：项目在 Windows 侧就是 3.11 验证的；本机若是更新的版本
 # （如 3.14）不一定每个依赖都有 wheel。用独立 venv 而不是系统解释器，
@@ -63,13 +63,28 @@ check_cmd pw-dump  "枚举音频设备"     "pacman -S pipewire"
 check_cmd pw-record "采集系统声音（听别人说话）" "pacman -S pipewire"
 check_cmd pw-cat   "写入虚拟声卡（译音输出）"   "pacman -S pipewire"
 
-# WayVR 是手腕屏的依赖：它自己负责 XR 渲染，我们只用 wayvrctl 改面板文本
-if command -v wayvrctl >/dev/null 2>&1 && command -v wayvr >/dev/null 2>&1; then
-    echo "      OK   wayvr / wayvrctl（手腕屏）"
+# 手腕屏 → 自建 OpenXR overlay：需要 pyopenxr（python 侧）+ OpenXR 运行时 + EGL/Wayland
+if "$PY" -c "import xr" >/dev/null 2>&1; then
+    echo "      OK   pyopenxr（手腕屏）"
 else
-    echo "      缺   wayvr / wayvrctl（手腕屏，可选）"
-    echo "           → 装法见 https://wayvr.org/docs/basics/installation/"
-    echo "             （或 pacman -S wayvr-git；不装的话只用 chatbox 也行）"
+    echo "      缺   pyopenxr（手腕屏）→ 重跑本脚本，或 pip install -r requirements-linux.txt"
+    missing=1
+fi
+
+if ls /usr/share/openxr/1/*.json >/dev/null 2>&1 \
+   || [ -f "$HOME/.config/openxr/1/active_runtime.json" ]; then
+    echo "      OK   OpenXR 运行时（Monado / WiVRn）"
+else
+    echo "      缺   OpenXR 运行时（手腕屏，可选）"
+    echo "           → Monado：pacman -S monado    WiVRn：AUR wivrn-server"
+    echo "             （不装的话只用 chatbox 也行）"
+fi
+
+if [ -e /usr/lib/libEGL.so.1 ] && [ -e /usr/lib/libwayland-client.so.0 ]; then
+    echo "      OK   libEGL / libwayland-client（手腕屏 GL 绑定）"
+else
+    echo "      缺   libEGL / libwayland-client → pacman -S mesa libglvnd wayland"
+    missing=1
 fi
 
 # 麦克风采集走 sounddevice(ALSA)，需要 libportaudio

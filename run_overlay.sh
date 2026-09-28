@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 别人说话 → 中文显示在手腕屏（与 run_overlay.bat 对应）。
 #
-# Linux 上的手腕屏由 **WayVR** 承担 XR 渲染：我们只往它的自定义面板里改文本，
-# 不自己写 OpenXR 客户端。需要：
-#   1) WayVR 已安装（wayvr + wayvrctl）
-#   2) WayVR 正在运行（Monado / WiVRn / SteamVR 任一）
-#   3) 面板已在 WayVR 里注册（首次运行由本程序写入 ~/.config/wayvr/conf.d/panels.yaml）
+# Linux 上的手腕屏由本程序**自建 OpenXR overlay** 承担：直接作为 XR_EXTX_overlay
+# 会话连 Monado / WiVRn 的合成器，不需要 WayVR 之类的第三方管理器、不写配置、不重启。
+# 需要：
+#   1) 装了 pyopenxr（./setup.sh 会装，见 requirements-linux.txt）
+#   2) OpenXR 运行时在跑（Monado 或 WiVRn），且头显已连接
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 PY=".venv/bin/python"
@@ -16,18 +16,15 @@ echo "============================================"
 echo "  停止：按 Ctrl+C"
 echo
 
-if ! command -v wayvrctl >/dev/null 2>&1; then
-    echo "[!] 没装 wayvrctl —— 手腕屏起不来（其它腿不受影响）。"
-    echo "    装法见 https://wayvr.org/docs/basics/installation/"
+if ! "$PY" -c "import xr" >/dev/null 2>&1; then
+    echo "[!] 没装 pyopenxr —— 手腕屏起不来（其它腿不受影响）。"
+    echo "    重跑 ./setup.sh，或 pip install -r requirements-linux.txt"
     echo "    或改用 ./run_chatbox.sh（纯文本气泡，不需要 VR）"
-    echo
-elif ! wayvrctl window-list >/dev/null 2>&1; then
-    echo "[!] WayVR 没在运行（连不上它的 IPC）—— 手腕屏起不来，其它腿不受影响。"
-    echo "    先启动 Monado / WiVRn / SteamVR，再启动 wayvr。"
     echo
 fi
 
-echo "说明：采集的是**系统播放输出**（PipeWire 的 sink monitor），"
+echo "说明：手腕屏需要 OpenXR 运行时（Monado / WiVRn）在跑、且头显已连接；"
+echo "      采集的是**系统播放输出**（PipeWire 的 sink monitor），"
 echo "      所以 VRChat 的声音必须真的在放（静音/未开始播放就采不到）。"
 echo
 
