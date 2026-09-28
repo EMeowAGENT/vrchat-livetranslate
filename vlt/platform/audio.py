@@ -19,6 +19,7 @@ Windows 上实测访问违规（`faulthandler` 抓到 `pyaudiowpatch` 的 read�
 """
 from __future__ import annotations
 
+import array
 import asyncio
 import logging
 import threading
@@ -148,3 +149,70 @@ class SoundDeviceMicSource(QueueAudioSource):
                                dtype="int16", blocksize=self._blocksize,
                                device=self._device, callback=callback):
             stop.wait()
+
+
+def _mix_pcm16(chunks: list[bytes]) -> bytes:
+    """把多路 s16le PCM **逐样本相加并限幅**成一路（长度取最长的那路）。
+
+    刻意不引入 numpy：本模块是「共享、无重依赖」的那一层，而每 100ms 只有千余个样本，
+    纯 Python 足够快（实测一条 100ms 块 2 路混音远低于 1ms）。
+    """
+    n = max(len(c) for c in chunks) // 2
+    if n <= 0:
+        return b""
+    acc = array.array("i", bytes(4 * n))
+    for c in chunks:
+        a = array.array("h")
+        a.frombytes(bytes(c[: (len(c) // 2) * 2]))
+        for i in range(len(a)):
+            acc[i] += a[i]
+    out = array.array("h", bytes(2 * n))
+    for i in range(n):
+        v = acc[i]
+        out[i] = -32768 if v < -32768 else (32767 if v > 32767 else v)
+    return out.tobytes()
+
+
+class MixedAudioSource:
+    """把**多路**采集源混成一路（对外接口与 `AudioSource` 一致）。
+
+    用途：VRChat 会开多个播放流（见 `vlt/platform/linux.py: find_vrchat_output_streams`），
+    每一路各开一个 `pw-record`，在这里把 PCM 相加限幅后当**一路**喂给引擎。
+
+    为什么是相加而不是取其一：多个流可能各自承载一部分声音（用户实测口径是「两个都抓」）。
+    各路采样格式一致（16k 单声道 s16le），所以是逐样本相加后限幅。
+
+    ⚠️ 若将来发现这些流其实是**同一份声音的重复**（相加会爆音），把 `read()` 里的
+    `_mix_pcm16(...)` 换成取平均（逐样本除以路数）即可 —— 语义差异只在这一处。
+    """
+
+    def __init__(self, sources: list) -> None:
+        if not sources:
+            raise ValueError("MixedAudioSource 至少需要一路采集源")
+        self._sources = list(sources)
+        self.rate = self._sources[0].rate
+        self.channels = self._sources[0].channels
+
+    @property
+    def count(self) -> int:
+        return len(self._sources)
+
+    async def read(self, timeout: float = 1.0) -> bytes | None:
+        """并发读各路；全部都没数据时才返回 None（「还活着但暂时没声音」）。"""
+        chunks = await asyncio.gather(*(s.read(timeout) for s in self._sources),
+                                      return_exceptions=True)
+        pcm = [bytes(c) for c in chunks if isinstance(c, (bytes, bytearray)) and c]
+        if not pcm:
+            return None
+        if len(pcm) == 1:
+            return pcm[0]              # 常见情形：只有一路在出声，不必混
+        return _mix_pcm16(pcm)
+
+    def close(self) -> None:
+        """幂等收尾：一路关失败不拖垮其它路。"""
+        for s in self._sources:
+            try:
+                s.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[mix] 关闭一路采集源失败（忽略）：%s: %s",
+                            type(exc).__name__, exc)

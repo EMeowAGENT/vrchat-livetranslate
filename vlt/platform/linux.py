@@ -207,6 +207,84 @@ def query_loopback_devices() -> list[dict]:
     return rows
 
 
+# VRChat（Proton/Wine）的**播放输出**在 PipeWire 里是 `Stream/Output/Audio` 节点，
+# 而**不是** `Audio/Sink` —— 所以 `query_loopback_devices()`（只列 sink）永远看不到它，
+# 「VRChat 音频」下拉里自然也就选不到。实测节点名取自可执行文件：
+# `application.name` / `node.name` = `"VRChat.exe"`（同一进程会开 2 个输出流，
+# 都连到默认 sink；定向采集任一个都是 VRChat 的声音）。
+#
+# 为什么抓流而不抓默认 sink：默认 sink 上是**所有**应用混在一起的声音
+# （实测同一条链路上还有 Google Chrome / vesktop / 系统提示音），
+# 抓它会把音乐、浏览器声音一起当成「游戏内语音」喂给翻译模型。
+_VRCHAT_HINTS = ("vrchat",)
+
+# 最多抓几路 VRChat 输出流。实测正常是 2 路；给个上限纯属防御（万一 Wine 抽风开一堆）。
+VRCHAT_MAX_STREAMS = 8
+
+
+def find_vrchat_output_streams() -> list[dict]:
+    """找 VRChat 的**全部音频输出流**节点（Linux 专用，`Stream/Output/Audio`）。
+
+    ⚠️ VRChat（Wine/Proton 经 pipewire-pulse）会开**多个**播放流：实测同一次运行里
+    有 `media.name` = `audio stream #1` 与 `audio stream #5` 两个节点，各自可能承载
+    一部分声音（也可能有一个处于 `pulse.corked` 暂停态）。所以这里返回**全部**，
+    由调用方每一路开一条 `pw-record` 再混音 —— 只抓第一个会丢声音。
+
+    返回与 `query_loopback_devices()` 同形状的 dict，外加：
+      * `media_class`：固定 `Stream/Output/Audio`；
+      * `serial`：`object.serial` —— **这才是 `pw-record --target=` 要用的标识**。
+        全部节点的 `node.name` 都是 `VRChat.exe`，按名字无法区分多个流；
+        而 `--target` 只接受「**序列号或名称**」，传数字 node id 会被当成名字匹配落空
+        （实测：`--target=147` 没连到 147，而是回落到默认目标）。用 serial 精确。
+
+    刻意用 `_pw_dump(force=True)`：调用方是「等 VRChat 出现」的轮询，
+    2 秒 TTL 缓存会把「刚刚启动」的流节点挡在门外。
+
+    找不到 VRChat（没跑 / 还没出声）返回空列表。
+    """
+    try:
+        dump = _pw_dump(force=True)
+    except PipeWireUnavailable:
+        return []
+    rate = _default_rate(dump)
+    found: list[tuple[int, dict]] = []
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = (obj.get("info") or {}).get("props") or {}
+        # ⚠️ 这里**不能**走 `_nodes()`：它按 `media.class` 前缀 `Audio/` 过滤，
+        # 而应用流是 `Stream/Output/Audio`，前缀是 `Stream/`。
+        if str(props.get("media.class") or "") != "Stream/Output/Audio":
+            continue
+        hay = (str(props.get("application.name") or "") + " "
+               + str(props.get("node.name") or "")).lower()
+        if not any(hint in hay for hint in _VRCHAT_HINTS):
+            continue
+        node_name = str(props.get("node.name") or "")
+        serial = props.get("object.serial")
+        if not node_name or serial is None:
+            continue
+        stream_name = str(props.get("media.name") or "")
+        label = str(props.get("application.name") or node_name)
+        if stream_name:
+            label = f"{label} ({stream_name})"       # 多个流时日志里才好区分
+        found.append((int(obj.get("id") or 0), {
+            "index": int(obj.get("id") or 0),
+            "name": label,
+            "node_name": node_name,
+            "serial": str(serial),
+            "defaultSampleRate": int(rate),
+            "maxInputChannels": _channels(props),
+            "media_class": "Stream/Output/Audio",
+        }))
+    found.sort(key=lambda t: t[0])                    # 按 node id 稳定排序（同一次快照内确定）
+    if len(found) > VRCHAT_MAX_STREAMS:
+        log.warning("[vrchat] 匹配到 %d 路 VRChat 输出流，只取前 %d 路",
+                    len(found), VRCHAT_MAX_STREAMS)
+        found = found[:VRCHAT_MAX_STREAMS]
+    return [d for _id, d in found]
+
+
 def default_output_index() -> int:
     """WirePlumber 的默认输出（sink）节点 id；取不到返回 -1。
 

@@ -111,6 +111,24 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 
 界面上「输出」那一行勾什么就出什么；手腕屏那条腿起不来只影响它自己，翻译照常。
 
+### Linux 上的音频设备（只有「麦克风」需要选）
+
+Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」只有**一个下拉**（`麦克风`），
+`VRChat 音频` 与 `译音输出` 两项在 Linux 上不暴露给用户。
+
+- **「VRChat 音频」（别人说话）自动跟随 VRChat**：采集目标是 VRChat 自己的音频输出流
+  （PipeWire 里的 `Stream/Output/Audio`，节点名通常就是 `VRChat.exe`），**不是**系统默认输出。
+  拿默认输出来抓会把浏览器 / 音乐 / 系统提示音一起当成「游戏内语音」喂给模型，所以**不做**这种回落。
+- VRChat 会开**多路**播放流（实测 2 路），本程序会**每一路都抓、相加混音** ——
+  只抓一路可能丢声音。日志里会写清抓到几路，例如
+  `[loopback] 检测到 VRChat 音频：2 路（…[14061]、…[14002]）`。
+- VRChat **没在跑**时，这条腿不会退出，而是显示「等待 VRChat 音频输出」并空转等待；
+  VRChat 中途退出、或播放流增减，都会回到等待/重开，重新启动 VRChat 会自动接上，**不用重启本程序**。
+- **译音输出固定写到本程序自建的虚拟麦**（`vlt_mic_sink` / `vlt_mic_source`），
+  同样不需要选输出设备；「输出」那一行的「译音输出」勾选框照旧是这条腿的总开关。
+- `config.yaml` 里的 `capture.loopback_device` 与 `output.audio.device_name` 在 Linux 上**被忽略**
+  （键仍保留，Windows 侧照常生效），界面也不再把它们写出来。
+
 ### 手腕屏位置怎么调
 
 **两种办法，都会写回 `config.yaml` 并立刻热重载（不用重启）**：
@@ -140,7 +158,8 @@ overlay:
 - `vlt_mic_sink`：程序往这里写译音
 - `vlt_mic_source`：**在 VRChat 里把这个选成麦克风**（显示名 `VLT Mic`）
 
-在界面上勾「译音输出」即可。程序退出时这对节点会被自动销毁。
+在界面上勾「译音输出」即可（**不需要、也没有**输出设备下拉 —— 程序固定往 `vlt_mic_sink` 写）。
+程序退出时这对节点会被自动销毁。
 
 > 📌 **先起本程序，再起 VRChat**：设备只在程序运行期间存在，VRChat 的设备列表是在启动时枚举的。
 > 如果 VRChat 先启动了，去它的音频设置里刷新一下，或者把 `VLT Mic` 设成系统默认输入源。
@@ -154,16 +173,19 @@ overlay:
 | 配置项 | Windows | Linux |
 |---|---|---|
 | `capture.mic_device` | 设备名 | 设备名（`sounddevice` 按名打开） |
-| `capture.loopback_device` | WASAPI loopback 设备名 | **PipeWire 输出节点的名字**（`pw-dump` 里的 `node.description`）。留空 = 自动挑默认输出 |
-| `output.audio.device` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink` |
+| `capture.loopback_device` | WASAPI loopback 设备名 | **忽略** —— 采集目标固定为 VRChat 自己的输出流（自动等待 VRChat 启动） |
+| `output.audio.device` / `device_name` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink`，`device_name` 被忽略 |
 | `overlay.font` | `C:/Windows/Fonts/msyh.ttc` | **留空即可**，自动用 fontconfig 找中日韩字体 |
 | `overlay.backend` | `auto` | `auto`（= 自建 OpenXR）/ `null`（禁用） |
 
 其它（方向、语言、chatbox 参数、静默闸门、repeat 抑制、字号、配色……）**完全一致**。
 
-> 想看看系统里有哪些可采集的输出：
+> 想确认 VRChat 的音频输出流在不在（Linux 采集的就是它）：
 > ```bash
-> pw-dump | python3 -c "import json,sys; [print(p['node.description']) for o in json.load(sys.stdin) if o.get('type')=='PipeWire:Interface:Node' and (p:=(o.get('info') or {}).get('props') or {}).get('media.class')=='Audio/Sink']"
+> pw-dump | python3 -c "import json,sys;
+> [print(o['id'], (p:=(o.get('info') or {}).get('props') or {}).get('application.name'), p.get('node.name'), p.get('media.class'))
+>  for o in json.load(sys.stdin)
+>  if o.get('type')=='PipeWire:Interface:Node' and (p:=(o.get('info') or {}).get('props') or {}).get('media.class')=='Stream/Output/Audio']"
 > ```
 
 ---
@@ -187,7 +209,9 @@ overlay:
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| 采不到「别人说话」 | VRChat 的声音没走我们抓的那个 sink | `pw-dump` 看 VRChat 输出到哪个 sink；或把物理输出的名字填进 `capture.loopback_device` |
+| 一直显示「等待 VRChat 音频输出」 | VRChat 没在跑（或输出流还没建立） | 起 VRChat。日志里出现 `[loopback] 检测到 VRChat 音频：…` 即已接上，**不用重启本程序** |
+| 采不到「别人说话」 | 日志里始终没有「检测到 VRChat 音频」 | 用上面那条 `pw-dump` 命令确认 VRChat 有没有 `Stream/Output/Audio` 节点；没有说明 VRChat 没起来 / 没在放声音 |
+| 别人说话里混进了音乐、浏览器声 | ⚠️ 不该发生 | 采集的是 VRChat 自己的输出流，不是默认输出；若真混进来请报 bug，并附 VRChat 节点的 `node.name` |
 | VRChat 的麦克风列表里没有 `VLT Mic` | 设备只在程序运行期间存在 | **先起本程序再起 VRChat**；或在 VRChat 音频设置里刷新设备列表 |
 | 对方听不到译音 | 译音腿没开 / VRChat 没选 `VLT Mic` | 界面上勾「译音输出」，并在 VRChat 里把麦克风选成 `VLT Mic` |
 | `pactl: Connection refused` | PulseAudio 兼容层没跑/不可达 | **不影响我们** —— 全程用 `pw-*` 原生工具。用 `pw-dump` 验证 PipeWire 本身是否正常 |

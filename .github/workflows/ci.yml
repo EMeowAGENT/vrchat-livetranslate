@@ -165,7 +165,7 @@ jobs:
           # 需要真实窗体的（无 xvfb 时跳过；有 xvfb 就跑）
           GUI_TESTS="tests/test_api_key_gui.py tests/test_config_save.py tests/test_gui_rows.py \
                      tests/test_i18n.py tests/test_overlay_conversation.py tests/test_sponsor.py \
-                     tests/test_textin.py tests/test_update_dialog.py"
+                     tests/test_textin.py tests/test_update_dialog.py tests/test_vrchat_capture.py"
 
           fail=0
           for t in tests/test_*.py; do
@@ -187,3 +187,65 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+  # ------------------------------------------------------------------
+  # Linux AppImage：构建 + **独立验收**。
+  #
+  # 「Linux 上只用 OpenXR、Windows 上只用 SteamVR」这条假设不能只写在文档里。
+  # 这里把它变成红灯门禁：
+  #   * 构建脚本反向删掉 Windows 独占实现（vlt/platform/win.py、openvr 手腕屏后端）；
+  #   * scripts/verify_appimage.py 断言它们**真的不在**产物里，并跑包内导入（-P，防
+  #     误读仓库源码）+ 离线渲染；
+  #   * 字体检查挂在 xvfb 下**真跑**（无显示器时脚本会自己标「跳过 = 未验证」，不硬红）。
+  appimage:
+    needs: linux-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: 装系统依赖（构建 AppImage + 验收）
+        run: |
+          sudo apt-get update
+          # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
+          # gcc make + Xft/freetype/fontconfig/xorg 头文件 —— 构建脚本要现编 Xft 版 Tk
+          # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
+          sudo apt-get install -y --no-install-recommends \
+            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0 \
+            gcc make libxft-dev libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev xorgproto
+
+      - name: 装 uv 并拉独立 Python 3.11（构建脚本要求可搬运的解释器）
+        run: |
+          python -m pip install --upgrade pip uv
+          uv python install 3.11
+
+      - name: 建 .venv 并装 Linux 依赖
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements-linux.txt
+
+      - name: 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: appimage-tools-${{ runner.os }}-${{ hashFiles('scripts/build_appimage.sh') }}
+
+      - name: 构建 AppImage
+        run: ./scripts/build_appimage.sh
+
+      - name: ★ 独立验收（xvfb 下让字体检查真跑）
+        run: |
+          xvfb-run -a .venv/bin/python scripts/verify_appimage.py \
+            dist/VRChatLiveTranslate-x86_64.AppImage
+
+      - name: 上传产物（方便人工复验）
+        uses: actions/upload-artifact@v4
+        with:
+          name: VRChatLiveTranslate-AppImage
+          path: dist/VRChatLiveTranslate-x86_64.AppImage
+          retention-days: 7

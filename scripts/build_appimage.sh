@@ -129,6 +129,22 @@ cp -r "$REPO/testdata" "$APPDIR/usr/app/"
 find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 echo "    源码已就位"
 
+# 1d. ★ 反向排除：删掉 **Windows 独占实现**
+#
+# 这是 Windows 版 `--exclude-module` 的镜像操作，必须做，而且必须在这里做：
+# AppImage 里的 `vlt/` 是**明文 .py**，整份拷进去就等于把 Windows 那套也发出去了。
+#   * vlt/platform/win.py        —— WASAPI / pycaw / Win32（`platform/__init__.py`
+#                                   只在 IS_WINDOWS 时才 import 它，删掉安全）
+#   * vlt/output/openvr_overlay.py —— SteamVR 手腕屏后端
+# 漏删的后果不是「变胖」而是**边界破功**：`scripts/check_platform_purity.py
+# --platform linux` 会判红（历史上这条判据从没跑过，所以泄漏一直存在）。
+for _win_mod in "vlt/platform/win.py" "vlt/output/openvr_overlay.py"; do
+    rm -f "$APPDIR/usr/app/$_win_mod"
+    [ -e "$APPDIR/usr/app/$_win_mod" ] && die "反向排除失败：$_win_mod 还在 AppDir 里"
+done
+find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+echo "    已反向排除 Windows 独占实现（vlt/platform/win.py、vlt/output/openvr_overlay.py）"
+
 
 # ---------------------------------------------------------------- Xft 版 Tk
 
@@ -286,7 +302,9 @@ cp "$REPO/assets/app.png" "$APPDIR/${APP_ID}.png"
 step "3/6 构建前自检（在 AppDir 里直接跑）"
 APP_PY="$APPDIR/usr/python/bin/python${PYVER}"
 export PYTHONPATH="$APPDIR/usr/app:$SITE_DST"
-if "$APP_PY" -c "
+# ⚠️ `-P` 不能省：`python -c` 会把当前目录放在 sys.path 最前，PYTHONPATH 排在后面，
+#    于是从仓库根跑构建时，下面的导入检查读的是**仓库源码**而不是刚组装好的 AppDir。
+if "$APP_PY" -P -c "
 import vlt.gui, vlt.engine, vlt.output.openxr_overlay, vlt.platform
 import numpy, PIL, websockets, yaml, sounddevice, pythonosc, xr, OpenGL
 print('    导入检查通过')
@@ -305,52 +323,18 @@ OUT_IMG="$OUT_DIR/${APP_NAME}-x86_64.AppImage"
 chmod +x "$OUT_IMG"
 echo "    ✅ $OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）"
 
-# ---------------------------------------------------------------- 5. 冒烟（安全的那种）
+# ---------------------------------------------------------------- 5. 验收（转调独立脚本）
+#
+# 验收逻辑**不写在这里**：它要能单独对着任意 AppImage 跑（CI 直接调它，不必重新构建），
+# 见 scripts/verify_appimage.py。这一步只是构建流程里的自动转调。
 if [ "$VERIFY" -eq 1 ]; then
-    step "5/6 冒烟检查（**只做离线检查，不连 VR / 不碰音频**）"
-    EXTRACT="${WORK}/extract"
-    rm -rf "$EXTRACT"
-    ( cd "$WORK" && "$OUT_IMG" --appimage-extract >/dev/null 2>&1 ) || true
-    if [ -d "${WORK}/squashfs-root" ]; then
-        mv "${WORK}/squashfs-root" "$EXTRACT"
-        EPY="$EXTRACT/usr/python/bin/python${PYVER}"
-        EPYTHONPATH="$EXTRACT/usr/app:$EXTRACT/usr/python/lib/python${PYVER}/site-packages"
-        PYTHONPATH="$EPYTHONPATH" "$EPY" -c "import vlt.gui, vlt.output.openxr_overlay; print('    ✅ 解包后仍能导入')" \
-            || die "解包后的 AppImage 导入失败"
-        # 离线渲染一帧（不连 VR、不碰音频；这是 Windows 侧 --demo 的等价物）
-        PYTHONPATH="$EPYTHONPATH" "$EPY" -m vlt.output.overlay --out /tmp/vlt-appimage-smoke.png >/dev/null 2>&1 \
-            && echo "    ✅ 离线渲染一帧成功（/tmp/vlt-appimage-smoke.png）" \
-            || echo "    ⚠️ 离线渲染没成功（不影响主功能，但值得看一眼）"
-        # ★ 字体自检：Tk 换对了才看得到中日韩族。
-        #   退出码：0 = 有中日韩族；1 = Tk 起来了但没有中日韩族（构建有问题，硬失败）；
-        #          2 = Tk 起不来（无显示器，CI 里正常）→ 只提示。
-        set +e
-        PYTHONPATH="$EPYTHONPATH" "$EPY" - <<'PYEOF'
-import sys
-try:
-    import tkinter as tk, tkinter.font as tkfont
-    root = tk.Tk(); root.withdraw()
-except Exception as exc:
-    print(f"    （无显示器，跳过字体自检：{type(exc).__name__}）"); sys.exit(2)
-fams = list(tkfont.families(root)); root.destroy()
-cjk = [f for f in fams if any(k in f for k in ("CJK", "Source Han", "Noto Sans SC", "WenQuanYi"))]
-print(f"    字体族 {len(fams)} 个，其中中日韩 {len(cjk)} 个"
-      + (f"（例：{cjk[0]}）" if cjk else "  ← 豆腐块！"))
-sys.exit(0 if cjk else 1)
-PYEOF
-        font_rc=$?
-        set -e
-        if [ "$font_rc" = "1" ]; then
-            die "AppImage 里的 Tk 看不到中日韩字体 —— Xft 版 Tk 没换成功，界面会是豆腐块"
-        elif [ "$font_rc" = "0" ]; then
-            echo "    ✅ 中日韩字体可见"
-        fi
-    else
-        echo "    ⚠️ 解包失败，跳过冒烟（AppImage 本身已产出）"
-    fi
-    rm -rf "$EXTRACT"          # 冒烟用完就清，别在 build/ 里留一份 250MB 的解包副本
+    step "5/6 AppImage 独立验收（平台纯度 + 包内导入 + 离线渲染 + 字体）"
+    "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG" \
+        || die "AppImage 验收未通过（上面有明细）"
 else
-    step "5/6 冒烟检查已按 --no-verify 跳过"
+    step "5/6 验收已按 --no-verify 跳过"
+    echo "    ⚠️ 跳过 = **未验证**：产物已生成，但平台隔离/导入/渲染都没检查过。"
+    echo "       补跑：$VENV_PY scripts/verify_appimage.py $OUT_IMG"
 fi
 
 step "6/6 完成"

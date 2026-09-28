@@ -151,6 +151,10 @@ def detect_ui_language() -> str:
     """探测系统界面语言，返回本项目支持的代码（zh/en/ja/ko/ru）。
 
     两端口径必须一致：**探测不到 / 不支持的语言一律回落 "en"** ——
-    外国用户按英文接待远比按中文合理（详见 vlt/i18n.py 的 detect_system_language）。
+    外国用户按英文接待远比按中文合理。
+
+    `vlt/i18n.py: detect_system_language()` 就是转调这里（界面启动时用它定语言），
+    所以这条口径只有一处实现：Windows 在 `win.py`（读 LANGID），Linux 在 `linux.py`
+    （读 `LC_ALL`/`LC_MESSAGES`/`LANG`）。
     """
     return backend().detect_ui_language()

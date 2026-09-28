@@ -28,7 +28,7 @@ from vlt.config import DEFAULT_CONFIG  # noqa: E402
 #   而且本机根本没有运行时 → available=False → 本用例假红。
 #   本用例验的是「手腕屏归**界面**独占持有」，用假 openvr 驱动的真 `WristOverlay` 才对症。
 from vlt import platform  # noqa: E402
-from vlt.output.overlay import WristOverlay as _RealWristOverlay  # noqa: E402
+from vlt.output.openvr_overlay import WristOverlay as _RealWristOverlay  # noqa: E402
 
 platform.create_wrist_overlay = (  # type: ignore[assignment]
     lambda cfg, config_path=None, dry_run=False:

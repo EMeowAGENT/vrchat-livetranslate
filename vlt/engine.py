@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 from .config import AppConfig, Direction, load_config
 from .devices import enumerate_mic_devices, resolve_device_name
 from . import platform
+from .platform.audio import MixedAudioSource
 from .platform.base import LoopbackTarget
 from .output.chatbox import Chatbox, TokenBucket
 from .output.merger import Merger
@@ -42,13 +43,16 @@ SENTENCE_GAP_S = 0.6
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
+# Linux 采集 VRChat 输出流时，每隔这么久回查一次 PipeWire 图 ——
+# 用来发现「VRChat 退出了」（目标节点消失），及时收尾回到等待。
+VRCHAT_RECHECK_S = 3.0
+
 # 挑「系统声采集」目标时的关键词回退链（小写匹配）。
-# Windows 侧匹配 WASAPI loopback 设备名；Linux 侧匹配 PipeWire 输出节点的 description，
-# 所以两套关键词混在一张表里 —— 命不中的词条在各自平台上自然跳过，不会误伤。
+# **只用于 Windows**（匹配 WASAPI loopback 设备名）。
+# Linux 不走这里：它按应用流节点精确匹配 VRChat（见 pick_vrchat_target），
+# 因为 Linux 上「VRChat 音频」根本不在 sink 列表里，而且抓默认 sink 会混入别的应用。
 LOOPBACK_FALLBACK = [
-    # Windows
     "steam streaming speakers", "vive virtual", "cable input", "voicemeeter",
-    # Linux（VRChat 走 Proton 时，输出节点名通常带 vrchat / steam 字样）
     "vrchat", "vrc", "steam streaming",
 ]
 
@@ -704,9 +708,16 @@ class Engine:
                           stop_event=self._stop_event)
         elif self._source == "loopback":
             capture_cfg = (self._cfg.output or {}).get("capture") or {}
-            loopback_name = capture_cfg.get("loopback_device") or None
+            # Linux 上 loopback_device 配置被忽略（界面已不提供该下拉）：
+            # 采集目标固定为「等 VRChat 的输出流」，见 run_loopback。
+            loopback_name = None if platform.IS_LINUX else (capture_cfg.get("loopback_device") or None)
+            if platform.IS_LINUX and capture_cfg.get("loopback_device"):
+                print("[loopback] Linux：忽略配置里的 loopback_device="
+                      f"{capture_cfg.get('loopback_device')!r}（改为自动等待 VRChat 音频输出）",
+                      flush=True)
             await run_loopback(self._proxy, None, device_name=loopback_name,
-                               stop_event=self._stop_event)
+                               stop_event=self._stop_event,
+                               on_status=self._events.on_status)
 
     async def _feed_pcm(self, path: str) -> None:
         pcm = Path(path).read_bytes()
@@ -1192,6 +1203,68 @@ def pick_loopback_target(patterns: list[str] | None = None,
     return _as_target(loops[0])
 
 
+def pick_vrchat_targets() -> list[LoopbackTarget]:
+    """Linux：定位 **VRChat 的全部音频输出流**（= 别人说话）。找不到返回空列表。
+
+    ⚠️ 刻意**不回落**到系统默认输出：VRChat 的播放输出在 PipeWire 里是应用流节点
+    （`Stream/Output/Audio`），默认 sink 上还混着浏览器、音乐、系统提示音 ——
+    抓默认 sink 会把它们一起当成「游戏内语音」喂给模型。
+    用户口径：VRChat 没跑就**等**它跑起来，绝不改抓别的东西。
+
+    ⚠️ 返回**列表**：VRChat（Wine）实测会开 2 个播放流（`audio stream #1` / `#5`），
+    可能各自承载一部分声音，所以要每一路各开一条 `pw-record` 再混音。
+    `LoopbackTarget.id` 用 `object.serial` —— `pw-record --target=` 只认「序列号或名称」，
+    而这些节点的 `node.name` 全是 `VRChat.exe`，按名字区分不了多个流。
+
+    平台差异压在 `CaptureBackend.find_vrchat_output_streams()` 后面
+    （Windows 侧没有这个概念，`getattr` 取不到就返回空列表，永远走不到这里）。
+    """
+    if not platform.IS_LINUX:
+        return []
+    finder = getattr(platform.device_backend(), "find_vrchat_output_streams", None)
+    if finder is None:
+        return []
+    try:
+        rows = finder()
+    except Exception as exc:  # noqa: BLE001 — 查不到不该让这条腿崩掉，交由上层重试
+        print(f"[loopback] ⚠️ 查询 VRChat 音频输出失败：{type(exc).__name__}: {exc}", flush=True)
+        return []
+    targets: list[LoopbackTarget] = []
+    for d in rows or []:
+        ident = str(d.get("serial") or "")
+        if not ident:
+            continue
+        targets.append(LoopbackTarget(
+            id=ident,
+            name=str(d.get("name") or d.get("node_name") or ident),
+            sample_rate=int(d.get("defaultSampleRate", 48000)),
+            channels=int(d.get("maxInputChannels", 2)),
+        ))
+    return targets
+
+
+async def _wait_for_vrchat(stop_event, on_status=None, *,
+                           poll_s: float = 2.0) -> list[LoopbackTarget] | None:
+    """Linux：轮询等 VRChat 的音频输出流出现。返回 None = 被 stop 打断。
+
+    「等」而不是「回落」是刻意的：这条腿只该抓 VRChat。VRChat 没起来时，
+    采集腿保持空转等待，启动 VRChat 后自动接上（用户口径）。
+    """
+    announced = False
+    while not _stop_requested(stop_event):
+        targets = pick_vrchat_targets()
+        if targets:
+            return targets
+        if not announced:
+            announced = True
+            msg = "等待 VRChat 音频输出（VRChat 启动后会自动开始采集）"
+            print(f"[loopback] {msg}", flush=True)
+            if on_status is not None:
+                on_status("info", msg)
+        await asyncio.sleep(poll_s)
+    return None
+
+
 def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65) -> np.ndarray:
     """窗口化 sinc 低通，供降采样前的抗混叠用。
 
@@ -1258,14 +1331,20 @@ def to_16k_mono(pcm: bytes, rate: int, channels: int) -> bytes:
 
 async def run_loopback(session, tele, patterns: list[str] | None = None,
                        seconds: float = 0.0, device_name: str | None = None,
-                       stop_event: threading.Event | None = None) -> None:
+                       stop_event: threading.Event | None = None,
+                       on_status: Callable[[str, str], None] | None = None) -> None:
     """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。
 
     平台差异全部压在 `CaptureBackend.open_loopback()` 后面：
-      * Windows：WASAPI loopback（pyaudiowpatch），非阻塞轮询 + 读线程
-      * Linux  ：`pw-record --target=<sink>`，抓该 sink 的 monitor
-    本函数只做「挑一个目标 → 拉块 → 送会话」。
+      * Windows：WASAPI loopback（pyaudiowpatch），非阻塞轮询 + 读线程；
+                 端点由 `pick_loopback_target()` 挑（界面手选 / 回退链 / 默认输出）。
+      * Linux  ：`pw-record --target=<VRChat 输出流>`，**等 VRChat 出现再采**，
+                 VRChat 退出（输出流消失）后回到等待，VRChat 重新启动自动续上。
     """
+    if platform.IS_LINUX:
+        await _run_loopback_linux(session, tele, seconds, stop_event, on_status)
+        return
+
     target = pick_loopback_target(patterns, device_name)
     if target is None:
         print("[loopback] ❌ 没找到任何可采集的系统输出"
@@ -1278,6 +1357,76 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
                                lambda: platform.capture_backend().open_loopback(
                                    target, blocksize=CHUNK_BYTES))
     print(f"[loopback] 采集结束，共 {sent} bytes ≈ {sent / 2 / 16000:.0f}s")
+
+
+async def _run_loopback_linux(session, tele, seconds: float, stop_event,
+                              on_status) -> None:
+    """Linux 的 loopback 腿：**等 VRChat → 定向采集（多路混音）→ 流变化 → 再等**。
+
+    为什么不是「挑一个 sink 就开始录」：VRChat 的播放输出是应用流节点，
+    而默认 sink 上同时混着浏览器/音乐/系统提示音 —— 抓 sink 会把它们一起
+    当成「游戏内语音」喂给模型。所以这条腿只在 VRChat 在线时采集；
+    VRChat 没跑（或中途退出）就空转等待，回来时重开 `pw-record`。
+
+    VRChat 会开**多个**播放流（实测 2 路），逐路各开一条 `pw-record` 后混音。
+    """
+    total = 0
+    while not _stop_requested(stop_event):
+        targets = await _wait_for_vrchat(stop_event, on_status)
+        if targets is None:
+            break                                   # 被「停止翻译」打断
+        detail = "、".join(f"{t.name}[{t.id}]" for t in targets)
+        print(f"[loopback] 检测到 VRChat 音频：{len(targets)} 路（{detail}）"
+              f"{targets[0].sample_rate}Hz ×{targets[0].channels}ch → 16kHz 单声道", flush=True)
+        if on_status is not None:
+            on_status("info", f"检测到 VRChat 音频（{len(targets)} 路）→ 开始采集")
+        sent, stopped = await _pump_vrchat_capture(session, tele, stop_event, targets)
+        total += sent
+        if stopped or seconds > 0:
+            break
+        print("[loopback] VRChat 音频输出已变化（退出 / 增减播放流）→ 重新等待/接上", flush=True)
+        if on_status is not None:
+            on_status("warn", "VRChat 音频输出消失 → 等待 VRChat 重新启动")
+    print(f"[loopback] 采集结束，共 {total} bytes ≈ {total / 2 / 16000:.0f}s", flush=True)
+
+
+async def _pump_vrchat_capture(session, tele, stop_event,
+                               targets: list[LoopbackTarget]) -> tuple[int, bool]:
+    """采集 VRChat 的若干路输出流并混音。返回 (送出字节数, 是否被停止)。
+
+    与共享的 `_pump_capture` 的区别有两点，都是被实测逼出来的：
+
+      1. **多路**：VRChat（Wine）会开多个播放流，每路一条 `pw-record`，用
+         `MixedAudioSource` 相加限幅成一路再送会话。
+      2. 每 ~3s 回查一次 PipeWire 图：VRChat 退出（流全消失）**或播放流增减**
+         就主动收尾 —— 不能只指望 `pw-record` 子进程自己退出：目标节点消失后
+         它是**不会**退的，而共享泵只看「队列超时」是发现不了这件事的。
+    """
+    opened: list = []
+    for t in targets:
+        opened.append(platform.capture_backend().open_loopback(t, blocksize=CHUNK_BYTES))
+    source = opened[0] if len(opened) == 1 else MixedAudioSource(opened)
+    want = sorted(t.id for t in targets)
+    sent = 0
+    last_check = time.monotonic()
+    try:
+        while not _stop_requested(stop_event):
+            chunk = await source.read(timeout=1.0)
+            if chunk is not None:
+                pcm16 = to_16k_mono(chunk, source.rate, source.channels)
+                if pcm16:
+                    await session.send_audio(pcm16)
+                    sent += len(pcm16)
+                    if tele is not None:
+                        tele.add("loopback_chunk", bytes=len(pcm16))
+            now = time.monotonic()
+            if now - last_check >= VRCHAT_RECHECK_S:
+                last_check = now
+                if sorted(t.id for t in pick_vrchat_targets()) != want:
+                    break            # 流没了 / 增减了 → 收尾，回到外层重新等待或重开
+    finally:
+        source.close()
+    return sent, _stop_requested(stop_event)
 
 
 def list_devices() -> None:

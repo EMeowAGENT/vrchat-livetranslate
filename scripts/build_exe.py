@@ -52,6 +52,7 @@ HIDDEN = [
     "vlt.devices", "vlt.engine", "vlt.gui", "vlt.app",
     "vlt.session", "vlt.session.base", "vlt.session.qwen38", "vlt.session.qwen35",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
+    "vlt.output.openvr_overlay",        # Windows/SteamVR 手腕屏后端（Linux 产物里没有它）
     "vlt.platform", "vlt.platform.base", "vlt.platform.win",
 ]
 # 带二进制/数据文件的库 → 连数据一起收
@@ -64,9 +65,12 @@ COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "comtypes", "openvr", "pythonosc"
 # 排除掉之后，exe 的字节码里连 "pipewire" / "XR_EXTX_overlay" 这些字样都不会有。
 # 自动断言见 scripts/check_platform_purity.py（CI 里跑，红灯门禁）。
 #
-# 注意：**只排除平台独占模块**。vlt/output/overlay.py（pyopenvr）两个平台都收 ——
-# 它在 Windows 上是真正的实现，在别处也只是「有但不启用」，且它里面承载着
-# OverlayConfig / render_panel 这类共享结构。
+# 注意：**只排除平台独占模块**。`vlt/output/overlay.py` 是**共享的**（只有
+# OverlayConfig + 渲染函数），两个平台都收；手腕屏后端各自独占一个模块：
+#   * Windows → vlt/output/openvr_overlay.py（SteamVR 接口；**必须**收进 Windows 产物）
+#   * Linux   → vlt/output/openxr_overlay.py（上面排掉）
+# Linux 产物则由 AppImage 构建脚本反向删掉 openvr_overlay.py，
+# 两边都由 scripts/check_platform_purity.py 断言。
 EXCLUDE_WIN = [
     "vlt.platform.linux",
     "vlt.output.openxr_overlay",

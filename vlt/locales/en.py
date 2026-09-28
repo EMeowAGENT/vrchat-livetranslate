@@ -97,6 +97,8 @@ STRINGS: dict[str, str] = {
         "No devices found (an empty list is normal in a remote session)",
     "已扫描到 {m} 个麦克风 / {l} 个 loopback / {o} 个输出":
         "Found {m} mic(s) / {l} loopback / {o} output(s)",
+    "已扫描到 {m} 个麦克风（VRChat 音频与译音输出自动处理）":
+        "Found {m} mic(s) (VRChat audio and voice output are automatic)",
     "已选设备：{names}": "Selected devices: {names}",
     "设备：全部自动检测": "Devices: all Auto-Detect",
 
@@ -116,6 +118,8 @@ STRINGS: dict[str, str] = {
     "VRChat 音频:": "VRChat Audio:",
     "译音输出:": "Voice Output:",
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
+    "Linux：VRChat 音频与译音输出已自动处理":
+        "Linux: VRChat audio and voice output are handled automatically",
     # ---- 设置弹窗：音色 ----
     "音色": "Voice Timbre",
     "说话译音:": "Spoken voice:",

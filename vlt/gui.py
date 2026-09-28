@@ -1042,14 +1042,26 @@ class TranslationGUI:
         grid.pack(fill=tk.X, pady=(8, 2))
         grid.columnconfigure(1, weight=1)
         auto = t("自动检测")
-        # ⚠️ 控件名不能改：设备扫描结果直接往这三个下拉里写值
+        # ⚠️ 控件名不能改：设备扫描结果直接往这些下拉里写值
+        #
+        # Linux 上「VRChat 音频」与「译音输出」**不暴露给用户**（末影猫口径）：
+        #   · VRChat 音频：采集目标固定为「等 VRChat 的输出流」，不抓系统默认输出
+        #     （默认 sink 上混着浏览器/音乐，抓它等于把噪音当游戏内语音）；
+        #   · 译音输出：固定写到本程序运行时自建的虚拟麦，手选设备毫无意义
+        #     （引擎的 Linux 分支本就忽略 output.audio.device_name）。
+        # 于是 Linux 只留「麦克风」一个下拉；两个属性置 None，读写在
+        # `self._linux_fixed_audio` 为真时一律跳过。配置键保留不动（向后兼容）。
+        self._linux_fixed_audio = platform.IS_LINUX
         self._mic_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        self._loopback_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        self._audio_out_combo = ttk.Combobox(grid, values=[auto], state="readonly")
-        for i, (label, combo) in enumerate((
-                (t("麦克风:"), self._mic_combo),
-                (t("VRChat 音频:"), self._loopback_combo),
-                (t("译音输出:"), self._audio_out_combo))):
+        self._loopback_combo: ttk.Combobox | None = None
+        self._audio_out_combo: ttk.Combobox | None = None
+        rows = [(t("麦克风:"), self._mic_combo)]
+        if not self._linux_fixed_audio:
+            self._loopback_combo = ttk.Combobox(grid, values=[auto], state="readonly")
+            self._audio_out_combo = ttk.Combobox(grid, values=[auto], state="readonly")
+            rows += [(t("VRChat 音频:"), self._loopback_combo),
+                     (t("译音输出:"), self._audio_out_combo)]
+        for i, (label, combo) in enumerate(rows):
             ttk.Label(grid, text=label, style="Dim.TLabel").grid(
                 row=i, column=0, sticky="w", pady=3)
             combo.grid(row=i, column=1, sticky="ew", padx=(8, 0), pady=3)
@@ -1060,11 +1072,16 @@ class TranslationGUI:
         capture_cfg = (self._cfg.output or {}).get("capture") or {}
         audio_cfg = (self._cfg.output or {}).get("audio") or {}
         self._mic_combo.set(capture_cfg.get("mic_device") or auto)
-        self._loopback_combo.set(capture_cfg.get("loopback_device") or auto)
-        self._audio_out_combo.set(audio_cfg.get("device_name") or auto)
+        if not self._linux_fixed_audio:
+            self._loopback_combo.set(capture_cfg.get("loopback_device") or auto)
+            self._audio_out_combo.set(audio_cfg.get("device_name") or auto)
 
-        ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
-                  style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+        if self._linux_fixed_audio:
+            ttk.Label(body, text=t("Linux：VRChat 音频与译音输出已自动处理"),
+                      style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+        else:
+            ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
+                      style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 音色 ----
         # 两条出声音色来自**不同模型**，音色 id 不通用（跨模型混用会被服务端拒），
@@ -2778,8 +2795,9 @@ class TranslationGUI:
         try:
             self._root.update_idletasks()     # 先把"正在扫描…"画出来再阻塞
             mics = enumerate_mic_devices()
-            loops = enumerate_loopback_devices()
-            outs = enumerate_audio_out_devices()
+            # Linux 界面不提供 loopback / 输出两个下拉，也就不必跑这两次 pw-dump。
+            loops = [] if self._linux_fixed_audio else enumerate_loopback_devices()
+            outs = [] if self._linux_fixed_audio else enumerate_audio_out_devices()
             self._on_device_scan_result(mics, loops, outs)
         except Exception as exc:
             self._device_scan_pending = False
@@ -2812,8 +2830,9 @@ class TranslationGUI:
             out_display.append(format_device_display(info))
 
         self._mic_combo.configure(values=mic_display)
-        self._loopback_combo.configure(values=loop_display)
-        self._audio_out_combo.configure(values=out_display)
+        if not self._linux_fixed_audio:
+            self._loopback_combo.configure(values=loop_display)
+            self._audio_out_combo.configure(values=out_display)
 
         # 恢复配置里的选择（如果设备在列表里）
         capture_cfg = (self._cfg.output or {}).get("capture") or {}
@@ -2827,18 +2846,22 @@ class TranslationGUI:
         else:
             self._mic_combo.set(auto)
 
-        if loop_name and loop_name in self._loopback_names:
-            self._loopback_combo.set(loop_display[self._loopback_names.index(loop_name) + 1])
-        else:
-            self._loopback_combo.set(auto)
+        if not self._linux_fixed_audio:
+            if loop_name and loop_name in self._loopback_names:
+                self._loopback_combo.set(loop_display[self._loopback_names.index(loop_name) + 1])
+            else:
+                self._loopback_combo.set(auto)
 
-        if out_name and out_name in self._audio_out_names:
-            self._audio_out_combo.set(out_display[self._audio_out_names.index(out_name) + 1])
-        else:
-            self._audio_out_combo.set(auto)
+            if out_name and out_name in self._audio_out_names:
+                self._audio_out_combo.set(out_display[self._audio_out_names.index(out_name) + 1])
+            else:
+                self._audio_out_combo.set(auto)
 
         if not mics and not loops and not outs:
             self._set_status("warn", t("未扫描到设备（远程会话下枚举为空是正常的）"))
+        elif self._linux_fixed_audio:
+            self._set_status("info",
+                t("已扫描到 {m} 个麦克风（VRChat 音频与译音输出自动处理）", m=len(mics)))
         else:
             self._set_status("info",
                 t("已扫描到 {m} 个麦克风 / {l} 个 loopback / {o} 个输出",
@@ -2848,8 +2871,6 @@ class TranslationGUI:
     def _on_device_change(self, _event=None) -> None:
         auto = t("自动检测")
         mic_text = self._mic_combo.get()
-        loop_text = self._loopback_combo.get()
-        out_text = self._audio_out_combo.get()
 
         mic_name = ""
         if mic_text != auto and mic_text:
@@ -2858,19 +2879,23 @@ class TranslationGUI:
             if idx > 0 and idx - 1 < len(self._mic_names):
                 mic_name = self._mic_names[idx - 1]
 
+        # Linux 没有这两个下拉：保持空串（_save_device_config 会跳过对应配置键）
         loop_name = ""
-        if loop_text != auto and loop_text:
-            display_list = combo_values(self._loopback_combo)
-            idx = display_list.index(loop_text) if loop_text in display_list else -1
-            if idx > 0 and idx - 1 < len(self._loopback_names):
-                loop_name = self._loopback_names[idx - 1]
-
         out_name = ""
-        if out_text != auto and out_text:
-            display_list = combo_values(self._audio_out_combo)
-            idx = display_list.index(out_text) if out_text in display_list else -1
-            if idx > 0 and idx - 1 < len(self._audio_out_names):
-                out_name = self._audio_out_names[idx - 1]
+        if not self._linux_fixed_audio:
+            loop_text = self._loopback_combo.get()
+            if loop_text != auto and loop_text:
+                display_list = combo_values(self._loopback_combo)
+                idx = display_list.index(loop_text) if loop_text in display_list else -1
+                if idx > 0 and idx - 1 < len(self._loopback_names):
+                    loop_name = self._loopback_names[idx - 1]
+
+            out_text = self._audio_out_combo.get()
+            if out_text != auto and out_text:
+                display_list = combo_values(self._audio_out_combo)
+                idx = display_list.index(out_text) if out_text in display_list else -1
+                if idx > 0 and idx - 1 < len(self._audio_out_names):
+                    out_name = self._audio_out_names[idx - 1]
 
         self._save_device_config(mic_name, loop_name, out_name)
         # 回显完整设备名：下拉框宽度有限（长设备名会被截断），
@@ -2882,6 +2907,9 @@ class TranslationGUI:
             self._set_status("info", t("设备：全部自动检测"))
 
     def _save_device_config(self, mic_name: str, loop_name: str, out_name: str) -> None:
+        # Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
+        # （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        write_fixed = not self._linux_fixed_audio
         p = DEFAULT_CONFIG
         if not p.exists():
             return
@@ -2889,13 +2917,15 @@ class TranslationGUI:
             raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             capture = dict(raw.get("capture") or {})
             capture["mic_device"] = mic_name
-            capture["loopback_device"] = loop_name
+            if write_fixed:
+                capture["loopback_device"] = loop_name
             raw["capture"] = capture
-            output = dict(raw.get("output") or {})
-            audio = dict(output.get("audio") or {})
-            audio["device_name"] = out_name
-            output["audio"] = audio
-            raw["output"] = output
+            if write_fixed:
+                output = dict(raw.get("output") or {})
+                audio = dict(output.get("audio") or {})
+                audio["device_name"] = out_name
+                output["audio"] = audio
+                raw["output"] = output
             with p.open("w", encoding="utf-8") as f:
                 yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
         except Exception as exc:
@@ -2903,8 +2933,9 @@ class TranslationGUI:
             return
         # 同步内存里的配置，引擎启动时会读
         self._cfg.output.setdefault("capture", {})["mic_device"] = mic_name
-        self._cfg.output["capture"]["loopback_device"] = loop_name
-        self._cfg.output.setdefault("audio", {})["device_name"] = out_name
+        if write_fixed:
+            self._cfg.output["capture"]["loopback_device"] = loop_name
+            self._cfg.output.setdefault("audio", {})["device_name"] = out_name
 
     # ================================================================ 队列轮询
 

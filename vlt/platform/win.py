@@ -100,7 +100,7 @@ def find_cjk_font() -> str | None:
 # ---------------------------------------------------------------- 界面语言
 
 # Windows 主语言 ID → 界面语言。表里没有的（德语/法语等已知但未支持的语言）按 en 接待；
-# 详见 vlt/i18n.py 的 detect_system_language 注释。
+# 这是本平台自己的口径，`vlt/platform/linux.py` 有对等的一张表（读环境变量）。
 _PRIMARY_LANG: dict[int, str] = {0x04: "zh", 0x09: "en", 0x11: "ja", 0x12: "ko", 0x19: "ru"}
 
 
@@ -210,5 +210,5 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
     这个工厂放在平台模块里，是为了让共享代码（engine/gui）**不出现任何后端名字** ——
     Windows 产物里就不该有 openxr 的字样，反之亦然（见 vlt/platform/base.py 的说明）。
     """
-    from ..output.overlay import WristOverlay
+    from ..output.openvr_overlay import WristOverlay
     return WristOverlay(cfg, config_path=config_path, dry_run=dry_run)

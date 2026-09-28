@@ -57,7 +57,7 @@ TRACKER_ROLES = (
 def euler_to_quaternion(rot_deg: tuple[float, float, float]) -> tuple[float, float, float, float]:
     """欧拉角（度）→ 四元数 `(x, y, z, w)`。
 
-    ⚠️ **顺序必须与 Windows 侧的 `overlay.build_matrix` 完全一致**（`Rz * Ry * Rx`），
+    ⚠️ **顺序必须与 Windows 侧后端的 `openvr_overlay.build_matrix` 完全一致**（`Rz * Ry * Rx`），
     否则用户实测调好的 `rot: [-47, -16, 0]` 在 Linux 上会转到别的方向 ——
     配置语义必须两端一致，不然「同一个 config.yaml 两边都好看」就不成立了。
 
@@ -132,7 +132,7 @@ def should_rebuild(old: OverlayConfig, new: OverlayConfig) -> tuple[bool, bool]:
     几何变了要重应用变换（位置/宽/透明度/弯曲/锚点）；
     渲染参数变了必须**重新渲染一帧贴图**，否则界面上拖字号滑块会「看着生效、屏上没变」。
 
-    与 `overlay.WristOverlay.tick()` 里的判断口径保持一致（刻意重复这两组比较，
+    与 `openvr_overlay.WristOverlay.tick()` 里的判断口径保持一致（刻意重复这两组比较，
     不动那边已经过测试的代码）。
     """
     geo = (new.pos, new.rot, new.width_m, new.alpha, new.curvature) != (
@@ -641,7 +641,7 @@ class XrOverlaySession:
 class OpenXrOverlay:
     """手腕屏的 OpenXR 后端。
 
-    公开接口与 `overlay.WristOverlay`（Windows/SteamVR 那个）保持一致，
+    公开接口与 `openvr_overlay.WristOverlay`（Windows 侧后端）保持一致，
     所以 `engine.py` / `gui.py` 不需要知道自己在哪个平台：
 
         cfg / config_path / dry_run / available / frames_updated
