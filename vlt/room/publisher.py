@@ -104,17 +104,23 @@ class SourcePublisher:
         snap = text.strip() if isinstance(text, str) else ""
         out: list[PublishItem] = []
 
+        # ⚠️ 必须在静默兜底**之前**更新：`_make()` 拿 `_last_feed_ms` 给 `_last_final_ms`
+        #    盖章。晚这一步的话，兜底补出来的那条 final 会把时间戳写成**上一次 feed 的旧值**，
+        #    紧接着到达的真 final 就认不出「这一句刚刚发过」→ 同一句发两条 final、对端重复上屏。
+        #    （2026-09-28 真机演示复现：一次 `feed(final)` 调用吐了两条 final。）
+        prev_feed_ms = self._last_feed_ms
+        self._last_feed_ms = now
+
         # 规则 4：静默兜底分句。服务端有时不发 done（既有教训），上一句会永远开着；
         # 距上次 feed 超过阈值就先替它补一条 final —— 文本取**上一次已发快照**
         # （被节流吃掉的那帧对端根本没见过，当前这帧属于下一句，都不能拿来当定稿）。
         # 上一帧已经是同内容的 final 就不重复补（服务端会重复发 done）。
-        if (self._utt and self._last_feed_ms >= 0 and self.final_gap_s > 0
-                and now - self._last_feed_ms > self.final_gap_s * 1000.0):
+        # 阈值判断用 prev_feed_ms（本帧的时间戳上面已写进状态，不能再拿来比）。
+        if (self._utt and prev_feed_ms >= 0 and self.final_gap_s > 0
+                and now - prev_feed_ms > self.final_gap_s * 1000.0):
             if self._last_sent and not self._last_was_final:
                 out.append(self._make(self._last_sent, final=True))
             self._seal()
-
-        self._last_feed_ms = now
 
         if not snap:
             return out                    # 规则 1：空文本不上行（开句也推迟到有内容时）

@@ -277,6 +277,25 @@ def test_real_speaker_repeating_himself_is_not_swallowed() -> None:
     print("  真人重复照发 / 机械重复 done 仍挡 / 窗口可关 OK")
 
 
+def test_silence_fallback_final_is_not_duplicated() -> None:
+    """★ 静默兜底补的 final 与紧接着到达的真 final，只能上屏一条。
+
+    兜底分支调 `_make()` 时若 `_last_feed_ms` 还是**旧值**，`_last_final_ms` 会被盖成
+    上一次 feed 的时间戳 → 紧接着的真 final 认不出「同一句刚刚发过」→ 房间收到两条
+    一模一样的 final，对端重复上屏。
+    （2026-09-28 真机演示复现：**一次** `feed(final)` 调用就吐了两条 final；
+     接收端日志里同一句连续出现两条 FINAL。）
+    """
+    p, _ = make(final_gap_s=1.0, min_partial_ms=0)
+    p.feed("半句话", False, now_ms=0)
+    out = p.feed("半句话", True, now_ms=5000)     # 间隔超过 final_gap_s，兜底分支会先补一条
+    finals = [i for i in out if i.is_final]
+    assert len(finals) == 1, \
+        f"★ 同一句发了 {len(finals)} 条 final：{[(i.utt, i.text) for i in out]}"
+    assert finals[0].text == "半句话"
+    print("  静默兜底 + 真 final 只上屏一条 OK")
+
+
 if __name__ == "__main__":
     print("test_room_publisher:")
     test_item_is_frozen_snapshot()
@@ -291,4 +310,5 @@ if __name__ == "__main__":
     test_real_clock_path_does_not_crash()
     test_should_publish_three_sources()
     test_real_speaker_repeating_himself_is_not_swallowed()
+    test_silence_fallback_final_is_not_duplicated()
     print("ALL PASSED")
