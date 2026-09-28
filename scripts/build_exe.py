@@ -52,9 +52,27 @@ HIDDEN = [
     "vlt.devices", "vlt.engine", "vlt.gui", "vlt.app",
     "vlt.session", "vlt.session.base", "vlt.session.qwen38", "vlt.session.qwen35",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
+    "vlt.platform", "vlt.platform.base", "vlt.platform.win",
 ]
 # 带二进制/数据文件的库 → 连数据一起收
 COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "comtypes", "openvr", "pythonosc", "pycaw"]
+
+# ⚠️ Windows 产物里**不允许**出现 Linux 独占实现 —— 这条要求不能靠人记，靠构建排除：
+#   * vlt.platform.linux       —— PipeWire 设备枚举（pw-dump）+ 采集/虚拟声卡
+#   * vlt.output.openxr_overlay —— 自建 OpenXR 手腕屏（pyopenxr + EGL/Wayland）
+#   * xr                        —— pyopenxr 本身（排掉它，顺带排掉它拖进来的 PyOpenGL/glfw）
+# 排除掉之后，exe 的字节码里连 "pipewire" / "XR_EXTX_overlay" 这些字样都不会有。
+# 自动断言见 scripts/check_platform_purity.py（CI 里跑，红灯门禁）。
+#
+# 注意：**只排除平台独占模块**。vlt/output/overlay.py（pyopenvr）两个平台都收 ——
+# 它在 Windows 上是真正的实现，在别处也只是「有但不启用」，且它里面承载着
+# OverlayConfig / render_panel 这类共享结构。
+EXCLUDE_WIN = [
+    "vlt.platform.linux",
+    "vlt.output.openxr_overlay",
+    "xr",                      # pyopenxr
+]
+
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -110,6 +128,8 @@ def build() -> Path:
         cmd += ["--hidden-import", h]
     for c in COLLECT_ALL:
         cmd += ["--collect-all", c]
+    for e in EXCLUDE_WIN:
+        cmd += ["--exclude-module", e]
     cmd.append(str(ENTRY))
 
     res = run(cmd, text=True)

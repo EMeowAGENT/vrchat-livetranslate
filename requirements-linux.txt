@@ -1,0 +1,15 @@
+# VRChat 实时同传 —— Linux 独占依赖
+#
+# 用法：pip install -r requirements-linux.txt
+-r requirements.txt
+
+# 目前**没有任何 Linux 独占的 Python 依赖**，这不是遗漏，是设计结果：
+#
+#   * 手腕屏     → 走 WayVR（外部程序）。我们只调 `wayvrctl` 改文本，不需要 PyOpenXR /
+#                  PyOpenGL / 图形绑定 —— 渲染全由 WayVR 负责。
+#   * 系统声采集 → 走 `parec`（pipewire-pulse 提供），子进程读 PCM，不需要 Python 侧绑定。
+#   * 虚拟声卡   → PipeWire 原生声明（libpipewire-module-loopback），用 `pw-cat` 写入。
+#   * 麦克风     → sounddevice（已在公共依赖里），PortAudio 走 ALSA 即可。
+#
+# 需要系统层具备（非 pip 依赖，由 setup.sh 检查）：
+#   pipewire + pipewire-pulse、wayvr + wayvrctl

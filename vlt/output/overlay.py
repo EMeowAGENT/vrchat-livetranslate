@@ -20,6 +20,32 @@ from PIL import Image, ImageDraw, ImageFont
 # 调试帧是"跑完要看"的产物 → 可写目录（exe 旁），不是临时解包目录
 from ..paths import APP_DIR as ROOT
 
+# 配置里没写字体时用哪份：按平台探测（Windows → 雅黑；Linux → fontconfig）。
+# 解析结果缓存，避免每次渲染都去 spawn 一个 fc-match。
+_font_cache: dict[str, str | None] = {}
+
+
+def resolve_font_path(configured: str) -> str | None:
+    """决定这次渲染用哪个字体文件。
+
+    优先级：配置里指定的（且文件真的存在）→ 平台自动探测 → None（调用方回落位图字体）。
+
+    **为什么不能把 `C:/Windows/Fonts/msyh.ttc` 写死**：那是 Windows 专有路径。
+    换到别的机器上 `ImageFont.truetype` 会抛
+    `OSError: cannot open resource` —— 实测 Linux 上 `tests/test_wrap.py` 就是这么挂的，
+    而手腕屏会退化成 `load_default()` 的位图字体（画不了中日韩，等于白屏）。
+    """
+    key = configured or ""
+    if key not in _font_cache:
+        resolved: str | None = None
+        if configured and Path(configured).exists():
+            resolved = configured
+        else:
+            from ..platform import find_cjk_font
+            resolved = find_cjk_font()
+        _font_cache[key] = resolved
+    return _font_cache[key]
+
 
 # ---------------------------------------------------------------- 配置
 @dataclass
@@ -33,7 +59,7 @@ class OverlayConfig:
     curvature: float = 0.0
     alpha: float = 0.9
     size_px: tuple[int, int] = (1024, 440)
-    font: str = "C:/Windows/Fonts/msyh.ttc"
+    font: str = ""                           # 空 = 按平台自动探测（见 resolve_font_path）
     font_size: int = 36                      # 译文字号（面板 1024x440 时 36~44 都清晰）
     source_font_size: int = 29               # 原文小字号
     # 配色：统一白色系，层级只靠字号 + 透明度区分（避免出现"蓝原文 + 白译文"这种像残留色的观感）
@@ -52,6 +78,10 @@ class OverlayConfig:
     show_source: bool = True
     fade_after_s: float = 0.0           # >0 则最后一条文本显示 fade_after_s 秒后淡出
     overlay_key: str = "vlt.wrist.panel"
+    # 手腕屏后端：auto（按平台自动选）/ null（彻底禁用）。
+    # 刻意只支持这两个 —— 强行指定 openvr/openxr 会让平台隔离破功
+    # （Windows 产物里会混进 pyopenxr），见 vlt/platform/__init__.py 的说明。
+    backend: str = "auto"
 
     @staticmethod
     def from_dict(d: dict) -> "OverlayConfig":
@@ -67,7 +97,7 @@ class OverlayConfig:
             curvature=float(off.get("curvature", 0.0)),
             alpha=float(off.get("alpha", d.get("alpha", 0.9))),
             size_px=tuple(d.get("size_px", (1024, 440))),          # type: ignore[arg-type]
-            font=d.get("font", "C:/Windows/Fonts/msyh.ttc"),
+            font=d.get("font") or "",
             font_size=int(d.get("font_size", 36)),
             source_font_size=int(d.get("source_font_size", 29)),
             color_translation=tuple(d.get("color_translation", (255, 255, 255))),   # type: ignore[arg-type]
@@ -82,6 +112,7 @@ class OverlayConfig:
             show_source=bool(d.get("show_source", True)),
             fade_after_s=float(d.get("fade_after_s", 0.0)),
             overlay_key=d.get("overlay_key", "vlt.wrist.panel"),
+            backend=str(d.get("backend", "auto") or "auto"),
         )
 
 
@@ -193,10 +224,13 @@ def render_panel(text: str, source: str = "", cfg: OverlayConfig | None = None) 
                         outline=(*cfg.color_border, cfg.border_alpha), width=3)
 
     def _font(size: int) -> ImageFont.FreeTypeFont:
-        try:
-            return ImageFont.truetype(cfg.font, size)
-        except Exception:
-            return ImageFont.load_default()
+        path = resolve_font_path(cfg.font)
+        if path:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:  # noqa: BLE001 — 字体文件坏了也别让整条腿挂掉
+                pass
+        return ImageFont.load_default()
 
     inner_w = w - 4 * pad
     y = pad * 2
@@ -244,10 +278,13 @@ def render_conversation(entries, cfg: OverlayConfig | None = None) -> Image.Imag
                         outline=(*cfg.color_border, cfg.border_alpha), width=3)
 
     def _f(size: int) -> ImageFont.FreeTypeFont:
-        try:
-            return ImageFont.truetype(cfg.font, size)
-        except Exception:
-            return ImageFont.load_default()
+        path = resolve_font_path(cfg.font)
+        if path:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:  # noqa: BLE001
+                pass
+        return ImageFont.load_default()
 
     tf, sf = _f(cfg.font_size), _f(cfg.source_font_size)
     inner_w = w - 4 * pad

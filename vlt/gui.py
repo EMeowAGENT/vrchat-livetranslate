@@ -35,7 +35,7 @@ from .config_io import (
     _yaml_set_or_create,
 )
 from .i18n import t
-from .output.overlay import OverlayConfig, WristOverlay
+from .output.overlay import OverlayConfig
 from .devices import (
     DeviceInfo,
     enumerate_audio_out_devices,
@@ -47,6 +47,8 @@ from .engine import Engine, EngineEvents
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
+from . import platform
+from .platform import IS_WINDOWS
 
 ROOT = APP_DIR
 
@@ -56,11 +58,70 @@ ROOT = APP_DIR
 VOICE_PREVIEW_TEXT = "你好，这是我的音色试听。"
 VOICE_PREVIEW_MODEL = "qwen3-tts-flash"
 
+# 界面字体族：**不能写死** "Microsoft YaHei UI"。
+# 那个族在 Linux 上不存在，Tk 会静默回落到没有中日韩字形的 `fixed` ——
+#   1) 中文靠逐字 fontconfig 回落渲染，实测**每次 measure() 要 0.3 秒**，
+#      界面构建要把 4 种语言的控件全量一遍测量，慢到看起来像卡死
+#      （tests/test_i18n.py 与 test_update_dialog.py 就是这样超时的）；
+#   2) 观感也不对（字形族不一致）。
+# 所以运行时按「这台机器真的有什么」挑一个（见 _apply_ui_font）。
+_FONT_CANDIDATES = (
+    "Microsoft YaHei UI", "Microsoft YaHei",                  # Windows
+    "Noto Sans CJK SC", "Source Han Sans CN", "Noto Sans SC",  # Linux（Noto / 思源）
+    "WenQuanYi Micro Hei", "Noto Sans", "DejaVu Sans",         # 再兜一层
+)
+_ui_family: str | None = None
+
+# 下面这组是**占位**默认值，`_apply_ui_font()` 会在建 Tk root 之后按平台重绑。
 FONT = ("Microsoft YaHei UI", 11)          # 译文（主）
 FONT_SMALL = ("Microsoft YaHei UI", 9)     # 原文（辅，小一号）
 FONT_META = ("Microsoft YaHei UI", 8)
 FONT_UI = ("Microsoft YaHei UI", 9)        # 控件文字
 FONT_STATUS = ("Microsoft YaHei UI", 8)    # 状态栏
+FONT_BOLD_SM = ("Microsoft YaHei UI", 8, "bold")    # 分区小标题
+FONT_BOLD_MD = ("Microsoft YaHei UI", 12, "bold")   # 弹窗小标题
+FONT_BOLD_LG = ("Microsoft YaHei UI", 13, "bold")   # 弹窗大标题（赞助）
+
+
+def resolve_ui_family(root) -> str:
+    """挑一个这台机器上**真实存在**的界面字体族。
+
+    先按候选表找；都没有就退回 Tk 自己的默认字体族（`TkDefaultFont` 的 actual family），
+    保证至少是一个有字形的真字体，而不是 `fixed`。
+    """
+    global _ui_family
+    if _ui_family:
+        return _ui_family
+    try:
+        available = {str(f).strip().lower() for f in tkfont.families(root)}
+    except Exception:  # noqa: BLE001 — 拿不到列表就退回默认
+        available = set()
+    for cand in _FONT_CANDIDATES:
+        if cand.lower() in available:
+            _ui_family = cand
+            return cand
+    try:
+        _ui_family = str(tkfont.nametofont("TkDefaultFont").actual("family"))
+    except Exception:  # noqa: BLE001
+        _ui_family = "sans-serif"
+    return _ui_family
+
+
+def _apply_ui_font(root) -> None:
+    """按当前平台重绑界面字体常量（在建 Tk root 之后、建任何控件之前调用）。"""
+    global FONT, FONT_SMALL, FONT_META, FONT_UI, FONT_STATUS
+    global FONT_BOLD_SM, FONT_BOLD_MD, FONT_BOLD_LG
+    fam = resolve_ui_family(root)
+    FONT = (fam, 11)
+    FONT_SMALL = (fam, 9)
+    FONT_META = (fam, 8)
+    FONT_UI = (fam, 9)
+    FONT_STATUS = (fam, 8)
+    FONT_BOLD_SM = (fam, 8, "bold")
+    FONT_BOLD_MD = (fam, 12, "bold")
+    FONT_BOLD_LG = (fam, 13, "bold")
+
+
 MAX_BUBBLES = 500
 
 # ---- 统一配色：深灰 + 蓝（明度阶梯：聊天区最暗 → 面板次之 → 控件最亮） ----
@@ -166,6 +227,24 @@ def _lang_key(shown: str, table: dict[str, str | None]) -> str | None:
     return None
 
 
+_char_width_cache: dict[tuple, int] = {}
+
+
+def _font_spec_key(font_spec) -> object:
+    """把字体规格压成可哈希的缓存 key（跨平台容错）。
+
+    `font_spec` 可能是 tuple、字符串（字体名）、`tkfont.Font`，或 —— 在 Linux 上 ——
+    `widget.cget("font")` 返回的 `_tkinter.Tcl_Obj`（不可迭代，直接 `tuple()`
+    会抛 `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
+    """
+    if isinstance(font_spec, str):
+        return font_spec
+    try:
+        return tuple(font_spec)
+    except TypeError:
+        return str(font_spec)
+
+
 def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
     """把「这段文字需要多宽」换算成 Tk 的**字符宽度单位**（给 width= 用）。
 
@@ -174,14 +253,24 @@ def _char_width_for(text: str, font_spec, minimum: int = 0) -> int:
     「訳文の文字サイズ」自然宽 100px，按 8 个字符只申请到 67px，屏幕上只剩「訳文の文字」。
     中文同样中招（「译文字号」需 52px、按 6 字符只给 46px），只是裁得少不容易看出来。
     这里用字体的真实 measure 换算，并留 1 个字符余量。
+
+    结果**带缓存**：切界面语言会把整套控件重建一遍，同一个词条会被反复测量；
+    而一次 `measure()` 在字体需要 fontconfig 回落的机器上要几百毫秒
+    （见上方 _FONT_CANDIDATES 的说明），不缓存会明显卡顿。
     """
+    key = (text, _font_spec_key(font_spec), minimum)
+    hit = _char_width_cache.get(key)
+    if hit is not None:
+        return hit
     try:
         f = tkfont.Font(font=font_spec)
         avg = max(1, f.measure("0"))
         need = -(-f.measure(text) // avg) + 1     # 向上取整 + 1 字符余量
     except Exception:  # noqa: BLE001 — 量不出来就退回字符数（至少不比改动前差）
         need = len(text) + 1
-    return max(minimum, need)
+    out = max(minimum, need)
+    _char_width_cache[key] = out
+    return out
 
 
 def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
@@ -191,6 +280,24 @@ def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
     """
     f = font_spec or FONT_UI
     return max(minimum, max((_char_width_for(str(n), f) for n in names), default=0))
+
+
+def combo_values(combo) -> list[str]:
+    """读回 ttk.Combobox 的候选值（跨平台安全）。
+
+    ⚠️ 坑（实测）：`combo.cget("values")` 的**返回类型依平台而变** ——
+    Windows 上 Tk 返回 tuple（可直接 `list()`），Linux 上返回
+    `_tkinter.Tcl_Obj`（不可迭代，`list()` 直接抛
+    `TypeError: '_tkinter.Tcl_Obj' object is not iterable`）。
+    这在设备下拉里是**真会走到**的路径（`_on_device_change` 要按下标取回原始设备名），
+    不是只影响测试。
+
+    用 Tk 自己的 `splitlist` 归一化：tuple / 列表 / 空格分隔的字符串 / Tcl_Obj 都能吃。
+    """
+    try:
+        return [str(v) for v in combo.tk.splitlist(combo.cget("values"))]
+    except Exception:  # noqa: BLE001 — 读不到就当空，别让「保存设备选择」这一步炸掉
+        return []
 
 
 def round_rect(cv: tk.Canvas, x1, y1, x2, y2, r, **kw):
@@ -270,7 +377,7 @@ class TranslationGUI:
         self._engine_dirs: list[str] = []      # 与 _engines 一一对应
         # 手腕屏由**界面**持有（不是某个引擎）：手腕上只该有一块屏，内容镜像聊天区，
         # 而聊天区本来就在界面这一层（两个方向的文字都汇到这里）。
-        self._overlay_out: WristOverlay | None = None
+        self._overlay_out: Any | None = None
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -354,6 +461,7 @@ class TranslationGUI:
         # Tk 会从最后打包的控件开始裁（实测 860 时目标语言下拉被裁到 40px）。
         self._root.minsize(928, 460)
         self._root.configure(bg=PANEL)
+        _apply_ui_font(self._root)   # 必须先于 _apply_theme：字体族要按平台重绑
         self._set_window_icon()      # 标题栏/任务栏图标（失败只留痕，不影响启动）
 
         self._apply_theme()          # 必须先于任何控件创建
@@ -436,7 +544,7 @@ class TranslationGUI:
         style.configure("Status.TLabel", font=FONT_STATUS)
         # 分区小标题（设置弹窗里的「API KEY / 音频设备」）：小一号、暗色、加粗
         style.configure("Section.TLabel", foreground=TEXT_DIM,
-                        font=("Microsoft YaHei UI", 8, "bold"))
+                        font=FONT_BOLD_SM)
         # API key 状态槽位里的两个控件：**已配置 → 纯展示标签**（「⚙ 设置」是改 key 的入口，
         # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开千问云开通页（QIANWEN_SIGNUP_URL）。
         style.configure("Chip.TLabel", font=FONT_STATUS, foreground=TEXT_DIM)
@@ -513,15 +621,19 @@ class TranslationGUI:
     def _set_window_icon(self) -> None:
         """窗口 / 任务栏图标。资源走 bundle_dir()（源码 = 仓库根，打包后 = _MEIPASS）。
 
-        Windows 上优先 `.ico` + `iconbitmap(default=...)`：它同时管标题栏和**任务栏**；
-        没有 .ico 时退回 `iconphoto(png)`。整段失败只打一行日志，绝不影响启动。
+        **`.ico` 只在 Windows 上优先**：`iconbitmap` 是 Windows/经典 Tk 的接口，
+        Linux 的 Tk 8.6 只接受 `.xbm`，喂 `.ico` 会抛
+        `TclError: wrong # args: should be "wm iconbitmap window ?bitmap?"` ——
+        每次都刷一行警告。Linux 上直接用 `iconphoto(png)`（跨平台、走现代窗口管理器）。
+        整段失败只打一行日志，绝不影响启动。
         """
         assets = BUNDLE_DIR / "assets"
         try:
-            ico = assets / "app.ico"
-            if ico.exists():
-                self._root.iconbitmap(default=str(ico))
-                return
+            if IS_WINDOWS:
+                ico = assets / "app.ico"
+                if ico.exists():
+                    self._root.iconbitmap(default=str(ico))
+                    return
             png = assets / "app.png"
             if png.exists():
                 self._icon_img = tk.PhotoImage(file=str(png))   # 留引用防 GC
@@ -533,7 +645,13 @@ class TranslationGUI:
                   flush=True)
 
     def _apply_dark_titlebar(self, win=None) -> None:
-        """Windows 标题栏变深色；老系统不支持就静默跳过（不能因此崩掉）。"""
+        """Windows 标题栏变深色；老系统不支持就静默跳过（不能因此崩掉）。
+
+        Linux 上直接返回：深色标题栏由桌面环境/主题决定，没有 `dwmapi` 这套东西，
+        调 `ctypes.windll` 连属性都不存在。
+        """
+        if not IS_WINDOWS:
+            return
         try:
             import ctypes
             w = win if win is not None else self._root
@@ -1212,7 +1330,7 @@ class TranslationGUI:
         body.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(body, text=t("☕ 请我喝一杯"),
-                  font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.CENTER)
+                  font=FONT_BOLD_LG).pack(anchor=tk.CENTER)
 
         ttk.Button(body, text=t("打开 Ko-fi 赞助页面"), style="Accent.TButton",
                    command=self._open_kofi).pack(anchor=tk.CENTER, pady=(12, 14))
@@ -1359,7 +1477,7 @@ class TranslationGUI:
         body = ttk.Frame(win, padding=(20, 16, 20, 14))
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=t("发现新版本"),
-                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+                  font=FONT_BOLD_MD).pack(anchor=tk.W)
         ttk.Label(body,
                   text=t("VRChat Live Translate 有新版本了。"
                          "现在更新只要一两分钟，不影响你正在进行的翻译。"),
@@ -1856,7 +1974,7 @@ class TranslationGUI:
         body = ttk.Frame(win, padding=(20, 16, 20, 14))
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=t("已更新到最新版本"),
-                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+                  font=FONT_BOLD_MD).pack(anchor=tk.W)
         ttk.Label(body, text=t("VRChat Live Translate 已更新到最新版本，一切照常使用。"),
                   wraplength=360, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
         link = tk.Label(body, text=t("看看这次更新了什么"), fg=ACCENT_HOVER, bg=PANEL,
@@ -2549,7 +2667,8 @@ class TranslationGUI:
         if not force and "overlay" not in self._sinks:
             return False
         try:
-            self._overlay_out = WristOverlay(
+            # 后端按平台选（Windows=pyopenvr / Linux=自建 OpenXR）
+            self._overlay_out = platform.create_wrist_overlay(
                 OverlayConfig.from_dict(self._cfg.overlay), config_path=DEFAULT_CONFIG)
             if not self._overlay_out.start():
                 self._overlay_out = None      # start() 内部已打印原因
@@ -2734,21 +2853,21 @@ class TranslationGUI:
 
         mic_name = ""
         if mic_text != auto and mic_text:
-            display_list = list(self._mic_combo.cget("values"))
+            display_list = combo_values(self._mic_combo)
             idx = display_list.index(mic_text) if mic_text in display_list else -1
             if idx > 0 and idx - 1 < len(self._mic_names):
                 mic_name = self._mic_names[idx - 1]
 
         loop_name = ""
         if loop_text != auto and loop_text:
-            display_list = list(self._loopback_combo.cget("values"))
+            display_list = combo_values(self._loopback_combo)
             idx = display_list.index(loop_text) if loop_text in display_list else -1
             if idx > 0 and idx - 1 < len(self._loopback_names):
                 loop_name = self._loopback_names[idx - 1]
 
         out_name = ""
         if out_text != auto and out_text:
-            display_list = list(self._audio_out_combo.cget("values"))
+            display_list = combo_values(self._audio_out_combo)
             idx = display_list.index(out_text) if out_text in display_list else -1
             if idx > 0 and idx - 1 < len(self._audio_out_names):
                 out_name = self._audio_out_names[idx - 1]

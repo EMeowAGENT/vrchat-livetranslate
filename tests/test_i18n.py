@@ -340,7 +340,10 @@ def test_all_ui_languages_window_guard() -> None:
             # ② 方向下拉的候选项 + 当前选中项（不在 text 属性里，单独扫）
             combo_vals: list[str] = []
             for combo in (gui._source_combo, gui._target_combo, gui._anchor_combo):
-                combo_vals += [str(v) for v in combo.cget("values")] + [str(combo.get())]
+                # cget("values") 返回类型依平台而变（Windows: tuple / Linux: Tcl_Obj），
+                # 用 Tk 的 splitlist 归一化后再扫
+                combo_vals += [str(v) for v in combo.tk.splitlist(combo.cget("values"))]
+                combo_vals += [str(combo.get())]
             bad_vals: list[str] = []
             for x in combo_vals:
                 if x not in texts:      # 界面语言下拉的母语名不在其中，这里的都是待翻译项
@@ -363,7 +366,8 @@ def test_all_ui_languages_window_guard() -> None:
 
             def _font_spec_of(w):
                 try:
-                    return w.cget("font") or FONT_UI
+                    # cget("font") 在 Linux 上可能返回 Tcl_Obj，统一成字符串
+                    return str(w.cget("font")) or FONT_UI
                 except Exception:      # ttk 控件的字体在 style 里，取不到就用应用字体
                     return FONT_UI
 

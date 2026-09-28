@@ -19,10 +19,12 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 from .config import AppConfig, Direction, load_config
-from .devices import resolve_device_name
+from .devices import enumerate_mic_devices, resolve_device_name
+from . import platform
+from .platform.base import LoopbackTarget
 from .output.chatbox import Chatbox, TokenBucket
 from .output.merger import Merger
-from .output.overlay import OverlayConfig, WristOverlay
+from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .session.base import SessionConfig, TextDelta, create_session
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
@@ -40,7 +42,15 @@ SENTENCE_GAP_S = 0.6
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
-LOOPBACK_FALLBACK = ["steam streaming speakers", "vive virtual", "cable input", "voicemeeter"]
+# 挑「系统声采集」目标时的关键词回退链（小写匹配）。
+# Windows 侧匹配 WASAPI loopback 设备名；Linux 侧匹配 PipeWire 输出节点的 description，
+# 所以两套关键词混在一张表里 —— 命不中的词条在各自平台上自然跳过，不会误伤。
+LOOPBACK_FALLBACK = [
+    # Windows
+    "steam streaming speakers", "vive virtual", "cable input", "voicemeeter",
+    # Linux（VRChat 走 Proton 时，输出节点名通常带 vrchat / steam 字样）
+    "vrchat", "vrc", "steam streaming",
+]
 
 
 # ================================================================ 配置校验（非法值留痕 + 回落默认）
@@ -307,7 +317,7 @@ class Engine:
         self._session = None
         self._chatbox: Chatbox | None = None
         self._merger: Merger | None = None
-        self._overlay: WristOverlay | None = None
+        self._overlay: Any | None = None
         self._virtualmic: VirtualMic | None = None
         # 采集循环是长跑任务，不能直接持有 session 对象：重连会换新对象，
         # 旧引用会把音频继续发到死连接上。统一走这个代理。
@@ -522,7 +532,9 @@ class Engine:
 
         if "overlay" in self._sinks:
             try:
-                self._overlay = WristOverlay(
+                # 手腕屏后端按平台选（Windows=pyopenvr / Linux=自建 OpenXR），
+                # 共享代码里不出现任何后端名字 —— 见 vlt/platform/__init__.py
+                self._overlay = platform.create_wrist_overlay(
                     OverlayConfig.from_dict(self._cfg.overlay),
                     config_path=Path(self._config_path) if self._config_path else None,
                     dry_run=self._overlay_dry_run,
@@ -566,6 +578,37 @@ class Engine:
         await asyncio.sleep(self._settle_s)
 
     def _setup_virtualmic(self, audio_cfg: dict) -> None:
+        """建立译音输出（虚拟声卡）。失败只禁用这一条腿，绝不影响其它功能。
+
+        流程对两个平台是**同一条**：
+            造出对象（可能顺带声明设备）→ 调 open() → 失败就清成 None
+        Linux 的「造」这一步还会**运行时声明**一对 PipeWire 节点
+        （无配置文件、不重启任何服务、不改任何全局状态），见 `vlt/platform/linux.py`。
+        """
+        vm = self._make_audio_out(audio_cfg)
+        if vm is None:
+            return
+        self._virtualmic = vm
+        if not vm.open():
+            self._virtualmic = None
+            print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{vm.device_name}",
+                  flush=True)
+        # 打开成功不用再打印：open() 自己会报（Windows 经 on_status → 日志 + 状态栏）。
+        # 这里以前多打了一行，还误用了不存在的属性 `sample_rate`（真实叫 `_sample_rate`），
+        # 结果设备打开成功后那行日志直接抛 AttributeError，把整条翻译腿打死了 ——
+        # 用户机器上有 VoiceMeeter 才会走到这条分支，我本机没虚拟声卡，本地测试全绿。
+
+    def _make_audio_out(self, audio_cfg: dict):
+        """造出译音输出对象（**不打开**）。返回 None = 这条腿不可用。
+
+        Windows：按设备名/回退链找一个**已装好**的虚拟声卡（VB-Cable / VoiceMeeter），
+                 用 PortAudio 打开 —— 那段逻辑原样保留，没动。
+        Linux  ：运行时声明一对 PipeWire 节点（可写入端 + 虚拟麦），
+                 再用 pw-cat 把 PCM 写进可写入端。
+        """
+        if platform.IS_LINUX:
+            return platform.open_audio_out(audio_cfg, self._events.on_status)
+
         device_name = audio_cfg.get("device_name") or ""
         picked = None
         if device_name:
@@ -584,14 +627,14 @@ class Engine:
                 picked = pick_output_device(patterns)
             except Exception as exc:
                 self._events.on_status("error", f"枚举输出设备失败：{exc}（其余功能不受影响）")
-                return
+                return None
         if picked is None:
             chain = ", ".join(patterns) if patterns else "(默认回退链)"
             self._events.on_status("error",
                 f"没找到匹配的输出设备（回退链：{chain}）。虚拟声卡装好了吗？其余功能不受影响。")
-            return
+            return None
         idx, name, rate = picked
-        self._virtualmic = VirtualMic(
+        return VirtualMic(
             device_index=idx,
             device_name=name,
             sample_rate=int(audio_cfg.get("sample_rate", 48000)),
@@ -599,14 +642,6 @@ class Engine:
             max_buffer_ms=int(audio_cfg.get("max_buffer_ms", 2000)),
             on_status=self._events.on_status,
         )
-        if not self._virtualmic.open():
-            self._virtualmic = None
-            print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{name}", flush=True)
-        # 打开成功不用再打印：VirtualMic.open() 自己会报
-        # 「虚拟声卡已打开：#N 名字」（经 on_status → 日志 + 状态栏）。
-        # 这里之前多打了一行，还误用了不存在的属性 `sample_rate`（真实叫 `_sample_rate`），
-        # 结果设备打开成功后那行日志直接抛 AttributeError，把整条翻译腿打死了 ——
-        # 用户机器上有 VoiceMeeter 才会走到这条分支，我本机没虚拟声卡，本地测试全绿。
 
     async def _create_session(self, scfg: SessionConfig) -> None:
         now = time.monotonic()
@@ -974,44 +1009,62 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
                   device_name: str | None = None,
                   stop_event: threading.Event | None = None) -> None:
     """麦克风采集（16kHz 单声道）。seconds=0 → 一直跑到 Ctrl+C 或 stop_event 置位。"""
-    import sounddevice as sd
-
-    dev_index = None
-    if device_name:
-        dev_index = resolve_device_name(device_name, "input")
-        if dev_index is not None:
-            print(f"[mic] 按名称选中设备：{device_name!r} → #{dev_index}")
-        else:
-            print(f"[mic] ⚠️ 未找到设备 '{device_name}'，回退自动检测")
-    if dev_index is None:
-        dev_index = pick_input_device(device_pattern)
-        if device_pattern and dev_index is None:
-            print(f"[mic] ⚠️ 没找到匹配 '{device_pattern}' 的输入设备，改用系统默认设备")
-    info = sd.query_devices(dev_index) if dev_index is not None else sd.query_devices(kind="input")
-    print(f"[mic] 使用设备 #{dev_index if dev_index is not None else '(默认)'} : {info['name']}  "
-          f"{int(info['default_samplerate'])}Hz")
-
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[bytes] = asyncio.Queue()
-
-    def callback(indata, frames, time_info, status):
-        if status:
-            print(f"[mic] ⚠️ {status}")
-        loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
-
+    dev_name = _resolve_mic_name(device_name, device_pattern)
+    if dev_name:
+        print(f"[mic] 使用设备：{dev_name!r}")
+    else:
+        print("[mic] 使用系统默认输入设备")
     print("[mic] 开始采集" + ("（Ctrl+C 结束）" if seconds <= 0 else f"（{seconds:.0f}s）"))
-    with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16",
-                           blocksize=CHUNK_BYTES // 2, callback=callback, device=dev_index):
-        end = None if seconds <= 0 else time.perf_counter() + seconds
-        while (end is None or time.perf_counter() < end) and not _stop_requested(stop_event):
-            try:
-                chunk = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            await session.send_audio(chunk)
-            if tele is not None:
-                tele.add("mic_chunk", bytes=len(chunk))
+    await _pump_capture(session, tele, seconds, stop_event, "mic",
+                        lambda: platform.capture_backend().open_mic(
+                            dev_name, rate=16000, channels=1,
+                            blocksize=CHUNK_BYTES // 2))
     print("[mic] 采集结束")
+
+
+def _resolve_mic_name(device_name: str | None, device_pattern: str | None) -> str | None:
+    """把用户配置（设备名 / 关键词）解析成一个 sounddevice 能按名打开的设备名。
+
+    返回值直接喂给 `sd.RawInputStream(device=...)` —— sounddevice 接受字符串设备名，
+    这样就**不需要**在「我们设备表的索引」和「PortAudio 的索引」之间做映射
+    （Linux 上我们的表来自 pw-dump，索引跟 PortAudio 毫无关系）。
+    """
+    if device_name:
+        return device_name
+    if not device_pattern:
+        return None
+    want = device_pattern.lower()
+    for info in enumerate_mic_devices():
+        if want in info.name.lower():
+            print(f"[mic] 关键词 {device_pattern!r} 命中：{info.name!r}")
+            return info.name
+    print(f"[mic] ⚠️ 没找到匹配 '{device_pattern}' 的输入设备，改用系统默认设备")
+    return None
+
+
+async def _pump_capture(session, tele, seconds: float, stop_event, label: str, opener) -> int:
+    """共用的采集泵：开流 → 拉块 → 送会话 → 一定关流。返回送出的字节数。
+
+    两个平台（Windows 的 PortAudio 回调 / Linux 的 pw-record 子进程）在这里被抹平，
+    引擎只看到 `await source.read()`。关流顺序由 `AudioSource.close()` 内部保证。
+    """
+    source = opener()
+    end = None if seconds <= 0 else time.perf_counter() + seconds
+    sent = 0
+    try:
+        while (end is None or time.perf_counter() < end) and not _stop_requested(stop_event):
+            chunk = await source.read(timeout=1.0)
+            if chunk is None:
+                continue                      # 超时：还活着但暂时没数据
+            pcm16 = to_16k_mono(chunk, source.rate, source.channels)
+            if pcm16:
+                await session.send_audio(pcm16)
+                sent += len(pcm16)
+                if tele is not None:
+                    tele.add(f"{label}_chunk", bytes=len(pcm16))
+    finally:
+        source.close()
+    return sent
 
 
 def pick_input_device(pattern: str | None) -> int | None:
@@ -1073,41 +1126,72 @@ def pick_default_loopback(loops: list[dict], default_out_index: int | None,
     return None
 
 
-def pick_loopback_device(patterns: list[str] | None = None):
-    """返回 (index, name, rate, channels)。找不到返回 None。"""
-    import pyaudiowpatch as pyaudio
+def pick_loopback_target(patterns: list[str] | None = None,
+                         device_name: str | None = None) -> LoopbackTarget | None:
+    """挑一个「系统声采集」目标（纯逻辑 + 后端数据，两个平台共用）。
 
-    chain = [p.lower() for p in (patterns or LOOPBACK_FALLBACK)]
-    p = pyaudio.PyAudio()
+    优先级：
+      1) 用户在界面上按名选的（精确 / 不区分大小写 / 子串，见 resolve_device_name）；
+      2) 回退链关键词命中（`LOOPBACK_FALLBACK`）；
+      3) 系统**默认输出设备**对应的那一份（靠 pick_default_loopback 的多语言前缀兜底）；
+      4) 第一个可用设备，并且**留痕说明用了回退**（绝不静默选错）。
+
+    平台差异被压在 `query_loopback_devices()` / `default_output_index()` 里：
+    Windows 返回 WASAPI loopback 设备，Linux 返回 PipeWire 输出节点。
+    """
+    backend = platform.device_backend()
     try:
-        loops = list(p.get_loopback_device_info_generator())
-        if not loops:
-            return None, p
-        for kw in chain:
+        loops = backend.query_loopback_devices()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[loopback] ❌ 枚举设备失败：{type(exc).__name__}: {exc}", flush=True)
+        return None
+    if not loops:
+        return None
+
+    def _as_target(d: dict) -> LoopbackTarget:
+        # Linux 侧真正的打开标识是 node.name；Windows 侧是设备 index（字符串化）
+        ident = str(d.get("node_name") or d.get("index"))
+        return LoopbackTarget(id=ident, name=str(d.get("name", "")),
+                              sample_rate=int(d.get("defaultSampleRate", 48000)),
+                              channels=int(d.get("maxInputChannels", 2)))
+
+    # ① 用户按名指定
+    if device_name:
+        idx = resolve_device_name(device_name, "loopback")
+        if idx is not None:
             for d in loops:
-                if kw in str(d["name"]).lower():
-                    return (d["index"], d["name"], int(d["defaultSampleRate"]),
-                            int(d["maxInputChannels"])), p
-        try:
-            default_out = p.get_host_api_info_by_type(pyaudio.paWASAPI).get("defaultOutputDevice", -1)
-            try:
-                default_name = str(p.get_device_info_by_index(default_out).get("name") or "")
-            except Exception:  # noqa: BLE001
-                default_name = ""
-            d = pick_default_loopback(loops, default_out, default_name)
-            if d is not None:
-                return (d["index"], d["name"], int(d["defaultSampleRate"]),
-                        int(d["maxInputChannels"])), p
-            print(f"[loopback] ⚠️ 默认输出设备「{default_name or f'#{default_out}'}」在 loopback "
-                  f"列表里匹配不上（index / 设备名 / 多语言「默认」前缀都不中）"
-                  f"→ 回退到第一个 loopback 设备：{loops[0]['name']}", flush=True)
-        except Exception:
-            pass
-        d = loops[0]
-        return (d["index"], d["name"], int(d["defaultSampleRate"]), int(d["maxInputChannels"])), p
-    except Exception:
-        p.terminate()
-        raise
+                if int(d.get("index", -1)) == idx:
+                    print(f"[loopback] 按名称选中：{device_name!r} → {d.get('name')!r}")
+                    return _as_target(d)
+        print(f"[loopback] ⚠️ 未找到设备 '{device_name}'，回退自动检测")
+
+    # ② 回退链关键词
+    chain = [p.lower() for p in (patterns or LOOPBACK_FALLBACK)]
+    for kw in chain:
+        for d in loops:
+            if kw in str(d.get("name", "")).lower():
+                print(f"[loopback] 关键词 {kw!r} 命中：{d.get('name')!r}")
+                return _as_target(d)
+
+    # ③ 默认输出设备对应的那一份
+    try:
+        default_out = backend.default_output_index()
+        default_name = str(backend.device_info_by_index(default_out).get("name") or "")
+        d = pick_default_loopback(loops, default_out, default_name)
+        if d is not None:
+            print(f"[loopback] 选中默认输出设备对应的采集端点：{d.get('name')!r}")
+            return _as_target(d)
+        label = default_name or f"#{default_out}"
+        print(f"[loopback] ⚠️ 默认输出设备「{label}」在采集端点列表里匹配不上"
+              f"（index / 设备名 / 多语言「默认」前缀都不中）"
+              f"→ 回退到第一个：{loops[0].get('name')}", flush=True)
+    except Exception:  # noqa: BLE001 — 拿不到默认设备不该致命，下面还有兜底
+        pass
+
+    # ④ 第一个
+    return _as_target(loops[0])
+
+
 
 
 def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65) -> np.ndarray:

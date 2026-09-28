@@ -50,9 +50,13 @@ session:
   repeat_guard_ratio: 0.9
 
 # 音频设备选择（空字符串 = 自动检测，也可在界面下拉里选）
+# 两端的设备名来源不同：
+#   Windows → WASAPI 设备的名字（如 "Steam Streaming Speakers (loopback)"）
+#   Linux   → PipeWire 输出节点的 description（如 "REDMI 电脑音箱 2 Pro 模拟立体声"）
 capture:
   mic_device: ""            # 麦克风设备名；空 = 自动检测（默认设备）
-  loopback_device: ""       # VRChat 音频端点名；空 = 自动回退链
+  loopback_device: ""       # 「别人说话」的采集端点；空 = 自动回退链
+                            # Linux 上就是 VRChat 输出到的那个 sink（见 GUIDE.linux.md 第六节）
 
 # 每个方向一条独立会话
 directions:
@@ -83,22 +87,33 @@ merger:
   interval_s: 2.0            # 首个 delta 立即发，之后每 2 秒一次快照，句末必刷最终版
   carry_over: false          # true = 把上一段最终译文作为前缀保留（连续字幕观感）
 
-# 手腕屏幕（SteamVR overlay）
+# 手腕屏幕（Windows: SteamVR overlay / Linux: 自建 OpenXR overlay）
 overlay:
   enabled: true
+  # 后端：auto = 按平台自动选（Windows 用 pyopenvr；Linux 用自建 OpenXR，直接连
+  # Monado/WiVRn，不依赖任何第三方 overlay 管理器、无需注册、不写配置、不重启）。
+  # null = 彻底禁用这一条腿（等价于 enabled: false，但语义更明确）。
+  backend: auto
   # 刷新策略：0 = 有更新立刻上屏（本地显示不受 chatbox 2 秒节流约束，默认如此）
   #            >0 = 按秒数节流（怕刷太快看着晃时才调，例如 0.5）
   interval_s: 0
   anchor: right_hand         # left_hand | right_hand | tracker | hmd
   tracker_index: 0           # anchor=tracker 时取第几个 tracker（前臂 tracker 最贴合“绑在手臂上”）
+                             # ⚠️ Linux/OpenXR 上 tracker 是**按 role 寻址**的（不是按设备序号），
+                             #    这个序号是 role 表的序号，且未在真实 tracker 上验证过
   offset:
     pos: [0.0, 0.06, 0.02]   # 相对锚点偏移（米）——改完存盘即生效，无需重启
-    rot: [-47, -16, 0]       # 欧拉角（度）——默认值取自作者实测调好的右手腕角度
+    rot: [-47, -16, 0]       # 欧拉角（度，约定 Rz·Ry·Rx）——默认值取自作者实测调好的**右手腕**角度
+                             # ⚠️ 换到左手要镜像：rx 不变、ry 取反、rz 取反
+                             #    即 left_hand 用 [-47, 16, 0]（起始值，再戴着微调）
+                             # 界面上的「手腕屏微调」滑块拖完也是写回这里
     width_m: 0.23            # 面板宽度（米）
     curvature: 0.0           # >0 则弯曲贴合（0.1~0.3 可试）
     alpha: 0.9
   size_px: [1024, 440]       # 面板像素尺寸（[宽, 高]；界面「面板高」滑块改的就是这个高）
   font: "C:/Windows/Fonts/msyh.ttc"   # 雅黑；日文可用 NotoSansJP-VF.ttf
+                             # ⚠️ 这是 Windows 路径。**Linux 上留空即可**，会自动用 fontconfig
+                             #    找一套中日韩字体（填了不存在的路径会回落到位图字体、画不出中文）
   font_size: 36              # 译文字号（界面微调面板可拖；调小 → 同样高度能塞更多字）
   source_font_size: 29       # 原文小字号（同上）
   max_lines: 3               # 译文最多显示几行（超出保留最新）
@@ -118,6 +133,9 @@ overlay:
 output:
   audio:
     enabled: false           # 总开关（与 direction 的 output_audio 是「与」关系——两边都 true 才出声）
+    # ⚠️ 下面这条回退链是 **Windows 专用**（VB-Cable / VoiceMeeter 这类**事先装好**的虚拟声卡）。
+    #    Linux 上**不用配**：程序运行时会自己声明一对 PipeWire 节点
+    #    （`vlt_mic_sink` / `vlt_mic_source`，VRChat 里选显示名 "VLT Mic"），退出时自动销毁。
     device:                  # 按名称回退链找虚拟声卡（设备 ID 会随插拔变化，绝不写死）
       - "voicemeeter input"
       - "voicemeeter aux input"
