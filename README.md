@@ -1,14 +1,14 @@
 # VRChat 实时同传
 
-> **中文** | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Русский](README.ru.md)
+> **中文** | [English](docs/README.en.md) | [日本語](docs/README.ja.md) | [한국어](docs/README.ko.md) | [Русский](docs/README.ru.md)
 
 [![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](GUIDE.md#一前置条件)
-[![Python](https://img.shields.io/badge/python-3.11-blue)](GUIDE.md#一前置条件)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](docs/GUIDE.md#一前置条件)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-在 VRChat 里做**实时同声传译**：采集麦克风 / 游戏音频 → 阿里云百炼实时同传模型 →
+在 VRChat 里做**实时同声传译**：采集麦克风 / 游戏音频 → 千问云实时同传模型 →
 译文送到 **chatbox 气泡**、**VR 手腕屏**，可选把译音回灌进虚拟麦克风**让对方直接听见**。
 
 ![界面](assets/gui.png)
@@ -38,7 +38,7 @@
 
 从**快速上手**到**已知限制**的完整内容（安装、API key、用法、配置、排障、项目结构、开发）都在单独一份文档里：
 
-**➡️ [使用指南（GUIDE.md）](GUIDE.md)**
+**➡️ [使用指南（GUIDE.md）](docs/GUIDE.md)**
 
 ---
 
@@ -51,7 +51,7 @@
 > 想第一时间看到新增，点个 Star 或者偶尔回来翻翻即可。
 
 - [ ] **① 一份「怎么用」的教程视频** — 录制者不限，**语言不限**
-      先自己把软件装好、完整跑通一遍（照着 [零、最快上手](GUIDE.md#零最快上手下载现成的-exe) 走就行），
+      先自己把软件装好、完整跑通一遍（照着 [零、最快上手](docs/GUIDE.md#零最快上手下载现成的-exe) 走就行），
       然后录一个面向新手的教程：怎么下载安装、API key 填在哪里、怎么在 VRChat 里真正用起来。
       中文 / English / 日本語 / 한국어 / Русский 都可以；发在哪个平台、多长、什么风格都随你。
 
@@ -82,7 +82,7 @@
 
 ![收款码](assets/sponsor-qrcodes.png)
 
-- 🔑 还没开通百炼？**[点此开通「阿里云百炼大模型」▸](https://www.aliyun.com/minisite/goods?userCode=q8nma978)**
+- 🔑 还没开通千问云？**[点此开通「千问云」▸](https://www.qianwenai.com/)**
 
 > 图形界面顶栏也有「☕ 赞助」按钮，点开就是上面的入口。
 
