@@ -1103,6 +1103,76 @@ def test_connect_url_carries_room_and_masks_token() -> None:
     print(f"  连接 URL 自带房间码 + 令牌掩码 OK（握手路径 {last_path}，日志无明文令牌）")
 
 
+def _start_http_rejector(status: int):
+    """起一个只会用 HTTP 状态码拒绝握手的服务器（模拟 Worker 在建连前那一拒）。
+
+    ⚠️ 必须手写 HTTP/1.1 响应：`http.server` 默认回 HTTP/1.0，websockets 会判成
+    「不是合法 HTTP 响应」（`InvalidMessage`）而**不是** `InvalidStatus` —— 那就没测到
+    真实路径（本测试第一版正是这么写错的：假服务器抛的异常类型与真 Worker 不是同一个）。
+    """
+    import socket
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    reason = {400: "Bad Request", 401: "Unauthorized", 403: "Forbidden"}.get(status, "Error")
+    resp = (f"HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n"
+            f"Connection: close\r\n\r\n").encode()
+
+    def _serve() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return                       # 监听套接字已关 → 收干净退出
+            try:
+                conn.recv(4096)
+                conn.sendall(resp)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    return f"ws://127.0.0.1:{srv.getsockname()[1]}/ws", srv
+
+
+def test_http_rejection_is_fatal() -> None:
+    """★ Worker 在**建连前**用 HTTP 拒绝（401 缺令牌 / 403 令牌不对）→ 当致命错，不许重连。
+
+    真 CF Worker 的房间码校验与鉴权都在 Worker 层做完，被拒时连接根本没升级成
+    WebSocket，客户端**收不到**协议里那个 `err{code:"auth"}`。
+    `test_fatal_err_stops_retrying` 走的是假中继的 `err` 帧那条路，覆盖不到这里 ——
+    2026-09-28 在真部署上实测踩到：403 被当成网络抖动，客户端按退避无限重连。
+    """
+    for status, keyword in ((403, "令牌不对"), (401, "没配 room.token")):
+        url, srv = _start_http_rejector(status)
+        try:
+            rec = Recorder()
+            client = RoomClient(
+                RoomConfig(server_url=url, room_code=TEST_ROOM, token="t",
+                           reconnect_backoff=[0.05]),
+                rec.on_message, rec.on_status)
+            client.start()
+            thread = client._thread
+            try:
+                wait_until(lambda: client.state().conn is ConnectionState.ERROR,
+                           f"HTTP {status} 应进 ERROR 态", timeout=15.0)
+                st = client.state()
+                assert st.reconnects == 0, \
+                    f"★ HTTP {status} 后还在重连（{st.reconnects} 次）—— 这类错重连也没用"
+                assert keyword in st.last_error, \
+                    f"★ 原因不可读：{st.last_error!r}（应提到 {keyword!r}）"
+                assert "不再重连" in rec.status(), f"必须说清不再重连：{rec.status()!r}"
+                wait_until(lambda: not thread.is_alive(), "致命错误后线程应退出", timeout=6.0)
+            finally:
+                client.stop(timeout=5.0)
+        finally:
+            srv.close()
+    print("  Worker 建连前 HTTP 拒绝 → 致命错 / 零重连 / 原因可读 OK（401/403）")
+
+
 if __name__ == "__main__":
     print("test_room_client:")
     test_public_surface_never_leaks_ws()
@@ -1126,4 +1196,5 @@ if __name__ == "__main__":
     test_heartbeat_pings_and_detects_dead_link()
     test_state_snapshot_is_isolated()
     test_connect_url_carries_room_and_masks_token()
+    test_http_rejection_is_fatal()
     print("ALL PASSED")

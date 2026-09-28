@@ -53,6 +53,16 @@ class _FatalRoomError(RuntimeError):
     """服务端明确拒绝（鉴权失败 / 房间满 / 房间码非法）→ 别再重连了，重连只会一直被拒。"""
 
 
+#: Worker **在建连之前**用 HTTP 状态码拒掉时的语义（对端是 CF Worker 时必踩）。
+#: 协议里那个 `err{code:"auth"}` 只在 DO 层出现；鉴权/房间码校验发生在 Worker 层，
+#: 客户端根本收不到 `err` 帧，只会看到握手被拒 —— 所以这两条路径要在这里补齐。
+HTTP_FATAL_REASONS: dict[int, str] = {
+    400: "房间码被服务端拒绝（8 位 Crockford Base32，不含 I/L/O/U）",
+    401: "这个房间要令牌，但本机没配 room.token",
+    403: "令牌不对（room.token 与服务端 ROOM_TOKEN_HASH 对不上）",
+}
+
+
 @dataclass
 class _Pending:
     """一句「还没被服务端 ack」的话，重连后按它补发。"""
@@ -259,21 +269,50 @@ class RoomClient:
         """把 URL 里的令牌换成 `***` 再给人看（日志会落到用户硬盘上）。"""
         return _TOKEN_IN_URL_RE.sub(r"\1***", url)
 
-    async def _connect_once(self) -> bool:
-        """连一次，跑到连接断开为止。返回是否**成功进过房**（收到 welcome）。"""
+    @staticmethod
+    def _fatal_from_http(status: int) -> Exception:
+        """把 Worker 在建连前回的 HTTP 状态码翻成异常（400/401/403 属于致命，不再重连）。
+
+        没有映到的状态码（5xx / 网络层）走 `ProtocolError` —— 那是**临时**故障，
+        该退避重连，不能一刀切成「永不重连」。
+        """
+        try:
+            code = int(status)
+        except (TypeError, ValueError):
+            code = 0
+        reason = HTTP_FATAL_REASONS.get(code)
+        if reason:
+            return _FatalRoomError(f"HTTP {code}：{reason}")
+        return ProtocolError(f"服务端拒绝握手：HTTP {code or '未知'}")
+
+    async def _open_ws(self, url: str):
+        """建连；把 Worker 的 HTTP 拒绝翻成致命错误（收不到 `err` 帧的那一类）。
+
+        CF Worker 在**把请求交给 DO 之前**就做完了房间码校验与鉴权，被拒时回的是
+        HTTP 400/401/403，连接根本没升级成 WebSocket，客户端收不到协议里的
+        `err{code:"auth"}`。实测在真部署上踩到：不在这里翻译，客户端会把 403
+        当成网络抖动，按退避**无限重连**下去（正是协议里要避免的「一直撞墙」）。
+        """
         import websockets                              # 延迟导入：没开房间功能就不该付这个开销
 
+        try:
+            return await websockets.connect(
+                url,
+                open_timeout=CONNECT_TIMEOUT_S,
+                close_timeout=2.0,
+                # 心跳走**应用层** ping/pong：DO 休眠时协议层 ping 由 CF 边缘代答，
+                # 答了也不代表房间还活着，会掩盖真实掉线。
+                ping_interval=None,
+                max_size=MAX_FRAME_BYTES,
+            )
+        except websockets.exceptions.InvalidStatus as exc:
+            raise self._fatal_from_http(getattr(exc.response, "status_code", 0)) from exc
+
+    async def _connect_once(self) -> bool:
+        """连一次，跑到连接断开为止。返回是否**成功进过房**（收到 welcome）。"""
         url = self._connect_url()
         log(f"连接 {self._masked_url(url)}（房间 {self._room}，昵称 {self._nick}）")
-        async with websockets.connect(
-            url,
-            open_timeout=CONNECT_TIMEOUT_S,
-            close_timeout=2.0,
-            # 心跳走**应用层** ping/pong：DO 休眠时协议层 ping 由 CF 边缘代答，
-            # 答了也不代表房间还活着，会掩盖真实掉线。
-            ping_interval=None,
-            max_size=MAX_FRAME_BYTES,
-        ) as ws:
+        async with await self._open_ws(url) as ws:
             self._ws = ws
             try:
                 await ws.send(encode_frame(

@@ -107,8 +107,12 @@ export default {
     }
 
     // ---- ③ 转交 DO。acceptWebSocket 在 room.js 里做（Hibernation） ----
+    // locationHint 只决定**首次创建**时的落点（best-effort，CF 不保证）。
+    // 实测（2026-09-28，昆明电信出口 → 本机双客户端打真边缘）：
+    //   本机入口被 anycast 固定在 LAX，若 DO 建在 apac，每帧要走 本机→LAX→亚太→LAX→本机，
+    //   p50 ≈ 414ms；改 wnam 让 DO 与入口同在西岸，少两跳（见 wrangler.toml 的 ROOM_LOCATION_HINT）。
     const id = env.ROOM.idFromName(roomCode);
-    const stub = env.ROOM.get(id, { locationHint: "apac" });
+    const stub = env.ROOM.get(id, { locationHint: env.ROOM_LOCATION_HINT || "apac" });
     return stub.fetch(request);
   },
 };

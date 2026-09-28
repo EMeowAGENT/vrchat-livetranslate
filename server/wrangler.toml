@@ -18,7 +18,15 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
-# 部署时建议绑自定义域（workers.dev 在大陆基本不可达），批次 3 用：
-# [[routes]]
-# pattern = "vlt-room.kcm-nixi.cn/*"
-# zone_name = "kcm-nixi.cn"
+# DO 落点偏好（best-effort，只对**首次创建**生效）。
+# 可选：wnam / enam / sam / weur / eeur / apac / apac-ne / apac-se / oc / afr / me
+# 本机 A/B 实测见 README「落点 A/B」：大陆出口被 anycast 固定到 LAX 时，
+# DO 放与入口同一侧（wnam）比放 apac 少两跳。
+[vars]
+ROOM_LOCATION_HINT = "wnam"
+
+# 部署时建议绑自定义域（workers.dev 在大陆基本不可达）。
+# `custom_domain = true` 让 wrangler 自己建 DNS 记录 + 证书，比手写 zone route 少一步。
+[[routes]]
+pattern = "vlt-room.kcm-nixi.cn"
+custom_domain = true

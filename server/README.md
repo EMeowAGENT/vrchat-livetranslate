@@ -65,24 +65,41 @@ $sha = [System.Security.Cryptography.SHA256]::Create()
 客户端这边对齐同一口径：令牌走查询串会被日志原样打出来，所以 `RoomClient` 打连接日志前
 先过 `_masked_url()`，把 `k`/`tok`/`token` 的值抹成 `***`（日志会跟着 crashlog 落到用户硬盘上）。
 
-## 部署（批次 3 做，这里只留步骤）
+## 部署（已上线，2026-09-28）
+
+**已部署**：`vlt-room-relay` → 自定义域 **`wss://vlt-room.kcm-nixi.cn/ws`**
+（Worker 版本见 CF 控制台；账号 `842803916@qq.com`，Free 计划）。
 
 ```bash
 cd server
 npx wrangler deploy                        # 首次会建 DO migration v1
-npx wrangler secret put ROOM_TOKEN_HASH    # 可选：开门禁
+npx wrangler secret put ROOM_TOKEN_HASH    # 可选：开门禁（不配 = 开放房间）
 ```
 
 **必须绑自定义域名，不要用 `workers.dev`** —— `*.workers.dev` 在大陆基本不可达，
-而这个项目的用户就在大陆。做法是给 Worker 加 zone route（`wrangler.toml` 里已留注释）：
+而这个项目的用户就在大陆。`wrangler.toml` 里用 **custom domain**（wrangler 自己建 DNS + 证书）：
 
 ```toml
 [[routes]]
-pattern = "vlt-room.kcm-nixi.cn/*"
-zone_name = "kcm-nixi.cn"
+pattern = "vlt-room.kcm-nixi.cn"
+custom_domain = true
 ```
 
-然后把客户端的 `room.server_url` 填成 `wss://vlt-room.kcm-nixi.cn/ws`（房间码客户端自己补进查询串）。
+客户端把 `room.server_url` 填成 `wss://vlt-room.kcm-nixi.cn/ws`（房间码由客户端自己补进查询串）。
+
+### DO 落点 A/B（真边缘实测，2026-09-28）
+
+`locationHint` 只对**首次创建**生效，所以每档都要用一个**没用过的房间码**测。
+
+| `ROOM_LOCATION_HINT` | min | **p50** | p90 | max |
+|---|---|---|---|---|
+| `apac` | 410 | **414** | 886 | 970 ms |
+| **`wnam`（现用）** | 368 | **372** | **393** | 814 ms |
+
+口径：本机（昆明电信出口，任何 cast 落 `colo=LAX`）开**两个**客户端进同一房间，
+量「A 发 final → B 收到」的单程耗时，12 次采样。注意这是**同机双端**，数值 ≈ 2×「本机→边缘→DO」；
+真·中韩两人时双方各自的路由都要重新量。结论：**入口在美西时 DO 也放美西（`wnam`）比放亚太少两跳**，
+p90 从 886ms 掉到 393ms。换成别的网络环境改 `[vars] ROOM_LOCATION_HINT` 一行即可，不用动代码。
 
 ---
 
@@ -141,8 +158,8 @@ Hibernation（`state.acceptWebSocket`）把连接托管给 CF 边缘，没消息
 
 ## 已验证 / 未验证
 
-都是对**当前这份代码**在 `npx wrangler dev --local --port 8822`（wrangler 4.142.0 /
-node v22.23.1，本机 workerd）上实测的，探针脚本用完就删（不入库）。
+前一批是在 `npx wrangler dev --local`（wrangler 4.142.0 / node v22.23.1，本机 workerd）上实测的，
+探针脚本用完就删（不入库）；**带 ⭐ 的是 2026-09-28 部署到真 CF 边缘之后补上的**。
 
 - ✅ **起得来**：`/` 返回只读 JSON 状态页；`/ws` 非升级请求回 426；房间码非法回 400。
 - ✅ **正常收发**：两个真 `RoomClient` 同时进房 —— 成员表 2 人、3 个 partial + 1 个 final
@@ -155,11 +172,32 @@ node v22.23.1，本机 workerd）上实测的，探针脚本用完就删（不�
 - ✅ **`room_full`（致命）**：塞满 8 人后第 9 条连接 → 回 `err{code:"room_full"}` + `close(1008)`；
   真 `RoomClient` 拿到它之后 `last_error` 留下可读原因、连接态转 `error`、**零重连**、线程退出。
 
-- ❌ **未验证**：真部署到 CF 边缘（`wrangler deploy`）、跨洋延迟、DO 休眠后
-  `getWebSockets()` + attachment 恢复成员表的真实行为（本地 workerd 不模拟休眠）、
-  `alarm()` 空房回收（本地跑不到 60s 宽限期就结束了）。这些都是批次 3 的事。
-- ❌ **未验证**：令牌鉴权。`ROOM_TOKEN_HASH` 一次都没真配过，401/403 那两条分支
-  只是读代码读出来的；哈希比对用了不短路的 `sameHash()`，但也只在本地静态检查过。
-- ❌ **未验证**：20 帧/秒限速在**真 DO** 上的行为。限速逻辑在 `tests/test_room_client.py`
-  的进程内假中继上验过（发 40 帧丢 35 帧、留痕不断线），真 DO 上没跑过 ——
-  本地的 DO 计时精度和线上不一样，这一条要等批次 3 部署后再看。
+⭐ 真边缘（`wss://vlt-room.kcm-nixi.cn/ws`）上复验通过：
+
+- ✅ **部署本身**：custom domain 建起来、证书正常、`/` 状态页可读，DO migration v1 自动建。
+- ✅ **双端收发**：跨洋真收发正确、成员表同步、另一房间**零串音**（DO 按房间码隔离）、反向也通。
+- ⭐ **DO 休眠后恢复成员表**（原先风险最高的一条）：A 进房 → **全静默 50s**（关掉应用层心跳，
+  确保没有流量）→ B 进房唤醒 DO。结果：A 全程 `online`（连接被 CF 边缘托管，没掉）、
+  B 看到 2 人、**A 也看到 2 人**（DO 醒来后靠 `getWebSockets()` + `deserializeAttachment()`
+  把休眠前的 A 认了回来）、唤醒后扇出正常。
+  ⚠️ 诚实说明：无法直接观测「DO 到底有没有真被驱逐」，本测试证明的是**跨 50s 静默后行为正确**。
+- ✅ **令牌鉴权三条分支**（真边缘）：无令牌 → **401**、错令牌 → **403**、对令牌 → **101** 且能正常收发。
+  不配 `ROOM_TOKEN_HASH` 时状态页显示「未开启（任何人都能进房）」。当前线上**未开启**。
+- ✅ **8 人上限（真 DO）**：8 条连接全进房，第 9 条被拒。
+- ✅ **坏房间码（真握手）**：`SHORT` / `AAAA-BBBB` / `AAAAAAA1I2` 走真实 WebSocket 握手均被 **400** 拒。
+
+⭐ 真边缘上**发现并修掉**的客户端缺陷（`vlt/room/client.py`）：
+
+- **Worker 在建连前用 HTTP 拒绝时，客户端会无限重连**。鉴权与房间码校验都在 Worker 层做完，
+  被拒时连接根本没升级成 WebSocket，客户端**收不到**协议里的 `err{code:"auth"}`，
+  于是把 403 当成网络抖动按退避一直重连（实测 `reconnects=2` 且还在涨）。
+  现已在 `_open_ws()` 里把 400/401/403 翻成 `_FatalRoomError`（零重连 + 原因可读），
+  5xx 等临时故障保持可重连。回归断言见 `tests/test_room_client.py::test_http_rejection_is_fatal`。
+
+仍然**未验证**：
+
+- ❌ **`alarm()` 空房回收**：最后一人离开后 60s 宽限期到点清存储这条，只在代码层确认过；
+  线上要等一个真实空房挂满 60s 才能观察到（日志里会有「空房超过 60s → 已清空存储」）。
+- ❌ **真·中韩双人**：目前所有延迟数字都是**本机双客户端**打边缘得到的，
+  韩国那一侧的入口与路由一次都没量过。
+- ❌ **20 帧/秒限速在真 DO 上的计时精度**：签桶逻辑在进程内假中继上验过，真 DO 没跑过。
