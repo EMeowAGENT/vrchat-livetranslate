@@ -12,11 +12,17 @@
   与实时模型译音**同格式**，所以下游可以直接复用 `resample_24k_mono_to_48k_stereo`
   和 `VirtualMic`，不需要任何新管线。
 - 音色 `Cherry` 中/英/日都能读（实测），故默认一个音色就够；要换按 config 改。
+- **流式**（`synthesize_stream`，请求头 `X-DashScope-SSE: enable`）：同一句 20~30 字实测
+  首包 **0.36~0.42s**、整段 1.6~1.7s；下游虚拟声卡是抖动缓冲（攒 300ms 起播），拿到前几个
+  分片就能开口 —— 打字腿「开口」从 ~1.7s 降到 **~0.5s**。
+  ⚠️ 服务端在流**末尾**还会补发一片「整段汇总」（实测与前面所有分片**逐字节相同**）：
+  必须丢弃，否则整句会被念两遍。
 """
 from __future__ import annotations
 
 import base64
 import json
+from typing import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -75,6 +81,34 @@ def _fetch(url: str, timeout: float) -> bytes:
         raise TtsError(f"下载音频失败：{exc}") from exc
 
 
+def _extract_audio(obj: dict, timeout: float) -> bytes:
+    """从响应体里取音频原始字节：优先 base64 的 `data`，退回 `url` 下载。"""
+    audio = (obj.get("output") or {}).get("audio") or {}
+    if audio.get("data"):
+        try:
+            return base64.b64decode(audio["data"])
+        except Exception as exc:  # noqa: BLE001
+            raise TtsError(f"base64 音频解析失败：{exc}") from exc
+    if audio.get("url"):
+        return _fetch(str(audio["url"]), timeout)      # URL 有有效期，能不用就不用
+    return b""
+
+
+def _raise_if_error(obj: dict) -> None:
+    """服务端错误有两种外壳：`{"error": {...}}` 与带 code/message 的扁平形态。"""
+    if isinstance(obj.get("error"), dict):
+        raise TtsError(str((obj["error"] or {}).get("message") or obj["error"])[:300])
+    if obj.get("code") and obj.get("message"):
+        raise TtsError(str(obj["message"])[:300])
+
+
+def _chunk_to_pcm(chunk: bytes) -> bytes:
+    """SSE 分片 → 24k 单声道 s16le。文档说分片是裸 PCM；万一是容器（RIFF）就解一次。"""
+    if chunk[:4] == b"RIFF":
+        return _decode_to_24k_mono(chunk)
+    return chunk[: len(chunk) - (len(chunk) % 2)]
+
+
 def synthesize(
     text: str,
     *,
@@ -123,21 +157,122 @@ def synthesize(
         resp = json.loads(body)
     except Exception as exc:  # noqa: BLE001
         raise TtsError(f"响应解析失败：{exc}") from exc
-    if isinstance(resp.get("error"), dict):
-        raise TtsError(str((resp["error"] or {}).get("message") or resp["error"])[:300])
-
-    audio = ((resp.get("output") or {}).get("audio") or {})
-    raw: bytes | None = None
-    if audio.get("data"):
-        try:
-            raw = base64.b64decode(audio["data"])
-        except Exception as exc:  # noqa: BLE001
-            raise TtsError(f"base64 音频解析失败：{exc}") from exc
-    elif audio.get("url"):
-        raw = _fetch(str(audio["url"]), timeout)      # URL 有有效期，能不用就不用
+    _raise_if_error(resp)
+    raw = _extract_audio(resp, timeout)
     if not raw:
         raise TtsError("服务端没返回音频")
     return _decode_to_24k_mono(raw)
+
+
+def synthesize_stream(
+    text: str,
+    *,
+    voice: str = DEFAULT_VOICE,
+    model: str = DEFAULT_MODEL,
+    api_key: str = "",
+    language: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> Iterator[bytes]:
+    """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
+
+    为什么值得：实测同一句 20~30 字，首包 0.36~0.42s、整段 1.6~1.7s；而下游虚拟声卡
+    是抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），拿到前几个分片就能开口 ——
+    打字腿的「开口」从 ~1.7s 降到 ~0.5s。
+
+    退回策略（调用方不必写两套逻辑）：
+    - 服务端没给 `text/event-stream`（或一个分片都没拿到）→ 退回整段 `synthesize()`，yield 一整块；
+    - 中途失败 → **保留已经 yield 的分片**（宁可少说半句，也不让整句消失）。
+    """
+    text = (text or "").strip()
+    if not text:
+        raise TtsError("内容为空")
+    if not (api_key or "").strip():
+        raise TtsError("还没配置 API key（见界面右上角「设置」）")
+
+    payload: dict = {"model": model or DEFAULT_MODEL,
+                     "input": {"text": text, "voice": voice or DEFAULT_VOICE}}
+    lang_name = LANG_NAMES.get((language or "").lower())
+    if lang_name:
+        payload["input"]["language_type"] = lang_name
+    req = Request(ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Authorization": f"Bearer {api_key}",
+                           "Content-Type": "application/json",
+                           # 实测：这两个头一起给，服务端才按 SSE 分片推
+                           "Accept": "text/event-stream",
+                           "X-DashScope-SSE": "enable"}, method="POST")
+    got = 0
+    acc = bytearray()          # 已发出的音频（用来识别末尾那片「整段汇总」）
+    try:
+        with _get_opener().open(req, timeout=timeout) as resp:
+            ctype = str(resp.headers.get("Content-Type", "") or "")
+            if "event-stream" not in ctype:            # 服务端降级成了整段响应
+                try:
+                    obj = json.loads(resp.read().decode("utf-8", "replace"))
+                except Exception as exc:  # noqa: BLE001
+                    raise TtsError(f"响应解析失败：{exc}") from exc
+                _raise_if_error(obj)
+                raw = _extract_audio(obj, timeout)
+                if raw:
+                    got += 1
+                    yield _decode_to_24k_mono(raw)
+            else:
+                for line in resp:
+                    line = line.strip()
+                    if not line.startswith(b"data:"):
+                        continue                            # 心跳 / 空行 / event: 行
+                    data = line[5:].strip()
+                    if not data or data == b"[DONE]":
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except Exception:                       # noqa: BLE001
+                        continue                            # 非 JSON 的分片直接跳过
+                    _raise_if_error(obj)
+                    raw = _extract_audio(obj, timeout)
+                    if not raw:
+                        continue
+                    pcm = _chunk_to_pcm(raw)
+                    if not pcm:
+                        continue
+                    # ⚠️ 服务端在流末尾会补发一片「整段汇总」（实测与前面所有分片逐字节相同）：
+                    # 吃掉它，否则虚拟声卡会把整句念两遍。真分片不可能与已累计音频等长同内容。
+                    if acc and len(pcm) == len(acc) and pcm == bytes(acc):
+                        continue
+                    got += 1
+                    acc += pcm
+                    yield pcm
+    except TtsError:
+        if got:
+            return                                          # 已唱出去的部分不撤
+        raise
+    except HTTPError as exc:
+        if got:
+            return
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        # 可能只是服务端不认流式（头被拒）→ 先试整段兜底，兜底也失败再报这个错
+        err = TtsError(f"HTTP {exc.code}：{detail or exc.reason}")
+        try:
+            yield synthesize(text, voice=voice, model=model, api_key=api_key,
+                             language=language, timeout=timeout)
+        except TtsError:
+            raise err from exc
+        return
+    except URLError as exc:
+        if got:
+            return
+        raise TtsError(f"网络不可达：{exc.reason}") from exc
+    except Exception as exc:  # noqa: BLE001
+        if got:
+            return
+        raise TtsError(f"{type(exc).__name__}: {exc}") from exc
+
+    if not got:                                             # 流式没给东西 → 整段兜底
+        yield synthesize(text, voice=voice, model=model, api_key=api_key,
+                         language=language, timeout=timeout)
 
 
 def synthesize_omni(

@@ -145,6 +145,7 @@ text_input:
     enabled: true
     model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash
     voice: Cherry            # 多语言音色（中/英/日实测都能读）；界面「⚙ 设置 → 音色」可选
+    stream: true             # 流式合成（SSE）：首段音频 ~0.5s 就能起播；false = 等整段（~1.7s 才开口）
     timeout_s: 30
 
 # 界面（图形界面上次的选择，**启动时自动恢复**；手改也有效）

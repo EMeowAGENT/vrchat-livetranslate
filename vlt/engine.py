@@ -31,7 +31,7 @@ from .textin import TextTranslateError, split_for_chatbox, translate_text
 from .tts import DEFAULT_MODEL as DEFAULT_TTS_MODEL
 from .tts import DEFAULT_TIMEOUT_S as DEFAULT_TTS_TIMEOUT_S
 from .tts import DEFAULT_VOICE as DEFAULT_TTS_VOICE
-from .tts import TtsError, synthesize
+from .tts import TtsError, synthesize, synthesize_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
@@ -309,6 +309,9 @@ class Engine:
         self._merger: Merger | None = None
         self._overlay: WristOverlay | None = None
         self._virtualmic: VirtualMic | None = None
+        # 流式合成**串行**锁：同一时刻只让一路往虚拟声卡写分片（并发写会让分片交错，
+        # 听感是「整段反复重念」—— 连打两条也会）。懒建：首次用时在事件循环线程里创建。
+        self._speak_lock_obj: asyncio.Lock | None = None
         # 采集循环是长跑任务，不能直接持有 session 对象：重连会换新对象，
         # 旧引用会把音频继续发到死连接上。统一走这个代理。
         self._proxy = _SessionProxy(self)
@@ -840,18 +843,24 @@ class Engine:
         spoke_s = 0.0
         tts_cfg = tcfg.get("tts") or {}
         if self._virtualmic is not None and tts_cfg.get("enabled", True):
+            kw = dict(
+                voice=str(tts_cfg.get("voice") or DEFAULT_TTS_VOICE),
+                model=str(tts_cfg.get("model") or DEFAULT_TTS_MODEL),
+                api_key=str(self._cfg.session_base.get("api_key") or ""),
+                language=d.target_lang,
+                timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
+            )
             try:
-                pcm24 = await asyncio.to_thread(
-                    synthesize, translated,
-                    voice=str(tts_cfg.get("voice") or DEFAULT_TTS_VOICE),
-                    model=str(tts_cfg.get("model") or DEFAULT_TTS_MODEL),
-                    api_key=str(self._cfg.session_base.get("api_key") or ""),
-                    language=d.target_lang,
-                    timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
-                )
-                self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
-                self._virtualmic.end_sentence()
-                spoke_s = len(pcm24) / 2 / 24000
+                if tts_cfg.get("stream", True):
+                    # 流式（SSE）：首段音频 ~0.4s 就起播（整段合成要等 1.6~1.9s 才开口）。
+                    # 走同一个串行锁：连打两条也不会两路分片交错（听感「反复重念」）。
+                    async with self._speak_lock():
+                        spoke_s = await asyncio.to_thread(self._speak_stream, translated, kw)
+                else:
+                    pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
+                    self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+                    self._virtualmic.end_sentence()
+                    spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
                 self._events.on_status("warn", f"打字译音失败：{exc}（文字输出不受影响）")
             except Exception as exc:  # noqa: BLE001
@@ -860,6 +869,34 @@ class Engine:
 
         tail = f"，已出声 {spoke_s:.1f}s" if spoke_s else ""
         self._events.on_status("info", f"打字已送出（{len(text)} 字 → {d.target_lang}{tail}）")
+
+    # ---------------------------------------------------------------- 流式出声
+
+    def _speak_lock(self) -> asyncio.Lock:
+        """流式合成的串行锁（懒建：首次调用发生在事件循环线程里）。
+
+        为什么必须串行：分片是**按时间顺序**写进同一个抖动缓冲的，两路同时写会让
+        彼此的分片交错，听感就是「整段反复重念」（总时长和转写都看不出问题）。
+        """
+        lock = self._speak_lock_obj
+        if lock is None:
+            lock = asyncio.Lock()
+            self._speak_lock_obj = lock
+        return lock
+
+    def _speak_stream(self, text: str, kw: dict) -> float:
+        """把流式合成的分片**就地**喂给虚拟声卡，返回推入的秒数。
+
+        在**工作线程**里跑（`asyncio.to_thread`）：迭代 SSE 是阻塞 IO。
+        虚拟声卡自带抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），
+        所以第一个分片就能让它开口 —— 打字腿「开口」从 ~1.7s 降到 ~0.5s。
+        """
+        total = 0
+        for pcm24 in synthesize_stream(text, **kw):
+            self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+            total += len(pcm24)
+        self._virtualmic.end_sentence()
+        return total / 2 / 24000
 
     # ---------------------------------------------------------------- 断线自愈
 
