@@ -1192,6 +1192,21 @@ def pick_loopback_target(patterns: list[str] | None = None,
     return _as_target(loops[0])
 
 
+def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65) -> np.ndarray:
+    """窗口化 sinc 低通，供降采样前的抗混叠用。
+
+    目标采样率 16kHz（奈奎斯特 8kHz），截止取 7kHz 留出过渡带。
+    采样率本身已低于截止的两倍时不做处理（滤不掉，也没必要）。
+    """
+    if rate <= cutoff_hz * 2:
+        return a.astype(np.float64)
+    n = np.arange(taps) - (taps - 1) / 2
+    fc = cutoff_hz / rate                      # 归一化截止频率（周期/样点）
+    h = 2 * fc * np.sinc(2 * fc * n) * np.hamming(taps)
+    s = h.sum()
+    if not s:
+        return a.astype(np.float64)
+    return np.convolve(a.astype(np.float64), h / s, mode="same")
 
 
 def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65) -> np.ndarray:
@@ -1244,104 +1259,25 @@ def to_16k_mono(pcm: bytes, rate: int, channels: int) -> bytes:
 async def run_loopback(session, tele, patterns: list[str] | None = None,
                        seconds: float = 0.0, device_name: str | None = None,
                        stop_event: threading.Event | None = None) -> None:
-    """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。"""
-    import pyaudiowpatch as pyaudio
+    """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。
 
-    loop = asyncio.get_running_loop()
-
-    # 优先按设备名解析
-    if device_name:
-        resolved_idx = resolve_device_name(device_name, "loopback")
-        if resolved_idx is not None:
-            p = pyaudio.PyAudio()
-            try:
-                dev_info = p.get_device_info_by_index(resolved_idx)
-                idx = resolved_idx
-                name = str(dev_info.get("name", device_name))
-                rate = int(dev_info.get("defaultSampleRate", 48000))
-                channels = int(dev_info.get("maxInputChannels", 2))
-                print(f"[loopback] 按名称选中设备：{device_name!r} → #{idx}")
-            except Exception:
-                p.terminate()
-                resolved_idx = None
-
-    if device_name and resolved_idx is not None:
-        pass  # idx/name/rate/channels already set above
-    else:
-        if device_name:
-            print(f"[loopback] ⚠️ 未找到设备 '{device_name}'，回退自动检测")
-        picked, p = pick_loopback_device(patterns)
-        if picked is None:
-            print("[loopback] ❌ 没找到任何 loopback 设备（VRChat 在跑吗？在物理控制台会话里吗？）")
-            p.terminate()
-            return
-        idx, name, rate, channels = picked
-    print(f"[loopback] 采集端点 #{idx}「{name}」{rate}Hz ×{channels}ch → 16kHz 单声道")
-
-    stream = p.open(format=pyaudio.paInt16, channels=min(2, channels or 2), rate=rate,
-                    frames_per_buffer=int(rate * 0.1), input=True, input_device_index=idx)
-    queue: asyncio.Queue[bytes] = asyncio.Queue()
-    # ⚠️ 读线程必须有退出条件，且关闭流之前**必须先把它 join 掉**。
-    # 否则：一个线程卡在阻塞的 stream.read() 里，另一个线程把流 stop/close、
-    # 把 PortAudio terminate 掉 → 访问违规（原来是 while True 死循环，
-    # 用户实测点「停止翻译」时崩在这里，faulthandler 抓到 pyaudiowpatch read 里访问违规）。
-    reader_stop = threading.Event()
-    chunk_max = int(rate * 0.1)
-
-    def reader():
-        # ⚠️ 必须用 get_read_available() **非阻塞轮询**，不能用阻塞的 stream.read()：
-        # WASAPI loopback 在端点没有音频在播时，read() 会一直不返回（实测 3 秒 0 帧、
-        # 读线程永久卡在里面），于是收尾时「关流/terminate」与「卡住的读」撞车
-        # → 访问违规（用户实测闪退，退出码 139）。轮询则任何情况下都能秒退。
-        while not reader_stop.is_set():
-            try:
-                avail = stream.get_read_available()
-            except Exception:
-                break
-            if avail <= 0:
-                time.sleep(0.01)
-                continue
-            try:
-                data = stream.read(min(avail, chunk_max), exception_on_overflow=False)
-            except Exception:
-                break
-            if not data:
-                continue
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, data)
-            except RuntimeError:
-                break   # 事件循环已关闭（收尾中），正常退出
-
-    th = threading.Thread(target=reader, daemon=True, name="vlt-loopback-reader")
-    th.start()
+    平台差异全部压在 `CaptureBackend.open_loopback()` 后面：
+      * Windows：WASAPI loopback（pyaudiowpatch），非阻塞轮询 + 读线程
+      * Linux  ：`pw-record --target=<sink>`，抓该 sink 的 monitor
+    本函数只做「挑一个目标 → 拉块 → 送会话」。
+    """
+    target = pick_loopback_target(patterns, device_name)
+    if target is None:
+        print("[loopback] ❌ 没找到任何可采集的系统输出"
+              "（VRChat 在跑吗？PipeWire/音频服务正常吗？）")
+        return
+    print(f"[loopback] 采集端点「{target.name}」{target.sample_rate}Hz ×{target.channels}ch"
+          f" → 16kHz 单声道")
     print("[loopback] 开始采集" + ("（Ctrl+C 结束）" if seconds <= 0 else f"（{seconds:.0f}s）"))
-    end = None if seconds <= 0 else time.perf_counter() + seconds
-    sent_bytes = 0
-    try:
-        while (end is None or time.perf_counter() < end) and not _stop_requested(stop_event):
-            try:
-                raw = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            pcm16 = to_16k_mono(raw, rate, min(2, channels or 2))
-            if pcm16:
-                await session.send_audio(pcm16)
-                sent_bytes += len(pcm16)
-                if tele is not None:
-                    tele.add("loopback_chunk", bytes=len(pcm16))
-    finally:
-        # 顺序不能改：① 通知读线程退出 → ② 等它真的退出 → ③ 才关闭流
-        reader_stop.set()
-        th.join(timeout=2.0)
-        if th.is_alive():
-            log.warning("[loopback] 读线程未在 2s 内退出，仍继续关闭流（可能竞争）")
-        try:
-            stream.stop_stream()
-            stream.close()
-        except Exception:
-            pass
-        p.terminate()
-    print(f"[loopback] 采集结束，共 {sent_bytes} bytes ≈ {sent_bytes / 2 / 16000:.0f}s")
+    sent = await _pump_capture(session, tele, seconds, stop_event, "loopback",
+                               lambda: platform.capture_backend().open_loopback(
+                                   target, blocksize=CHUNK_BYTES))
+    print(f"[loopback] 采集结束，共 {sent} bytes ≈ {sent / 2 / 16000:.0f}s")
 
 
 def list_devices() -> None:
