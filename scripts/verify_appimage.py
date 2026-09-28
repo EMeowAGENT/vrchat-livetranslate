@@ -61,7 +61,8 @@ def _find(root: Path, pattern: str) -> Path | None:
     return hits[0] if hits else None
 
 
-def verify(img: Path, *, do_render: bool = True, do_font: bool = True) -> bool:
+def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
+           expect_slim: bool = True) -> bool:
     from check_platform_purity import appdir, check as purity_check
 
     # ① 平台纯度（模块 + 字样）
@@ -87,20 +88,37 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True) -> bool:
             return subprocess.run([str(py), "-P", *args], env=env, cwd=str(root),
                                   capture_output=True, text=True, timeout=timeout)
 
-        # ② 包内导入 + 反向排除
-        _step("② 包内导入 + 反向排除（用包内解释器）")
+        # ② 包内导入 + 反向排除 + 瘦身
+        _step("② 包内导入 + 反向排除 + xr 瘦身（用包内解释器）")
+        slim_expect = (
+            "site = Path(sysconfig.get_paths()['purelib'])\n"
+            "assert (site/'xr/library/x86_64/libopenxr_loader.so').exists(), \\\n"
+            "    '缺 pyopenxr 在 linux/x86_64 上要 dlopen 的 loader'\n"
+            "assert (site/'xr/api_layer/x86_64').is_dir(), \\\n"
+            "    '缺 api_layer/x86_64 目录（import xr 时 expose_packaged_api_layers 需要）'\n"
+        ) if expect_slim else ""
+        slim_gone = (
+            "gone = ['xr/api_layer/android','xr/api_layer/aarch64','xr/api_layer/win32',\n"
+            "        'xr/api_layer/windows','xr/api_layer/linux','xr/library/aarch64',\n"
+            "        'xr/library/android','xr/library/win32']\n"
+            "left = [p for p in gone if (site/p).exists()]\n"
+            "assert not left, f'xr 瘦身没生效（这些还在包里）：{left}'\n"
+        ) if expect_slim else ""
         probe = (
-            "import importlib.util as u\n"
+            "import importlib.util as u, sysconfig\n"
+            "from pathlib import Path\n"
             "import vlt.gui, vlt.engine, vlt.output.openxr_overlay, vlt.platform\n"
             "for bad in ('vlt.platform.win', 'vlt.output.openvr_overlay'):\n"
             "    assert u.find_spec(bad) is None, f'Linux 产物里不该有 {bad}'\n"
+            + slim_expect + slim_gone +
             "print('OK')\n"
         )
         res = _run(["-c", probe])
         if res.returncode == 0:
-            _ok("核心模块导入正常，且 Windows 独占模块不在包里")
+            tail = "，且 Windows 独占模块不在包里" + ("，xr 只留 linux x86_64" if expect_slim else "")
+            _ok("核心模块导入正常" + tail)
         else:
-            _fail(f"包内导入/反向排除失败：{(res.stderr or res.stdout).strip()[:400]}")
+            _fail(f"包内导入/反向排除/瘦身检查失败：{(res.stderr or res.stdout).strip()[:400]}")
 
         # ③ 离线渲染一帧（不碰 VR / 音频 / 显示器）
         if do_render:
@@ -156,6 +174,8 @@ def main() -> int:
     ap.add_argument("image", type=Path, help="AppImage 产物路径")
     ap.add_argument("--no-render", action="store_true", help="跳过离线渲染")
     ap.add_argument("--no-font", action="store_true", help="跳过 Tk 字体检查")
+    ap.add_argument("--allow-fat", action="store_true",
+                    help="允许未瘦身（跳过「xr 只留 linux x86_64」的断言）")
     args = ap.parse_args()
 
     if not args.image.exists():
@@ -164,7 +184,8 @@ def main() -> int:
     if not args.image.name.endswith(".AppImage"):
         print(f"这不是 AppImage：{args.image.name}")
         return 2
-    ok = verify(args.image, do_render=not args.no_render, do_font=not args.no_font)
+    ok = verify(args.image, do_render=not args.no_render, do_font=not args.no_font,
+                expect_slim=not args.allow_fat)
     return 0 if ok else 1
 
 

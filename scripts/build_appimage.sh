@@ -33,11 +33,19 @@ OUT_DIR="${REPO}/dist"
 WORK="${REPO}/build/appimage"
 APPDIR="${WORK}/AppDir"
 TOOLS="${REPO}/build/tools"
-VERIFY=1
-[ "${1:-}" = "--no-verify" ] && VERIFY=0
-
 die() { echo "[X] $*" >&2; exit 1; }
 step() { echo; echo "=== $* ==="; }
+
+VERIFY=1
+SLIM=1
+for _arg in "$@"; do
+    case "$_arg" in
+        --no-verify) VERIFY=0 ;;
+        --no-slim)   SLIM=0 ;;
+        *) die "未知参数：$_arg（可用：--no-verify / --no-slim）" ;;
+    esac
+done
+unset _arg
 
 # ---------------------------------------------------------------- 0. 前置检查
 step "0/6 检查前置条件"
@@ -144,6 +152,35 @@ for _win_mod in "vlt/platform/win.py" "vlt/output/openvr_overlay.py"; do
 done
 find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 echo "    已反向排除 Windows 独占实现（vlt/platform/win.py、vlt/output/openvr_overlay.py）"
+
+# 1e. ★ 瘦身：pyopenxr（`xr`）只留 **linux x86_64** 用得到的部分
+#
+# 为什么值得做：pyopenxr 的 wheel 里带着给 **7 个平台**预编译的 API layer 与 loader ——
+# 光 `api_layer/android/` 一份就 56MB（core_validation 24MB + api_dump 22MB），
+# 而我们只用 `xr.*` 的接口，从不 enable 调试层。未压缩能省 ~1.3 亿字节。
+#
+# ⚠️ 保留集不是凭感觉定的，是**由 pyopenxr 自己的代码钉死**的：
+#   * `xr/library/__init__.py`   —— linux + x86_64 时 `LoadLibrary(xr.library.x86_64/
+#     libopenxr_loader.so)`，而且 `xr/raw_functions.py` 在 **import 时**就 dlopen 它；
+#   * `xr/api_layer/__init__.py` —— **import 时**就调 `expose_packaged_api_layers()`，
+#     而它要 `xr.api_layer.x86_64` 这个**目录**存在（`importlib.resources.as_file`）。
+#   所以这两个必须留；`api_layer/linux/`、顶层 `library/libopenxr_loader.so` 都没有
+#   任何代码引用（x86_64 那份才是被选中的）。
+_XR="$APPDIR/usr/python/lib/python${PYVER}/site-packages/xr"
+if [ "$SLIM" -eq 1 ]; then
+    [ -d "$_XR" ] || die "找不到 $_XR —— pyopenxr 的布局变了？瘦身规则要跟着改"
+    rm -rf "$_XR/api_layer"/{android,aarch64,win32,windows,linux}
+    rm -rf "$_XR/library"/{aarch64,android,win32}
+    rm -f  "$_XR/library/openxr_loader.dll"
+    # 断言保留集没被误删：错了就在这里炸，而不是发到用户手里才「启动即崩」
+    [ -f "$_XR/library/x86_64/libopenxr_loader.so" ] \
+        || die "瘦身误删：library/x86_64/libopenxr_loader.so 不见了（import xr 会直接失败）"
+    [ -d "$_XR/api_layer/x86_64" ] \
+        || die "瘦身误删：api_layer/x86_64 目录不见了（import xr 会直接失败）"
+    echo "    ✅ xr 已瘦身：只留 linux x86_64（$(du -sh "$_XR" | cut -f1)）"
+else
+    echo "    （已按 --no-slim 跳过 xr 瘦身：产物会大 ~30MB）"
+fi
 
 
 # ---------------------------------------------------------------- Xft 版 Tk
@@ -328,9 +365,13 @@ echo "    ✅ $OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）"
 # 验收逻辑**不写在这里**：它要能单独对着任意 AppImage 跑（CI 直接调它，不必重新构建），
 # 见 scripts/verify_appimage.py。这一步只是构建流程里的自动转调。
 if [ "$VERIFY" -eq 1 ]; then
-    step "5/6 AppImage 独立验收（平台纯度 + 包内导入 + 离线渲染 + 字体）"
-    "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG" \
-        || die "AppImage 验收未通过（上面有明细）"
+    step "5/6 AppImage 独立验收（平台纯度 + 包内导入 + xr 瘦身 + 离线渲染 + 字体）"
+    if [ "$SLIM" -eq 1 ]; then
+        "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG"
+    else
+        # --no-slim 时别去要求「瘦身已生效」，否则两个开关自相矛盾
+        "$VENV_PY" "$REPO/scripts/verify_appimage.py" "$OUT_IMG" --allow-fat
+    fi || die "AppImage 验收未通过（上面有明细）"
 else
     step "5/6 验收已按 --no-verify 跳过"
     echo "    ⚠️ 跳过 = **未验证**：产物已生成，但平台隔离/导入/渲染都没检查过。"
