@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import sys
 import math
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -469,12 +470,32 @@ class XrOverlaySession:
         self._anchor_key = key
 
     def anchor_space(self, anchor: str) -> Any:
-        """层要挂到哪个 space。"""
+        """层要挂到哪个 space。
+
+        ⚠️ action space 在动作同步生效前是**未追踪**的，层会落到 LOCAL 原点 ——
+        实测表现就是「面板固定不动、不跟手也不跟头」。所以这里做一次回退：
+        锚点没被追踪时改用 `view_space`（至少跟着头），sync 生效后下一帧自然切回。
+        """
         if anchor == "hmd":
             return self.view_space
         if self._action_map:
-            return next(iter(self._action_map.values()))[1]
+            space = next(iter(self._action_map.values()))[1]
+            if self._space_tracked(space):
+                return space
+            return self.view_space
         return self.view_space
+
+    def _space_tracked(self, space: Any) -> bool:
+        """这个 space 当前是否带位置追踪（locate 一次看标志位）。"""
+        import xr
+        fr = self._frame_state
+        t = int(getattr(fr, "predicted_display_time", 0) or 0) or time.monotonic_ns()
+        try:
+            loc = xr.locate_space(space, self.ref_space, xr.Time(t))
+            return bool(int(loc.location_flags)
+                        & int(xr.SpaceLocationFlags.POSITION_TRACKED_BIT))
+        except Exception:  # noqa: BLE001
+            return False
 
     def anchor_tracked(self, anchor: str) -> bool | None:
         """锚点是否被追踪（诊断用；拿不到返回 None）。"""
@@ -534,24 +555,19 @@ class XrOverlaySession:
         # ⚠️ 拿到 image 后必须 wait 才能写
         xr.wait_swapchain_image(self.swapchain, xr.SwapchainImageWaitInfo(
             timeout=1_000_000_000))
-        if self.action_set is not None:
-            # ⚠️ 两条都必要：
-            #   1) 不同步动作，pose 永远不更新（spike 的 G 就是靠它才读到手的）
-            #   2) 但 `xrSyncActions` 在会话**未 FOCUSED**时会抛
-            #      `XR_ERROR_SESSION_NOT_FOCUSED`（Monado: oxr_input.c 明写只能 focused 调），
-            #      而 overlay 会话要等合成器报 visible/focused 才会进 FOCUSED。
-            #      早先这里没防，导致**每一帧都在这一行夭折**、`end_frame` 从未执行、
-            #      手腕上什么都看不到 —— 实测踩过。
-            #      所以：非 FOCUSED 就跳过同步（这一帧的 pose 用上一帧的值），
-            #      并且把异常吃掉（同步失败不该让整帧作废）。
-            if self.state == xr.SessionState.FOCUSED:
-                try:
-                    xr.sync_actions(self.session, xr.ActionsSyncInfo(active_action_sets=[
-                        xr.ActiveActionSet(action_set=self.action_set,
-                                           subaction_path=xr.Path(0))]))
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("[overlay:xr] sync_actions 失败（本帧不同步）：%s: %s",
-                              type(exc).__name__, exc)
+        if self.action_set is not None and self.state is not None \
+                and int(self.state) >= int(xr.SessionState.SYNCHRONIZED):
+            # ⚠️ 动作必须**每帧**同步。只同步一次、或只在 FOCUSED 时才同步，pose 会一直停在
+            #    「未追踪」→ 层落到 LOCAL 原点：实测表现正是「黑色长方形固定不动、不跟手也不跟头」。
+            #    非 FOCUSED 时 Monado 可能抛 `XR_ERROR_SESSION_NOT_FOCUSED`，吃掉即可
+            #    （同步失败不该让整帧作废）。
+            try:
+                xr.sync_actions(self.session, xr.ActionsSyncInfo(active_action_sets=[
+                    xr.ActiveActionSet(action_set=self.action_set,
+                                       subaction_path=xr.Path(0))]))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("[overlay:xr] sync_actions 失败（本帧不同步）：%s: %s",
+                          type(exc).__name__, exc)
         self._gl.upload(self.textures[idx], w, h, image.tobytes())
         xr.release_swapchain_image(self.swapchain)
 
@@ -639,6 +655,18 @@ class OpenXrOverlay:
         # 「最近一次内容」缓存（热重载 / 自愈后重画用）
         self._last_render_cached: tuple[str, str] | None = None
         self._last_entries_cached: tuple | None = None
+        # ★ 后台帧循环：OpenXR 的 composition layer 是**每帧**提交的（内容不变也要重提，
+        #   否则面板会在静止几帧后消失 —— 实测「黑色长方形出现一下又没了」就是这个），
+        #   而 `xrWaitFrame` 没有超时参数、session 未 running 时会**永久阻塞**
+        #   （实测：连续提交会卡死，被 timeout 杀掉退出码 124）。
+        #   两件事都不能发生在调用方的线程里（engine 是 asyncio 循环、GUI 是主线程），
+        #   所以帧循环放独立线程，`update()` 只渲染并放到「待显示」槽，绝不阻塞。
+        self._frame_thread: threading.Thread | None = None
+        self._frame_stop = threading.Event()
+        self._init_done = threading.Event()
+        self._img_lock = threading.Lock()
+        self._pending_img: Any | None = None     # 新渲染的一帧（待上传）
+        self._shown_img: Any | None = None       # 当前该显示的一帧（每帧重提用）
 
     # ---------- 生命周期 ----------
     def start(self) -> bool:
@@ -654,24 +682,98 @@ class OpenXrOverlay:
         if blocked:
             log.warning("[overlay:xr] %s（这条腿不启用；测试不该碰用户的运行时）", blocked)
             return False
+        # ★ 整条 XR/GL 生命线必须在**同一个线程**里：`eglMakeCurrent` 把 context 绑在
+        #   调用它的线程上，换个线程再 glTexImage2D / xrWaitFrame 就是错的 —— 实测表现
+        #   是「帧循环线程里 session 一直停在 READY(2)、提交报 SessionNotRunning」。
+        self._frame_stop.clear()
+        self._init_done = threading.Event()
+        self._frame_thread = threading.Thread(target=self._xr_main, daemon=True, name="vlt-xr")
+        self._frame_thread.start()
+        if not self._init_done.wait(timeout=30.0):
+            log.warning("[overlay:xr] ⚠️ 初始化超时（30s）——手腕屏已禁用，其它输出不受影响")
+            self._frame_stop.set()
+            return False
+        return self.available
+
+    def _xr_main(self) -> None:
+        """XR 主循环：建 GL/session → 帧循环 → 清理，**全在这一个线程里**。"""
         try:
             self._gl = EglGlContext()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[overlay:xr] ⚠️ 无法建立 GL/Wayland context：%s: %s"
-                        "（手腕屏已禁用，其它输出不受影响）", type(exc).__name__, exc)
-            return False
-        try:
             self._bring_up(rebuild_gl=False)
         except Exception as exc:  # noqa: BLE001
             log.warning("[overlay:xr] ⚠️ 建立 overlay 会话失败：%s: %s"
                         "（手腕屏已禁用，其它输出不受影响）", type(exc).__name__, exc)
-            self._teardown(keep_gl=True)
-            return False
+            self._teardown(keep_gl=False)
+            self._init_done.set()
+            return
         self.available = True
         log.info("[overlay:xr] ✅ 已挂到 %s（%sx%s，GL %s，会话状态 %s）",
                  self.cfg.anchor, self.cfg.size_px[0], self.cfg.size_px[1],
                  self._gl.gl_string(GL_RENDERER), self._sess.state)
-        return True
+        self._init_done.set()
+        try:
+            self._frame_loop()
+        finally:
+            self.available = False
+            self._teardown(keep_gl=False)     # 同线程清理（GL context 线程绑定）
+
+    def _frame_loop(self) -> None:
+        """后台帧循环：泵事件 → 每帧同步动作 → 每帧重提「当前该显示的那一帧」。
+
+        * **每帧**提交是硬要求：OpenXR 的 composition layer 不是持久对象，
+          内容不变也要重提，否则面板静止几帧后就没了（实测到的现象）。
+        * `xrWaitFrame` **没有超时**，session 未 running 时会永久阻塞 —— 所以只在
+          session 至少 READY 时才进帧循环；这样即使运行时抽风，卡住的也只是这条
+          daemon 线程，engine 的 asyncio 循环 / GUI 主线程不受影响。
+        * `sync_actions` 也在每帧做：动作状态只有同步后才更新，只同步一次的话
+          锚点会一直停在「未追踪」→ 面板固定在原点、不跟手也不跟头。
+        """
+        import xr
+        while not self._frame_stop.is_set():
+            sess = self._sess
+            if sess is None:
+                return
+            self._reload_config_if_changed()      # 热重载也放这里（ensure_anchor 是 XR 调用）
+            try:
+                sess.pump_events()
+            except Exception:  # noqa: BLE001
+                pass
+            with self._img_lock:
+                img = self._pending_img
+                if img is not None:
+                    self._pending_img = None
+                    self._shown_img = img
+                else:
+                    img = self._shown_img
+            if img is None:
+                time.sleep(0.05)
+                continue
+            state = sess.state
+            if state is None or int(state) < int(xr.SessionState.READY):
+                time.sleep(0.05)        # 未 running 时绝不进 wait_frame（会吊死）
+                continue
+            try:
+                sess.submit(img, self.cfg)
+            except Exception as exc:  # noqa: BLE001
+                self._fails += 1
+                self._fails_in_stage += 1
+                if self._fails == 1:
+                    log.warning("[overlay:xr] ❌ 提交层失败：%s: %s", type(exc).__name__, exc)
+                if self._fails % 30 == 0:
+                    log.warning("[overlay:xr] ❌ 已连续失败 %d 次（面板停在最后一帧）", self._fails)
+                self._escalate()
+                time.sleep(0.05)
+                continue
+            self.frames_updated += 1
+            self._last_ok_at = time.monotonic()
+            if self._fails:
+                log.info("[overlay:xr] ✅ 恢复上传（连续失败 %d 次，期间重建 %d 次、重开会话 %d 次）",
+                         self._fails, self._rebuilds, self._reinits)
+                self._fails = 0
+                self._stage = "none"
+                self._fails_in_stage = 0
+            if self.frames_updated == 1 or self.frames_updated % 300 == 0:
+                log.info("[overlay:xr] ← 面板已更新（第 %d 帧）", self.frames_updated)
 
     def _bring_up(self, *, rebuild_gl: bool) -> None:
         """（重新）建一套 XR 会话，并把当前内容画上去。"""
@@ -708,7 +810,17 @@ class OpenXrOverlay:
         return [e for e in want if not have or e in have]
 
     def close(self) -> None:
-        self._teardown(keep_gl=False)
+        """请求 XR 线程退出并等它收尾。
+
+        teardown 由**该线程自己**执行：GL context 是线程绑定的，换个线程销毁同样不安全。
+        """
+        self._frame_stop.set()
+        th = self._frame_thread
+        if th is not None and th.is_alive():
+            th.join(timeout=5.0)
+            if th.is_alive():
+                log.warning("[overlay:xr] XR 线程未在 5s 内退出（可能卡在 wait_frame），放弃等待")
+        self._frame_thread = None
         self.available = False
 
     def _teardown(self, *, keep_gl: bool) -> None:
@@ -721,32 +833,39 @@ class OpenXrOverlay:
 
     # ---------- 内容 ----------
     def update(self, text: str, source: str = "", force: bool = False) -> None:
+        """渲染一帧并交给后台帧循环 —— **立即返回，不阻塞调用方**。"""
         self._last_render_cached = (text, source)
         if self.dry_run:
             self._write_demo(render_panel(text, source, self.cfg))
             return
-        if not self.available or self._sess is None:
-            return
         if not force and self._last_render == (text, source):
             return
-        self._submit(render_panel(text, source, self.cfg))
         self._last_render = (text, source)
         self._last_entries = None
+        self._queue_frame(render_panel(text, source, self.cfg))
 
     def update_entries(self, entries: list, force: bool = False) -> None:
+        """渲染会话面板并交给后台帧循环 —— **立即返回，不阻塞调用方**。"""
         entries = list(entries or [])
         self._last_entries_cached = tuple(entries)
         if self.dry_run:
             self._write_demo(render_conversation(entries, self.cfg))
             return
-        if not self.available or self._sess is None:
-            return
         key = tuple(map(tuple, entries))
         if not force and self._last_entries == key:
             return
-        self._submit(render_conversation(entries, self.cfg))
         self._last_entries = key
         self._last_render = None
+        self._queue_frame(render_conversation(entries, self.cfg))
+
+    def _queue_frame(self, img) -> None:  # noqa: ANN001
+        """把一帧放进「待显示」槽（线程安全、立即返回）。
+
+        真正的 `wait_frame → sync_actions → 上传 → end_frame` 由后台帧循环执行：
+        `xrWaitFrame` 没有超时，绝不能让它跑在 engine 的事件循环或 GUI 主线程上。
+        """
+        with self._img_lock:
+            self._pending_img = img
 
     def _write_demo(self, img) -> None:  # noqa: ANN001
         self._frames_dir.mkdir(parents=True, exist_ok=True)
@@ -755,29 +874,7 @@ class OpenXrOverlay:
         log.info("[overlay:xr][dry-run] 已写出 %s", out)
 
     # ---------- 每帧 ----------
-    def _submit(self, img) -> None:  # noqa: ANN001
-        try:
-            self._sess.submit(img, self.cfg)
-        except Exception as exc:  # noqa: BLE001
-            self._fails += 1
-            self._fails_in_stage += 1
-            if self._fails == 1:
-                log.warning("[overlay:xr] ❌ 提交层失败：%s: %s", type(exc).__name__, exc)
-            if self._fails % 30 == 0:
-                log.warning("[overlay:xr] ❌ 已连续失败 %d 次（面板停在最后一帧）", self._fails)
-            self._escalate()
-            return
-        self.frames_updated += 1
-        self._last_ok_at = time.monotonic()
-        if self._fails:
-            log.info("[overlay:xr] ✅ 恢复上传（连续失败 %d 次，期间重建 %d 次、重开会话 %d 次）",
-                     self._fails, self._rebuilds, self._reinits)
-            self._fails = 0
-            self._stage = "none"
-            self._fails_in_stage = 0
-        if self.frames_updated == 1 or self.frames_updated % 100 == 0:
-            log.info("[overlay:xr] ← 面板已更新（第 %d 帧）", self.frames_updated)
-
+    # ---------- 自愈 ----------
     def _escalate(self) -> None:
         """分级自愈：连续失败到阈值就升一级（swapchain → session → instance）。
 
@@ -812,22 +909,21 @@ class OpenXrOverlay:
                         self._stage, type(exc).__name__, exc)
 
     def tick(self) -> None:
-        """定期调用：泵事件、热重载配置、留心跳。"""
+        """定期调用（engine / GUI 侧）：只留心跳。
+
+        ⚠️ 这里**不做任何 XR 调用**（不泵事件、不热重载、不 locate）—— 整条 XR 生命线由
+        `_xr_main` 线程独占；跨线程调 XR 会搅乱状态机（实测：帧线程里 session 停在
+        READY、提交报 SessionNotRunning）。热重载也搬进了那条线程。
+        """
         if self.dry_run or not self.available or self._sess is None:
             return
-        try:
-            self._sess.pump_events()
-        except Exception:  # noqa: BLE001
-            pass
-        self._reload_config_if_changed()
         now = time.monotonic()
         if now - self._last_heartbeat >= self.HEARTBEAT_S:
             self._last_heartbeat = now
             age = now - self._last_ok_at if self._last_ok_at else -1.0
             log.info("[overlay:xr][diag] 面板活着：已上传 %d 帧，上次成功 %.1fs 前，"
-                     "会话状态=%s，锚点 %s 追踪=%s", self.frames_updated, age,
-                     self._sess.state, self.cfg.anchor,
-                     self._sess.anchor_tracked(self.cfg.anchor))
+                     "会话状态=%s，锚点 %s", self.frames_updated, age,
+                     self._sess.state, self.cfg.anchor)
 
     def _reload_config_if_changed(self) -> None:
         """配置热重载：位置/尺寸/字号改完存盘即生效，无需重启。"""
