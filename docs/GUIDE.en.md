@@ -1,6 +1,12 @@
 # vrchat-livetranslate · Guide
 
-> [中文](GUIDE.md) | **English** | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
+> [中文](../GUIDE.md) | **English** | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
+
+> 🪟 **This is the Windows guide.**
+> On **Linux**, see **[GUIDE.linux.md](GUIDE.linux.md)** — installation (`./setup.sh`), virtual
+> sound card, wrist display and troubleshooting are all Linux-specific; the Windows details below
+> (exe / `.bat` / VB-Cable / WASAPI) do not apply.
+> Both platforms share the same `config.yaml` with identical semantics.
 
 [← Back to README](README.en.md)
 
@@ -37,7 +43,7 @@ Want to read the source / build it yourself / hack on it → start from section 
 
 ---
 
-## 1. Prerequisites
+## 1. Prerequisites (Windows)
 
 1. **Windows 10 / 11** (uses WASAPI and SteamVR)
 2. **Python 3.11** (3.12 untested; make sure to tick *Add python.exe to PATH* during install) — *ignore this if you only use the exe*
@@ -379,6 +385,9 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
 ---
 
 ## 10. Known limitations
+
+> These are **Windows**-side limitations. For Linux, see
+> [GUIDE.linux.md](GUIDE.linux.md) section 8.
 
 - The wrist display requires **SteamVR as the active compositor**; with a vendor-native OpenXR runtime, third-party PC-side overlays don't show
 - The input side **only gets one stereo channel of the game's mixed audio**: no per-speaker channels exist, so when several people talk over each other in the mix, speaker attribution is inherently unreliable

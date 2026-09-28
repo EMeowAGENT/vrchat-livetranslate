@@ -1,6 +1,6 @@
 # vrchat-livetranslate · Руководство
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
 
 [← Вернуться к README](README.ru.md)
 
