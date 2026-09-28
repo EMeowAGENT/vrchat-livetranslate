@@ -238,8 +238,17 @@ class EglGlContext:
                                          ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
         self.gl.glTexImage2D.restype = None
+        self.gl.glTexSubImage2D.argtypes = [ctypes.c_uint, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        self.gl.glTexSubImage2D.restype = None
         self.gl.glGetString.argtypes = [ctypes.c_uint]
         self.gl.glGetString.restype = ctypes.c_char_p
+        self.gl.glGetError.argtypes = []
+        self.gl.glGetError.restype = ctypes.c_uint
+        self.gl.glFinish.argtypes = []
+        self.gl.glFinish.restype = None
 
     def get_proc_address_addr(self) -> int:
         """Monado 会**真的调用**我们提供的 `getProcAddress`。"""
@@ -250,11 +259,26 @@ class EglGlContext:
         return p.decode() if p else "?"
 
     def upload(self, texture_id: int, width: int, height: int, rgba: bytes) -> None:
-        """把一张 RGBA 贴图写进 swapchain 给我们的 GL 纹理。"""
+        """把一张 RGBA 贴图写进 swapchain 给我们的 GL 纹理。
+
+        ⚠️ 必须用 `glTexSubImage2D`，**不能**用 `glTexImage2D`：swapchain 的纹理是运行时
+        已经完整分配的（immutable），重新 `glTexImage2D` 会返回 `GL_INVALID_OPERATION
+        (0x502)` —— 上传静默失败、纹理保持初始黑色。实测现象就是「面板纯黑、没有任何文字」。
+
+        ⚠️ 还要按行倒序：OpenGL 纹理原点在**左下**，而 PIL 图像是**自上而下**，
+        不翻转的话面板内容整体倒置。
+        """
+        import numpy as np
+        arr = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[::-1]
+        buf = ctypes.create_string_buffer(arr.tobytes(), len(rgba))
         self.gl.glBindTexture(GL_TEXTURE_2D, texture_id)
-        buf = ctypes.create_string_buffer(rgba, len(rgba))
-        self.gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                             GL_RGBA, GL_UNSIGNED_BYTE, buf)
+        self.gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, buf)
+        err = self.gl.glGetError()
+        if err:
+            log.warning("[overlay:xr] GL 上传出错 glGetError=0x%x（texture=%s %dx%d）",
+                        err, texture_id, width, height)
+        self.gl.glFinish()
 
     def close(self) -> None:
         for fn, args in ((self.egl.eglMakeCurrent,
