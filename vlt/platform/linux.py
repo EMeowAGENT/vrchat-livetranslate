@@ -688,17 +688,41 @@ class PwRecordSource(QueueAudioSource):
             return ""
 
 
+def _mic_native_rate(device_name: str | None, fallback: int = 48000) -> int:
+    """设备的原生采样率 —— Linux 上**必须**用它打开 mic。
+
+    ⚠️ PortAudio 的 ALSA 后端**不做采样率转换**：设备是 48000 时用 16000 打开会直接
+    `PortAudioError: Invalid sample rate [PaErrorCode -9997]`（真机实测，2026-09）。
+    Windows 的 WASAPI/MME 会自己重采样，所以那边一直用 16k 没事 —— 这是纯 Linux 的坑。
+
+    查不到设备信息就按 PipeWire 的常规默认 48000（PipeWire 图内统一跑在 48k）。
+    """
+    import sounddevice as sd
+    try:
+        info = sd.query_devices(device_name) if device_name else sd.query_devices(kind="input")
+        rate = int(float(info.get("default_samplerate") or 0))
+    except Exception:  # noqa: BLE001 — 查不到不该让整条腿挂掉
+        return fallback
+    return rate or fallback
+
+
 def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
              blocksize: int) -> AudioSource:
     """麦克风采集（与 Windows 共用同一个 sounddevice 实现）。
 
-    Linux 上 sounddevice 走 ALSA（pipewire-alsa），按**名字**打开即可 ——
-    不需要映射我们自己设备表的索引（那张表来自 pw-dump，索引跟 PortAudio 无关）。
+    设备用**名字**打开（`sd.RawInputStream` 接受字符串设备名），所以不需要在
+    「我们设备表的索引」和「sounddevice 的索引」之间做映射 —— Linux 上那张表来自
+    pw-dump，索引跟 PortAudio 毫无关系。
+
+    ⚠️ 打开用的**不是** `rate`(16000)，而是设备原生率（见 `_mic_native_rate`）：
+        `source.rate` 即原生率，引擎的 `_pump_capture` 会拿它把每块 PCM 重采样到 16k
+        （`to_16k_mono` 已支持 48000/44100 等非整数倍）。`rate` 只作兜底参考。
     """
     import asyncio
 
+    native = _mic_native_rate(device_name)
     src = SoundDeviceMicSource(asyncio.get_running_loop(), device_name,
-                               rate=rate, channels=channels, blocksize=blocksize)
+                               rate=native, channels=channels, blocksize=blocksize)
     src.start()
     return src
 
