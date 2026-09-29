@@ -326,8 +326,9 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "응답이 올바른 JSON이 아닙니다: {msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "최신 Release의 태그가 버전 번호가 아닙니다: {tag}",
-    "Release 附件不全：缺少 {exe} 或校验值":
-        "Release 첨부 파일이 부족합니다: {exe} 또는 체크섬이 없습니다",
+    "Release 附件不全：缺少 {name} 或校验值":
+        "Release 첨부 파일이 부족합니다: {name} 또는 체크섬이 없습니다",
+    "替换 AppImage 失败：{msg}": "AppImage 교체에 실패했습니다: {msg}",
     "不是合法版本号，无法写入忽略列表：{version}":
         "올바른 버전 번호가 아니라 무시 목록에 기록할 수 없습니다: {version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":
