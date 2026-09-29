@@ -31,7 +31,7 @@ from .textin import TextTranslateError, split_for_chatbox, translate_text
 from .tts import DEFAULT_MODEL as DEFAULT_TTS_MODEL
 from .tts import DEFAULT_TIMEOUT_S as DEFAULT_TTS_TIMEOUT_S
 from .tts import DEFAULT_VOICE as DEFAULT_TTS_VOICE
-from .tts import TtsError, synthesize, synthesize_stream
+from .tts import TtsError, TtsStreamTruncated, synthesize, synthesize_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
@@ -841,6 +841,7 @@ class Engine:
         # 用的是**同一个** VirtualMic 实例（与语音共用一条流，句尾标记交给它管），
         # 所以「说话 + 打字」交替时不会互相打断、缓冲超限也照旧整句丢弃。
         spoke_s = 0.0
+        truncated = False
         tts_cfg = tcfg.get("tts") or {}
         if self._virtualmic is not None and tts_cfg.get("enabled", True):
             kw = dict(
@@ -855,7 +856,8 @@ class Engine:
                     # 流式（SSE）：首段音频 ~0.4s 就起播（整段合成要等 1.6~1.9s 才开口）。
                     # 走同一个串行锁：连打两条也不会两路分片交错（听感「反复重念」）。
                     async with self._speak_lock():
-                        spoke_s = await asyncio.to_thread(self._speak_stream, translated, kw)
+                        spoke_s, truncated = await asyncio.to_thread(
+                            self._speak_stream, translated, kw)
                 else:
                     pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
                     self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
@@ -869,6 +871,12 @@ class Engine:
 
         tail = f"，已出声 {spoke_s:.1f}s" if spoke_s else ""
         self._events.on_status("info", f"打字已送出（{len(text)} 字 → {d.target_lang}{tail}）")
+        if truncated:
+            # 中途断流：已播的部分保留（宁可少说半句），但必须让用户看见 ——
+            # 否则「这句好像没说完」在界面上完全没有痕迹。
+            self._events.on_status(
+                "warn",
+                f"打字译音只念了一半（网络/服务端中断，已保留已出声的 {spoke_s:.1f}s）")
 
     # ---------------------------------------------------------------- 流式出声
 
@@ -884,19 +892,28 @@ class Engine:
             self._speak_lock_obj = lock
         return lock
 
-    def _speak_stream(self, text: str, kw: dict) -> float:
-        """把流式合成的分片**就地**喂给虚拟声卡，返回推入的秒数。
+    def _speak_stream(self, text: str, kw: dict) -> tuple[float, bool]:
+        """把流式合成的分片**就地**喂给虚拟声卡，返回 `(推入的秒数, 是否中途断了)`。
 
         在**工作线程**里跑（`asyncio.to_thread`）：迭代 SSE 是阻塞 IO。
         虚拟声卡自带抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），
         所以第一个分片就能让它开口 —— 打字腿「开口」从 ~1.7s 降到 ~0.5s。
+
+        中途断流（`TtsStreamTruncated`）**保留已推入的部分**（宁可少说半句），
+        把「断了」这件事交给调用方去提示 —— 用户听出「这句好像没说完」时，
+        界面上不能什么都不说。
         """
         total = 0
-        for pcm24 in synthesize_stream(text, **kw):
-            self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
-            total += len(pcm24)
-        self._virtualmic.end_sentence()
-        return total / 2 / 24000
+        truncated = False
+        try:
+            for pcm24 in synthesize_stream(text, **kw):
+                self._virtualmic.push(resample_24k_mono_to_48k_stereo(pcm24))
+                total += len(pcm24)
+        except TtsStreamTruncated:
+            truncated = True
+        finally:
+            self._virtualmic.end_sentence()
+        return total / 2 / 24000, truncated
 
     # ---------------------------------------------------------------- 断线自愈
 

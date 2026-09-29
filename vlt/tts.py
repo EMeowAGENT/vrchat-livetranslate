@@ -60,6 +60,36 @@ class TtsError(RuntimeError):
     """合成失败（缺 key / 网络 / 参数 / 空音频）。消息给用户看，带原因不带堆栈。"""
 
 
+class TtsStreamTruncated(TtsError):
+    """流式中途断了，但**已经 yield 出去的分片有效**（少半句，不整句丢）。
+
+    调用方约定：不要把已经推给声卡的部分撤掉，也不要在状态栏报「合成失败」——
+    改成一条 warn 级提示（用户听出「这句好像没说完」时，界面上得有个交代）。
+    """
+
+
+def _note(msg: str) -> None:
+    """兜底/降级路径的留痕（本仓库约定：**禁静默降级**，每一处降级都要能查）。
+
+    比 print 多一层保护：日志本身绝不能把主流程搞挂。
+    """
+    try:
+        print(f"[tts] {msg}", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# 「协议不认流式」这类码：退回整段还有意义。其余（401/403/429/5xx）再发一次也是白搭。
+_SSE_FALLBACK_CODES = frozenset({400, 406, 415})
+
+
+def _cut_note(got: int, exc: BaseException) -> str:
+    """流式中途断掉：留一行痕 + 生成抛给调用方的消息（同一份文案，不写两处）。"""
+    msg = f"流式中途中断（{type(exc).__name__}: {exc}），已保留 {got} 个分片（少半句、不整句丢）"
+    _note(msg)
+    return msg
+
+
 def _decode_to_24k_mono(raw: bytes) -> bytes:
     """任意容器（WAV/MP3/…）→ 24kHz 单声道 s16le PCM。"""
     try:
@@ -179,9 +209,13 @@ def synthesize_stream(
     是抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），拿到前几个分片就能开口 ——
     打字腿的「开口」从 ~1.7s 降到 ~0.5s。
 
-    退回策略（调用方不必写两套逻辑）：
+    退回策略（调用方不必写两套逻辑；**每一处降级都留痕，禁静默降级**）：
     - 服务端没给 `text/event-stream`（或一个分片都没拿到）→ 退回整段 `synthesize()`，yield 一整块；
-    - 中途失败 → **保留已经 yield 的分片**（宁可少说半句，也不让整句消失）。
+    - 流式被**协议性**拒绝（HTTP 400/406/415）→ 退回整段 `synthesize()`；
+    - 中途断了（网络/服务端）→ **保留已经 yield 的分片**，随后抛 `TtsStreamTruncated`
+      （少半句，不整句丢；调用方据此给一条 warn 提示）。
+    - 其余错误（401/403/429/5xx、网络不可达）直接抛：再发一次同样会失败，只会把
+      失败延迟翻倍、白耗一次配额。
     """
     text = (text or "").strip()
     if not text:
@@ -206,6 +240,7 @@ def synthesize_stream(
         with _get_opener().open(req, timeout=timeout) as resp:
             ctype = str(resp.headers.get("Content-Type", "") or "")
             if "event-stream" not in ctype:            # 服务端降级成了整段响应
+                _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 退回整段合成")
                 try:
                     obj = json.loads(resp.read().decode("utf-8", "replace"))
                 except Exception as exc:  # noqa: BLE001
@@ -235,26 +270,32 @@ def synthesize_stream(
                     if not pcm:
                         continue
                     # ⚠️ 服务端在流末尾会补发一片「整段汇总」（实测与前面所有分片逐字节相同）：
-                    # 吃掉它，否则虚拟声卡会把整句念两遍。真分片不可能与已累计音频等长同内容。
+                    # 吃掉它，否则虚拟声卡会把整句念两遍。
+                    # 判据是**经验性**的：实测中真分片不会与已累计音频等长且逐字节相同
+                    # （要触发得正好等于此前所有分片之和 + 内容一致）—— 是经验保证，不是不变式。
                     if acc and len(pcm) == len(acc) and pcm == bytes(acc):
                         continue
                     got += 1
                     acc += pcm
                     yield pcm
-    except TtsError:
-        if got:
-            return                                          # 已唱出去的部分不撤
+    except TtsError as exc:
+        if got:                                             # 已唱出去的部分不撤
+            raise TtsStreamTruncated(_cut_note(got, exc)) from exc
         raise
     except HTTPError as exc:
         if got:
-            return
+            raise TtsStreamTruncated(_cut_note(got, exc)) from exc
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]
         except Exception:  # noqa: BLE001
             pass
-        # 可能只是服务端不认流式（头被拒）→ 先试整段兜底，兜底也失败再报这个错
         err = TtsError(f"HTTP {exc.code}：{detail or exc.reason}")
+        # 只有「协议不认流式」的码才值得退回整段：401/403/429/5xx 再发一次同样会失败，
+        # 只会把失败延迟翻倍、白耗一次配额 → 直接抛。
+        if exc.code not in _SSE_FALLBACK_CODES:
+            raise err from exc
+        _note(f"服务端不认流式（HTTP {exc.code}）→ 退回整段合成")
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
                              language=language, timeout=timeout)
@@ -263,14 +304,15 @@ def synthesize_stream(
         return
     except URLError as exc:
         if got:
-            return
+            raise TtsStreamTruncated(_cut_note(got, exc)) from exc
         raise TtsError(f"网络不可达：{exc.reason}") from exc
     except Exception as exc:  # noqa: BLE001
         if got:
-            return
+            raise TtsStreamTruncated(_cut_note(got, exc)) from exc
         raise TtsError(f"{type(exc).__name__}: {exc}") from exc
 
     if not got:                                             # 流式没给东西 → 整段兜底
+        _note("流式一个分片都没拿到 → 退回整段合成")
         yield synthesize(text, voice=voice, model=model, api_key=api_key,
                          language=language, timeout=timeout)
 
