@@ -40,21 +40,34 @@ SENTENCE_GAP_S = 0.6
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
+# ---- 输入门限（只接在 loopback = VRChat 输出「别人说话」那条腿上）----
+# 治什么：VRChat 把人声混成一路输出，远处玩家声音小、听都听不清，以往照样被
+# 送给模型 → 白花钱，还容易被翻成乱话。这里按块 RMS 判响度，达不到门限就不上送。
+# 取值口径（dBFS，0 = 满量程；RMS 比峰值严，正常近处说话的块大致落在 -30~-20）：
+#   越高（越接近 0）= 过滤越狠，只留贴近耳边的人；越低 = 越宽松，远处的人也翻。
+INPUT_GATE_DEFAULT_ENABLED = True
+INPUT_GATE_DEFAULT_DB = -45.0
+INPUT_GATE_DEFAULT_HOLD_MS = 500.0     # 超阈值后，回落多久内仍继续送（防句中断裂）
+INPUT_GATE_DEFAULT_PREROLL_MS = 250    # 开闸时补发的、越阈值之前的音频（防丢句首）
+INPUT_GATE_MIN_DB = -70.0
+INPUT_GATE_MAX_DB = -10.0
+LEVEL_FLOOR_DB = -120.0                # 电平下限（纯数字静音时用它，避免 log10(0)）
+
 LOOPBACK_FALLBACK = ["steam streaming speakers", "vive virtual", "cable input", "voicemeeter"]
 
 
 # ================================================================ 配置校验（非法值留痕 + 回落默认）
 
 
-def _warn_default(key: str, val, why: str, default) -> None:
-    print(f"[config] ⚠️ session.{key}={val!r} 非法（{why}）→ 回落默认值 {default!r}", flush=True)
+def _warn_default(key: str, val, why: str, default, section: str = "session") -> None:
+    print(f"[config] ⚠️ {section}.{key}={val!r} 非法（{why}）→ 回落默认值 {default!r}", flush=True)
 
 
-def _cfg_bool(base: dict, key: str, default: bool) -> bool:
+def _cfg_bool(base: dict, key: str, default: bool, section: str = "session") -> bool:
     v = base.get(key, default)
     if isinstance(v, bool):
         return v
-    _warn_default(key, v, "应为 true/false", default)
+    _warn_default(key, v, "应为 true/false", default, section)
     return default
 
 
@@ -84,6 +97,52 @@ def silence_gate_settings(base: dict | None) -> tuple[bool, float, float]:
               f"silence_gate_after_s={after} → 回落默认值 1.0", flush=True)
         preroll = min(1.0, after)
     return enabled, after, preroll
+
+
+def chunk_level_db(chunk: bytes) -> float:
+    """一个 100ms 音频块的电平（dBFS，满量程 = 0）。纯函数，离线可测。
+
+    用 **RMS** 而不是峰值：峰值只反映块里最响的那几个采样 —— 按键、咳嗽、音效
+    的一个尖刺就能把峰值顶上来，但它不代表「这句话整体有多响」。远处玩家小声说话
+    的块峰值可能偶发偏高、RMS 却一直很低，正是要拦的对象。
+    """
+    if not chunk:
+        return LEVEL_FLOOR_DB
+    arr = np.frombuffer(chunk, dtype="<i2")
+    if arr.size == 0:
+        return LEVEL_FLOOR_DB
+    x = arr.astype(np.float64) / 32768.0
+    rms = float(np.sqrt(float(np.mean(x * x))))
+    if rms <= 0.0:
+        return LEVEL_FLOOR_DB
+    return max(LEVEL_FLOOR_DB, 20.0 * float(np.log10(rms)))
+
+
+def input_gate_settings(base: dict | None) -> tuple[bool, float, float, int]:
+    """读取并校验输入门限配置（纯函数，离线可测）：(enabled, threshold_db, hold_ms, preroll_ms)。
+
+    非法值一律**留痕 + 回落默认**（与本文件其它设置同一纪律），字段缺省也算合法。
+    """
+    base = base or {}
+    enabled = _cfg_bool(base, "gate_enabled", INPUT_GATE_DEFAULT_ENABLED, "capture")
+    db = base.get("gate_db", INPUT_GATE_DEFAULT_DB)
+    if (isinstance(db, bool) or not isinstance(db, (int, float))
+            or not (INPUT_GATE_MIN_DB <= float(db) <= INPUT_GATE_MAX_DB)):
+        _warn_default("gate_db", db,
+                      f"应在 {INPUT_GATE_MIN_DB:g} ~ {INPUT_GATE_MAX_DB:g} dBFS 之间",
+                      INPUT_GATE_DEFAULT_DB, "capture")
+        db = INPUT_GATE_DEFAULT_DB
+    hold = base.get("gate_hold_ms", INPUT_GATE_DEFAULT_HOLD_MS)
+    if isinstance(hold, bool) or not isinstance(hold, (int, float)) or float(hold) < 0:
+        _warn_default("gate_hold_ms", hold, "应为 ≥0 的毫秒数",
+                      INPUT_GATE_DEFAULT_HOLD_MS, "capture")
+        hold = INPUT_GATE_DEFAULT_HOLD_MS
+    preroll = base.get("gate_preroll_ms", INPUT_GATE_DEFAULT_PREROLL_MS)
+    if isinstance(preroll, bool) or not isinstance(preroll, (int, float)) or float(preroll) < 0:
+        _warn_default("gate_preroll_ms", preroll, "应为 ≥0 的毫秒数",
+                      INPUT_GATE_DEFAULT_PREROLL_MS, "capture")
+        preroll = INPUT_GATE_DEFAULT_PREROLL_MS
+    return enabled, float(db), float(hold), int(preroll)
 
 
 def repeat_guard_settings(base: dict | None) -> tuple[bool, int, float]:
@@ -183,6 +242,86 @@ class _SilenceGate:
         while self._preroll and self._preroll_dur > self.preroll_s + 1e-6:
             _, d = self._preroll.popleft()
             self._preroll_dur -= d
+
+
+class _LevelGate:
+    """输入响度门限：音量达不到门限的音频块**不上送**（只接 loopback 采集）。
+
+    治什么：VRChat 输出是所有人混好的一路音频，远处玩家声音小、本来就听不清，
+    以往照样送给模型 —— 白花钱，还容易被翻成乱话。这里按块 RMS（不是峰值）判响度，
+    低于门限就不送；门限以上的照常送，并保证不把句子切坏：
+
+    - **hold**：越阈值后的一段时间内，即使块回落到门限以下也继续送 ——
+      说话句中的停顿、句尾渐弱不会被切碎（默认 500ms）。
+    - **preroll**：开闸时把越阈值之前的一小段（默认 250ms）补上 ——
+      句首辅音/起音不丢，否则识别会掉字。
+    - 只**暂停上送**，不改写、不伪造音频（与服务端 turn_detection 的节奏假设一致）。
+
+    与 `_SilenceGate` 的关系：职责不同、串联工作。本闸门治「小声」（用户要的过滤），
+    静音闸门治「长时间真静音」（防服务端 repeat 掉线）。本闸门拦掉的块不会进入
+    静音闸门，所以也不会被算进它的静音计时 —— 两者不会互相抵消。
+    """
+
+    def __init__(self, enabled: bool, threshold_db: float, hold_ms: float,
+                 preroll_ms: int) -> None:
+        self.enabled = enabled
+        self.threshold_db = threshold_db
+        self.hold_ms = hold_ms
+        self.preroll_ms = preroll_ms
+        self.is_open = False                 # 当前是否在上送（开闸）
+        self._last_loud_ts: float | None = None
+        self._preroll: deque[tuple[bytes, float]] = deque()
+        self._preroll_ms = 0.0
+        self.level_db = LEVEL_FLOOR_DB       # 最近一块的电平（界面实时显示用）
+        self.dropped_chunks = 0              # 累计拦截（未上送）的块数
+        self.opened = 0                      # 开闸次数
+        self.replay_count = 0                # 补发 preroll 的次数
+
+    def feed(self, chunk: bytes, *, now: float, dur_s: float) -> list[bytes]:
+        """返回本次真正要上送的块序列（0..N 块；N>1 = 开闸补发 preroll 的情形）。"""
+        db = chunk_level_db(chunk)
+        self.level_db = db
+        if not self.enabled:
+            return [chunk]
+        if db >= self.threshold_db:
+            self._last_loud_ts = now
+            if self.is_open:
+                return [chunk]
+            self.is_open = True
+            self.opened += 1
+            replay = [c for c, _ in self._preroll]
+            self._preroll.clear()
+            self._preroll_ms = 0.0
+            if replay:
+                self.replay_count += 1
+                print(f"[gate] 输入门限：{db:.1f} dBFS ≥ 门限 {self.threshold_db:g} dBFS → "
+                      f"开始上送，并补发之前 {len(replay)} 块（{self.preroll_ms}ms 内，"
+                      f"防丢句首）", flush=True)
+            return replay + [chunk]
+
+        # —— 低于门限 ——
+        if self.is_open:
+            held = (self._last_loud_ts is not None
+                    and (now - self._last_loud_ts) * 1000.0 <= self.hold_ms)
+            if held:
+                return [chunk]              # hold 期内继续送：句中的停顿不切碎
+            self.is_open = False
+            print(f"[gate] 输入门限：已回落 {self.hold_ms:g}ms 低于门限 "
+                  f"{self.threshold_db:g} dBFS（当前 {db:.1f}）→ 暂停上送"
+                  f"（累计已拦截 {self.dropped_chunks} 块）", flush=True)
+        self.dropped_chunks += 1
+        self._remember(chunk, dur_s)
+        return []
+
+    def _remember(self, chunk: bytes, dur_s: float) -> None:
+        if self.preroll_ms <= 0:
+            return
+        self._preroll.append((chunk, dur_s))
+        self._preroll_ms += dur_s * 1000.0
+        # +1μs 容差：0.1+0.1+0.1=0.30000000000000004，没容差会多吃掉一块（同 _SilenceGate）
+        while self._preroll and self._preroll_ms > self.preroll_ms + 1e-3:
+            _, d = self._preroll.popleft()
+            self._preroll_ms -= d * 1000.0
 
 
 @dataclass
@@ -338,6 +477,12 @@ class Engine:
         self._repeat_text = ""
         self._repeat_dropped = 0
 
+        # ---- 输入门限（④，只作用于 loopback = VRChat 输出「别人说话」）----
+        # 配置在 capture 段（capture.gate_*）；非法值由 input_gate_settings 留痕并回落默认值。
+        # 麦克风腿（我说的话）**不走**这里：自己贴着麦说话，不该被响度门限拦。
+        self._input_gate = _LevelGate(*input_gate_settings(
+            (cfg.output or {}).get("capture") or {}))
+
     # ---------------------------------------------------------------- 公开接口
 
     def start(self) -> None:
@@ -380,6 +525,11 @@ class Engine:
     @property
     def virtualmic(self) -> VirtualMic | None:
         return self._virtualmic
+
+    @property
+    def input_gate(self) -> _LevelGate:
+        """输入门限实例（loopback 腿用；界面读它的 level_db 显示实时电平）。"""
+        return self._input_gate
 
     @property
     def session(self):
@@ -673,8 +823,9 @@ class Engine:
         elif self._source == "loopback":
             capture_cfg = (self._cfg.output or {}).get("capture") or {}
             loopback_name = capture_cfg.get("loopback_device") or None
+            # 输入门限只接在这条腿：VRChat 输出 = 别人说话，远处小声的玩家该被滤掉。
             await run_loopback(self._proxy, None, device_name=loopback_name,
-                               stop_event=self._stop_event)
+                               stop_event=self._stop_event, gate=self._input_gate)
 
     async def _feed_pcm(self, path: str) -> None:
         pcm = Path(path).read_bytes()
@@ -963,6 +1114,13 @@ class Engine:
         if gate is not None and (gate.closed or gate.gated_chunks or gate.replay_count):
             lines.append(f"[diag] 静音闸门：当前{'关闭（暂停上送中）' if gate.closed else '打开'} | "
                          f"本次闸住已拦截 {gate.gated_chunks} 块 | 累计回补 preroll {gate.replay_count} 次")
+        ig = self._input_gate
+        if ig.enabled and (ig.dropped_chunks or ig.opened):
+            lines.append(f"[diag] 输入门限（loopback）：门限 {ig.threshold_db:g} dBFS | "
+                         f"当前{'上送中' if ig.is_open else '拦截中'} | "
+                         f"已拦截 {ig.dropped_chunks} 块 | 开闸 {ig.opened} 次"
+                         f"（补发 preroll {ig.replay_count} 次）| "
+                         f"最近一块电平 {ig.level_db:.1f} dBFS")
         if self._repeat_dropped:
             lines.append(f"[diag] 本地 repeat 抑制：已丢弃 {self._repeat_dropped} 条重复输出"
                          f"（重复文本：{self._repeat_text[:40]!r}）")
@@ -1213,8 +1371,14 @@ def to_16k_mono(pcm: bytes, rate: int, channels: int) -> bytes:
 
 async def run_loopback(session, tele, patterns: list[str] | None = None,
                        seconds: float = 0.0, device_name: str | None = None,
-                       stop_event: threading.Event | None = None) -> None:
-    """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。"""
+                       stop_event: threading.Event | None = None,
+                       gate: "_LevelGate | None" = None) -> None:
+    """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。
+
+    `gate` 是输入门限（`_LevelGate`）：VRChat 输出混了所有人，远处玩家声音小、
+    本来就听不清，达不到门限的块就不上送（开闸时会带回 preroll 补句首）。
+    只作用于这条腿 —— 麦克风（自己说话）不走门限。
+    """
     import pyaudiowpatch as pyaudio
 
     loop = asyncio.get_running_loop()
@@ -1294,11 +1458,17 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
             except asyncio.TimeoutError:
                 continue
             pcm16 = to_16k_mono(raw, rate, min(2, channels or 2))
-            if pcm16:
-                await session.send_audio(pcm16)
-                sent_bytes += len(pcm16)
+            if not pcm16:
+                continue
+            # 输入门限：放行 0..N 块（开闸时会带回 preroll，所以不是「要么全给要么不给」）。
+            out_chunks = ([pcm16] if gate is None else
+                          gate.feed(pcm16, now=time.monotonic(),
+                                    dur_s=len(pcm16) / 2 / 16000.0))
+            for c in out_chunks:
+                await session.send_audio(c)
+                sent_bytes += len(c)          # 只算真正上送的（门限拦掉的不计）
                 if tele is not None:
-                    tele.add("loopback_chunk", bytes=len(pcm16))
+                    tele.add("loopback_chunk", bytes=len(c))
     finally:
         # 顺序不能改：① 通知读线程退出 → ② 等它真的退出 → ③ 才关闭流
         reader_stop.set()
@@ -1311,7 +1481,11 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
         except Exception:
             pass
         p.terminate()
-    print(f"[loopback] 采集结束，共 {sent_bytes} bytes ≈ {sent_bytes / 2 / 16000:.0f}s")
+    tail = ""
+    if gate is not None and gate.enabled and (gate.dropped_chunks or gate.opened):
+        tail = (f"｜输入门限（{gate.threshold_db:g} dBFS）：拦截 {gate.dropped_chunks} 块、"
+                f"开闸 {gate.opened} 次")
+    print(f"[loopback] 采集结束，共 {sent_bytes} bytes ≈ {sent_bytes / 2 / 16000:.0f}s{tail}")
 
 
 def list_devices() -> None:
