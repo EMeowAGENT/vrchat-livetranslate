@@ -222,12 +222,17 @@ jobs:
         run: |
           sudo apt-get update
           # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
-          # gcc make + Xft/freetype/fontconfig/xorg 头文件 —— 构建脚本要现编 Xft 版 Tk
+          # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft 版 Tk
           # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
+          #
+          # ⚠️ 不要写 `xorgproto`：Ubuntu 24.04(noble) 起这个包名已不存在（apt 报
+          #    E: Unable to locate package xorgproto → 整个 job 红）。X11 协议头在
+          #    noble 由 `x11proto-dev` 提供，而它本来就是 `libx11-dev` 的依赖，会随下面
+          #    这条自动装上 —— 不需要（也不能）单独列出来。
           sudo apt-get install -y --no-install-recommends \
             xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0 \
             gcc make libxft-dev libfreetype6-dev libfontconfig1-dev \
-            libx11-dev libxext-dev xorgproto
+            libx11-dev libxext-dev
 
       - name: 装 uv 并拉独立 Python 3.11（构建脚本要求可搬运的解释器）
         run: |

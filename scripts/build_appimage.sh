@@ -205,7 +205,9 @@ fi
 #   替换后实测：689 个族 / 65 个中日韩族，与系统 Tk 完全一致。
 #
 # 构建依赖（只在**构建机**需要，运行机不需要）：
-#     gcc make + libxft/freetype2/fontconfig/xorgproto 的开发头文件
+#     gcc make + libxft/freetype2/fontconfig/X11 协议头的开发文件
+#     （Ubuntu 24.04 起 X11 协议头叫 `x11proto-dev`，由 `libx11-dev` 自动带入；
+#      别再写 `xorgproto` —— noble 已无此包名）
 build_xft_tk() {
     local cache="${TOOLS}/tk-xft"
     local bundled="$APPDIR/usr/python/lib/libtcl9tk9.0.so"
