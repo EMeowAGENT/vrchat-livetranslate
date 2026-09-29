@@ -203,8 +203,16 @@ def updater_env() -> dict[str, str]:
     更新器里 `start` 出来的**新版本**就会带着 `_PYI_PARENT_PROCESS_LEVEL=1` 启动 →
     引导器以为无需自解包 → 直接起不来（不写日志、无窗口、只留一个空转进程）。
     用户看到的症状是「点完更新、程序自己关了、再没打开」。
+
+    ⚠️ Linux/AppImage 是**同一类坑的另一半**：AppImage 运行时看到 `APPDIR` 已经存在就
+    **不会重新挂载**（它以为自己是「已被解包的子进程」），新进程会去用父进程那个马上要随
+    父进程消失的挂载点 —— 症状一样是「更新完没再打开」。所以 `APPIMAGE` / `APPDIR` /
+    `OWD` / `ARGV0` 也要剥掉，让新 AppImage 干干净净地自己挂载。
+    （`PYTHONPATH` 不清：AppRun 是**追加**而不是覆盖继承值，新挂载的路径排在前面，
+    清掉反而会抹掉用户自己设的东西。）
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith(("_MEI", "_PYI_"))}
+    strip = ("_MEI", "_PYI_", "APPIMAGE", "APPDIR", "OWD", "ARGV0")
+    return {k: v for k, v in os.environ.items() if not k.startswith(strip)}
 
 
 def _source_name(code: str | None) -> str:
@@ -1746,8 +1754,8 @@ class TranslationGUI:
         self._close_update_dialog()
 
     def _on_update_now(self, info) -> None:
-        """「立即更新」：源码运行给指引（不自更新）；打包 exe 走两段式 —— 先开下载进度窗。"""
-        if update_check.update_mode() != "frozen":
+        """「立即更新」：源码运行给指引（不自更新）；打包 exe / AppImage 走两段式 —— 先开下载进度窗。"""
+        if not update_check.can_self_update():
             open_page = messagebox.askokcancel(
                 t("如何更新"),
                 t("你现在运行的是源码版，不能自动更新。\n\n"
@@ -1760,8 +1768,8 @@ class TranslationGUI:
             print("[update] 源码运行：已给出更新指引（git pull / 下载页），不做自更新",
                   flush=True)
             return
-        exe = Path(sys.executable).resolve()
-        if not _dir_writable(exe.parent):
+        target = update_check.update_target_path()
+        if target is None or not _dir_writable(target.parent):
             open_page = messagebox.askokcancel(
                 t("无法自动更新"),
                 t("程序所在的位置不允许写入（比如放在 Program Files）。\n\n"
@@ -1769,12 +1777,13 @@ class TranslationGUI:
                 parent=self._update_win)
             if open_page:
                 self._open_release_page(info.html_url)
-            print(f"[update] 安装目录不可写（{exe.parent}），转为手动下载指引", flush=True)
+            print(f"[update] 安装目录不可写（{target.parent if target else '?'}），"
+                  f"转为手动下载指引", flush=True)
             return
         # 这个版本之前已经下载好（点过「稍后更新」/上次没换完就被关掉）→
         # 复验通过直接给更新入口，30MB+ 不白下（硬要求：用残留前必须重新校验）
         try:
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             hit = None
             print(f"[update] ⚠️ 待更新文件复核失败：{type(exc).__name__}: {exc}"
@@ -1782,7 +1791,7 @@ class TranslationGUI:
         if hit is not None and hit[0] == info.version:
             self._close_update_dialog()
             self._show_download_window(info)
-            self._enter_download_done_state(update_check.pending_new_exe(exe))
+            self._enter_download_done_state(update_check.pending_new_asset(target))
             return
         self._close_update_dialog()
         self._show_download_window(info)
@@ -1792,7 +1801,7 @@ class TranslationGUI:
     def _show_download_window(self, info) -> None:
         """懒建懒销毁 Toplevel（transient + lift，非模态 —— 下载期间翻译照跑）。
         文案逐字照抄「文案 checklist ②」；完成后切「完成态」（checklist ③）。
-        总量优先级：Content-Length（回调带）> ReleaseInfo.exe_size > indeterminate 只显示已下载量。"""
+        总量优先级：Content-Length（回调带）> ReleaseInfo.asset_size > indeterminate 只显示已下载量。"""
         self._close_download_window()
         win = tk.Toplevel(self._root)
         win.title(t("正在下载新版本"))
@@ -1809,9 +1818,9 @@ class TranslationGUI:
         self._dl_bar = ttk.Progressbar(body, mode="determinate", length=380,
                                        maximum=100.0, value=0.0)
         self._dl_bar.pack(fill=tk.X)
-        if info.exe_size:
+        if info.asset_size:
             text = t("已下载 {done} / 约 {total} MB，一般 1–3 分钟就好。下载期间可以正常翻译。",
-                     done="0.0", total=f"{info.exe_size / 1048576:.1f}")
+                     done="0.0", total=f"{info.asset_size / 1048576:.1f}")
         else:
             self._dl_bar.configure(mode="indeterminate")
             self._dl_bar.start(14)
@@ -1868,7 +1877,10 @@ class TranslationGUI:
         self._dl_cancel = threading.Event()
         self._dl_last_push = 0.0
         self._dl_downloading = True
-        dest_dir = Path(sys.executable).resolve().parent   # exe 同目录：同卷 move 才近原子
+        # 安装文件（exe / AppImage）同目录：同卷 rename 才近原子。拿不到目标（不该发生：
+        # 能走到这儿说明 can_self_update() 为真）就退回 APP_DIR，绝不让它崩在 None 上。
+        target = update_check.update_target_path() or (APP_DIR / update_check.asset_name_for())
+        dest_dir = target.parent
 
         def _progress(done: int, total: int | None) -> None:
             if self._dl_cancel is not None and self._dl_cancel.is_set():
@@ -1894,7 +1906,7 @@ class TranslationGUI:
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_download_progress(self, done: int, total: int | None) -> None:
-        """主线程：更新进度条与文本；total=None 且 exe_size 也没有 → indeterminate。"""
+        """主线程：更新进度条与文本；total=None 且 asset_size 也没有 → indeterminate。"""
         if self._dl_win is None or self._dl_bar is None or self._dl_text is None:
             return
         try:
@@ -1902,7 +1914,7 @@ class TranslationGUI:
                 return
         except Exception:  # noqa: BLE001
             return
-        total = total or (self._dl_info.exe_size if self._dl_info else None)
+        total = total or (self._dl_info.asset_size if self._dl_info else None)
         if total:
             if str(self._dl_bar.cget("mode")) != "determinate":
                 self._dl_bar.stop()
@@ -1963,9 +1975,11 @@ class TranslationGUI:
         if self._dl_win is None:
             return                               # 用户已关窗取消，错误不必再烦他
         # 残留双保险（download_and_verify 失败时已清过一遍）
+        target = update_check.update_target_path()
+        if target is None:
+            target = APP_DIR / update_check.asset_name_for()
         try:
-            (Path(sys.executable).resolve().parent
-             / (update_check.EXE_ASSET_NAME + ".new")).unlink(missing_ok=True)
+            update_check.pending_new_asset(target).unlink(missing_ok=True)
         except OSError:
             pass
         retry = messagebox.askretrycancel(
@@ -1991,8 +2005,10 @@ class TranslationGUI:
     #   【不再提示这个版本】= 只对这个版本号不再提示，与上面两条无关
 
     def _on_reload_clicked(self) -> None:
-        """「立即重启并更新」= 立刻替换 + 自动拉起新版（当前会话结束）：
-        按钮置灰「正在重启…」→ 生成 bat（relaunch=True）→ 分离启动 → 走正常退出流程。
+        """「立即重启并更新」= 立刻替换 + 自动拉起新版（当前会话结束）。
+
+        Windows：生成 bat（relaunch=True）→ 分离启动 → 走正常退出流程。
+        AppImage：**直接换**（`os.replace`，运行中的旧文件是旧 inode，不受影响）→ 拉起新文件。
         任一步失败：留痕 + 恢复按钮 + 错误提示带可点下一步，绝不静默。"""
         if self._reload_started:
             return                              # 防连点：已经安排上了
@@ -2010,10 +2026,18 @@ class TranslationGUI:
         if self._dl_reload_btn is not None:
             self._dl_reload_btn.configure(text=t("正在重启…"))
         try:
-            exe = Path(sys.executable).resolve()
-            bat = update_check.build_updater_bat(pid=os.getpid(), current_exe=exe,
-                                                 new_exe=new_exe, relaunch=True)
-            self._launch_updater_bat(bat)
+            if update_check.update_mode() == "appimage":
+                target = update_check.update_target_path()
+                if target is None:
+                    raise update_check.UpdateCheckError(
+                        "找不到正在运行的 AppImage 文件（$APPIMAGE 没了？）")
+                update_check.install_appimage(new_exe, target)
+                self._relaunch_appimage(target)
+            else:
+                exe = Path(sys.executable).resolve()
+                bat = update_check.build_updater_bat(pid=os.getpid(), current_exe=exe,
+                                                     new_exe=new_exe, relaunch=True)
+                self._launch_updater_bat(bat)
         except Exception as exc:  # noqa: BLE001 — 失败必须被用户看到，不许静默
             print(f"[update] ⚠️ 启动更新器失败：{type(exc).__name__}: {exc}"
                   f"（下载好的新版本保留着，可以再点）", flush=True)
@@ -2039,7 +2063,7 @@ class TranslationGUI:
                 print("[update] 用户选择先继续用现在的版本（新版本已下载好，保留着）",
                       flush=True)
             return
-        print(f"[update] 已启动更新器，程序即将退出（重载路径，v{__version__} → "
+        print(f"[update] 已安排替换并拉起新版，程序即将退出（重载路径，v{__version__} → "
               f"v{info.version}）", flush=True)
         self._on_close()
 
@@ -2071,19 +2095,32 @@ class TranslationGUI:
                          creationflags=flags, env=updater_env())
         return bat_path
 
+    def _relaunch_appimage(self, appimage: Path) -> None:
+        """分离启动刚换上的 AppImage（当前会话随后正常退出，不等待它结束）。
+
+        ⚠️ 必须用 `updater_env()`（它会剥掉 APPIMAGE / APPDIR / OWD / ARGV0）：AppImage
+        运行时看到 `APPDIR` 已设就**不会重新挂载**，新进程会去用父进程那个马上要消失的
+        挂载点 —— 与 Windows 侧漏清 `_MEI*` 是同一类「更新完没再打开」。
+        cwd 落在 AppImage 自己所在目录：绝不能是旧挂载点里的路径（那会随进程一起消失）。
+        """
+        subprocess.Popen([str(appimage)], env=updater_env(), start_new_session=True,
+                         cwd=str(Path(appimage).parent))
+
     def _maybe_replace_on_exit(self) -> None:
-        """正常退出时替换（【稍后】路径的另一半）：复验 → bat（relaunch=False）→
-        分离启动 → 退出。本路径绝不自动拉起新进程 —— 下次用户自己打开就是新版。"""
+        """正常退出时替换（【稍后】路径的另一半）：复验 → 替换 → 退出（绝不拉起新进程，下次
+        用户自己打开就是新版）。Windows 走 bat（relaunch=False）；AppImage 直接 rename 顶替。"""
         if self._reload_started:
             return                    # 重载路径已安排了带拉起的替换，别重复安排
         if not self._update_pending_exit:
             return
-        if update_check.update_mode() != "frozen":
+        if not update_check.can_self_update():
             return                    # 源码运行不做自更新（正常也走不到这）
-        exe = Path(sys.executable).resolve()
+        target = update_check.update_target_path()
+        if target is None:
+            return
         try:
             # 硬要求：退出前再复验一次（防下载后文件被改坏/杀软动过），不通过就不换
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             print(f"[update] 跳过退出时替换（复核异常：{type(exc).__name__}: {exc}）",
                   flush=True)
@@ -2094,24 +2131,32 @@ class TranslationGUI:
             return
         version = hit[0]
         try:
-            bat = update_check.build_updater_bat(
-                pid=os.getpid(), current_exe=exe,
-                new_exe=update_check.pending_new_exe(exe), relaunch=False)
-            self._launch_updater_bat(bat)
+            if update_check.update_mode() == "appimage":
+                update_check.install_appimage(update_check.pending_new_asset(target), target)
+            else:
+                bat = update_check.build_updater_bat(
+                    pid=os.getpid(), current_exe=target,
+                    new_exe=update_check.pending_new_asset(target), relaunch=False)
+                self._launch_updater_bat(bat)
         except Exception as exc:  # noqa: BLE001 — 失败要被用户看到，不能静默退出
             print(f"[update] ⚠️ 退出时替换安排失败：{type(exc).__name__}: {exc}"
                   f"（新版本已下载好并保留，下次启动会再给更新入口）", flush=True)
-            info = self._update_pending_info
-            open_page = messagebox.askokcancel(
-                t("更新没有成功"),
+            self._offer_manual_download(
                 t("更新没有成功，现在的版本不受影响，下次打开还是它。\n\n"
-                  "点「确定」打开下载页自己下；点「取消」直接退出。"),
-                parent=self._root)
-            if open_page and info is not None and info.html_url:
-                self._open_release_page(info.html_url)
+                  "点「确定」打开下载页自己下；点「取消」直接退出。"))
             return
-        print(f"[update] 退出时替换已安排（不自动拉起），下次打开就是 v{version}",
-              flush=True)
+        done = ("已就地替换" if update_check.update_mode() == "appimage" else "已安排替换")
+        print(f"[update] 退出时{done}（不自动拉起），下次打开就是 v{version}", flush=True)
+
+    def _offer_manual_download(self, body: str) -> None:
+        """自动替换没成功时的统一退路：问一句 →「确定」就打开下载页自己下。
+
+        `body` 是给用户看的话（各调用点自己写，措辞必须讲清「现在还能继续用」）。
+        """
+        info = self._update_pending_info
+        open_page = messagebox.askokcancel(t("更新没有成功"), body, parent=self._root)
+        if open_page and info is not None and info.html_url:
+            self._open_release_page(info.html_url)
 
     # ---------------------------------------------------------------- 启动兜底与一次性提示
 
@@ -2119,11 +2164,13 @@ class TranslationGUI:
         """启动兜底：上次下载好了新版本但没来得及换（被强杀/直接关机）→
         重新复验残留，完好就直接出「下载完成」窗口给更新入口（不重复下载），
         并记下退出时替换；损坏/半截 → check_pending_download 内部已清理 + 留痕。"""
-        if self._headless or update_check.update_mode() != "frozen":
+        if self._headless or not update_check.can_self_update():
             return
-        exe = Path(sys.executable).resolve()
+        target = update_check.update_target_path()
+        if target is None:
+            return
         try:
-            hit = update_check.check_pending_download(exe, __version__)
+            hit = update_check.check_pending_download(target, __version__)
         except Exception as exc:  # noqa: BLE001
             print(f"[update] ⚠️ 待更新文件复核失败：{type(exc).__name__}: {exc}", flush=True)
             return
@@ -2133,16 +2180,17 @@ class TranslationGUI:
         info = update_check.ReleaseInfo(
             tag=f"v{version}", version=version,
             html_url=f"{update_check.RELEASES_HTML}/tag/v{version}",
-            exe_url="", sums_url="", exe_size=None)
+            asset_url="", asset_name=update_check.asset_name_for(),
+            sums_url="", asset_size=None)
         self._mark_update_pending(info)
         self._show_download_window(info)
-        self._enter_download_done_state(update_check.pending_new_exe(exe))
+        self._enter_download_done_state(update_check.pending_new_asset(target))
 
     def _schedule_version_changed_hint(self) -> None:
         """启动版本提示：上次运行版本 ≠ 本次（刚完成过替换/升级）→ ~1.5 秒后弹一次性
         「已更新」小提示；首次运行只悄悄记下版本；版本没变 → 什么都不做。"""
         self._updated_hint_job = None
-        if self._headless or update_check.update_mode() != "frozen":
+        if self._headless or not update_check.can_self_update():
             return
         last = update_check.load_last_seen_version(APP_DIR)
         if last is None:

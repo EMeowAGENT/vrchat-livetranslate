@@ -329,8 +329,9 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "Response is not valid JSON: {msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "The latest release tag is not a version number: {tag}",
-    "Release 附件不全：缺少 {exe} 或校验值":
-        "Release assets incomplete: {exe} or its checksum is missing",
+    "Release 附件不全：缺少 {name} 或校验值":
+        "Release assets incomplete: {name} or its checksum is missing",
+    "替换 AppImage 失败：{msg}": "Failed to replace the AppImage: {msg}",
     "不是合法版本号，无法写入忽略列表：{version}":
         "Not a valid version number; can't add it to the ignore list: {version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":

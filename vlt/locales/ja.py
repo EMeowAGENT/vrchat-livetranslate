@@ -335,8 +335,9 @@ STRINGS: dict[str, str] = {
     "响应不是合法 JSON：{msg}": "レスポンスが有効な JSON ではありません：{msg}",
     "最新 Release 的 tag 不是版本号：{tag}":
         "最新 Release のタグがバージョン番号ではありません：{tag}",
-    "Release 附件不全：缺少 {exe} 或校验值":
-        "Release の添付ファイルが不足しています：{exe} またはチェックサムがありません",
+    "Release 附件不全：缺少 {name} 或校验值":
+        "Release の添付ファイルが不足しています：{name} またはチェックサムがありません",
+    "替换 AppImage 失败：{msg}": "AppImage の置き換えに失敗しました：{msg}",
     "不是合法版本号，无法写入忽略列表：{version}":
         "有効なバージョン番号ではないため、無視リストに書き込めません：{version}",
     "config.yaml 不是合法 YAML，已放弃写入：{msg}":
