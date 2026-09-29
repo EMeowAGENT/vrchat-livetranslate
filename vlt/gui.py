@@ -163,6 +163,17 @@ SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁�
 # 链接逐字符照抄，不做任何 URL 解码/重组。
 QIANWEN_SIGNUP_URL = "https://www.qianwenai.com/"
 
+# ---- 设置弹窗（分页）----
+# 宽度**固定**：每页的长说明都按 SETTINGS_WRAP 换行，于是各语言的窗宽一致，
+# 不会因为俄语文案长就忽然变宽（也不再靠「窗口自然撑大 → 超出屏幕」）。
+SETTINGS_WIDTH = 760
+SETTINGS_WRAP = 660            # 长说明的换行宽 = 窗宽 - 左右留白(40) - 滚动条(~12) - 余量
+SETTINGS_MIN_H = 360           # 再小的屏也至少给这么多高（内容靠页面滚动兜底）
+SETTINGS_MAX_H = 900           # 上限：1080p 屏（可用高约 1040）也必须整窗看得见
+SETTINGS_CHROME_H = 66         # tab 条 + 页面上下留白：算窗高时在内容高度上加这一份
+# 每页内容 frame 的左右内边距（内容区位置固定，不随标签条动）
+TAB_INSET_X = 20
+
 
 def _sponsor_qr_specs() -> list[tuple[str, Path]]:
     """赞助弹窗的两张收款码：(标签, 图片路径)。只读资源一律走 bundle_dir()。"""
@@ -507,6 +518,12 @@ class TranslationGUI:
         self._updated_hint_win: tk.Toplevel | None = None
         self._updated_hint_job: str | None = None
 
+        # 设置弹窗（分页）：headless 模式下不建 UI，这几个保持空/默认值
+        self._settings_nb: ttk.Notebook | None = None
+        # 每页一份 (滚动画布, 内容 frame, 滚动条)，顺序 = tab 顺序（滚轮按当前页取用）
+        self._settings_pages: list[tuple[tk.Canvas, ttk.Frame, ttk.Scrollbar]] = []
+        self._settings_size: tuple[int, int] = (SETTINGS_WIDTH, SETTINGS_MIN_H)
+
         # 设备选择
         self._mic_names: list[str] = []
         self._loopback_names: list[str] = []
@@ -705,6 +722,38 @@ class TranslationGUI:
                         arrowcolor=TEXT_DIM, gripcount=0)
         style.map("Vertical.TScrollbar",
                   background=[("pressed", ACCENT_ACTIVE), ("active", SURFACE_HOVER)])
+
+        # 设置弹窗的分页标签（Notebook）：clam 的默认 tab 是浅灰渐变，
+        # 深色界面里就是一块亮斑（和「ttk.Entry 默认白底」同一类坑），必须逐状态配色。
+        # tabmargins 左侧必须是 **0**：标签条的基准是 Notebook **外框**左边 ——
+        # 也就是内容区那条左边框竖线（贯穿整窗、也是用户会拿来对的那条线）。
+        # ⚠️ 别把它对齐到「页内分隔线的左端」：那条线本身被页面 20px 内边距缩进过，
+        #    拿它当基准会让整排标签比内容区左边框右缩 22px（截图实测过，正是用户说的「没对齐」）。
+        style.configure("TNotebook", background=PANEL, bordercolor=BORDER,
+                        darkcolor=PANEL, lightcolor=PANEL, tabmargins=(0, 6, 10, 0))
+        tab_pad = (16, 7)
+        style.configure("TNotebook.Tab", font=FONT_UI, padding=tab_pad,
+                        background=PANEL, foreground=TEXT_DIM, bordercolor=BORDER,
+                        lightcolor=PANEL, darkcolor=PANEL, focuscolor=PANEL)
+        # padding 必须逐状态映射成同一个值：只写 configure 的默认值时，selected/active
+        # 会回落成 clam 自己的 tab 布局尺寸，选中标签的外框就比未选中的矮一截。
+        # lightcolor/darkcolor/bordercolor 同理——任一状态回落成空值都会画出亮边。
+        # 于是选中态**只靠背景色 + 前景色**区分，三态尺寸完全一致。
+        # 注意两点实测坑：① ttk 取「第一个匹配的状态规格」，所以默认态必须排在最后；
+        # ② 默认态**不能**写成 ("", …)——Tk 8.6 里空规格匹配任意状态，会把 selected 盖掉。
+        style.map("TNotebook.Tab",
+                  padding=[("selected", tab_pad), ("active", tab_pad),
+                           ("!selected !active", tab_pad)],
+                  background=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                              ("!selected !active", PANEL)],
+                  foreground=[("selected", TEXT), ("active", TEXT),
+                              ("!selected !active", TEXT_DIM)],
+                  lightcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                              ("!selected !active", PANEL)],
+                  darkcolor=[("selected", SURFACE), ("active", SURFACE_HOVER),
+                             ("!selected !active", PANEL)],
+                  bordercolor=[("selected", BORDER), ("active", BORDER),
+                               ("!selected !active", BORDER)])
 
     def _set_window_icon(self) -> None:
         """窗口 / 任务栏图标。资源走 bundle_dir()（源码 = 仓库根，打包后 = _MEIPASS）。
@@ -1052,12 +1101,20 @@ class TranslationGUI:
 
     # ---------------------------------------------------------------- 设置弹窗（低频设置）
     def _build_settings_dialog(self) -> None:
-        """低频设置收进弹窗：API key + 音频设备。
+        """低频设置收进弹窗：**分页**（常规 / 音频 / 词库 / 关于）+ 固定尺寸 + 每页可滚。
 
-        为什么不在主界面：这两组是「装好一次、几乎不动」的设置，常驻只会让
-        主界面变成 4 行控件堆叠（改造前的样子）。弹窗**先建好再 withdraw**——
-        控件属性（_key_entry / _mic_combo 等）必须在弹窗不可见时也随即可用，
-        设备扫描和自动化测试都直接访问它们。
+        为什么不在主界面：这些是「装好一次、几乎不动」的设置，常驻只会让主界面变成
+        4 行控件堆叠（改造前的样子）。
+
+        为什么必须分页（改造前的实测病）：8 个分区一竖列堆下来弹窗高 **1485px**，
+        从 y=352 起 ⇒ 底边落到 1837，2560×1600 的屏都装不下 —— 「日志」「软件更新」
+        两区整个在屏幕外；而弹窗 `resizable(False, False)` 且没有滚动条，
+        所以不是「难找」，是**真的够不着**（1080p 屏只会更糟）。分页后每页最高约 400px，
+        整窗按内容实测 + 两道上限（SETTINGS_MAX_H / 屏高-90）定高，真装不下时页面能滚。
+
+        弹窗**先建好再 withdraw**，且四页的控件**一次性全建齐**（不做「切到那页才建」的
+        懒加载）：控件属性（_key_entry / _mic_combo / _glossary_text …）必须在弹窗不可见时
+        也随即可用 —— 设备扫描、更新检查回填和自动化测试都直接访问它们。
         """
         win = tk.Toplevel(self._root)
         win.title(t("设置"))
@@ -1067,32 +1124,133 @@ class TranslationGUI:
         win.withdraw()
         win.protocol("WM_DELETE_WINDOW", self._close_settings)
         win.bind("<Escape>", lambda _e: self._close_settings())
+        # 滚轮绑在弹窗上（toplevel 是页里每个控件的 bindtag）：指针停在页内哪儿都能滚当前页
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            win.bind(seq, self._on_settings_wheel)
         self._settings_win = win
         self._apply_dark_titlebar(win)
 
-        body = ttk.Frame(win, padding=(18, 16, 18, 14))
-        body.pack(fill=tk.BOTH, expand=True)
+        nb = ttk.Notebook(win, style="TNotebook")
+        nb.pack(fill=tk.BOTH, expand=True)
+        self._settings_nb = nb
 
-        # ---- 界面语言 ----
-        # 本批只做到「重启后生效」：控件文案全在建窗时按当前语言取词，
-        # 运行中换语言不重建树（正在进行的翻译/设备列表状态绝不受影响）。
-        ttk.Label(body, text=t("界面语言"), style="Section.TLabel").pack(anchor=tk.W)
-        lang_row = ttk.Frame(body)
-        lang_row.pack(fill=tk.X, pady=(8, 4))
-        self._ui_lang_names = dict(i18n.available_languages())   # code → 母语名称
-        self._ui_lang_var = tk.StringVar(
-            value=self._ui_lang_names.get(i18n.current_language(), "简体中文"))
-        self._ui_lang_combo = ttk.Combobox(
-            lang_row, values=list(self._ui_lang_names.values()),
-            state="readonly", width=14, textvariable=self._ui_lang_var)
-        self._ui_lang_combo.pack(side=tk.LEFT)
-        self._ui_lang_combo.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
-        self._ui_lang_note = ttk.Label(body, text=t("界面语言在重启程序后生效"),
-                                       style="Muted.TLabel")
-        self._ui_lang_note.pack(anchor=tk.W)
+        # 分页口径 = 「我要改什么」→ 去哪页：
+        #   常规 = 填 key / 换界面语言；音频 = 声音的进出（设备 · 门限 · 音色）；
+        #   词库 = 专有名词怎么译；关于 = 版本与日志（出问题时给维护者的东西）
+        self._build_settings_general(self._settings_page(nb, t("常规")))
+        self._build_settings_audio(self._settings_page(nb, t("音频")))
+        self._build_settings_glossary(self._settings_page(nb, t("词库")))
+        self._build_settings_about(self._settings_page(nb, t("关于")))
+        self._size_settings_window()
 
-        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+    def _settings_page(self, nb: ttk.Notebook, title: str) -> ttk.Frame:
+        """给 Notebook 加一页，返回该页**放控件的内容 frame**（外面套一层可滚动画布）。
 
+        每页都套滚动是兜底、不是常态：窗口高度是固定的（保证整窗在屏幕内），
+        而文案长度随界面语言变（俄语普遍更长）—— 装不下时必须能滚，
+        绝不能让 Tk 把内容裁掉。滚动条只在**真装不下**时出现（_sync_page_scrollbar）。
+        """
+        tab = ttk.Frame(nb)
+        nb.add(tab, text=title)
+        canvas = tk.Canvas(tab, bg=PANEL, highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(tab, orient=tk.VERTICAL, style="Vertical.TScrollbar",
+                           command=canvas.yview)
+        inner = ttk.Frame(canvas, padding=(TAB_INSET_X, 16, TAB_INSET_X, 16))
+        canvas.configure(yscrollcommand=sb.set)
+        slot = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # 只打包可伸长的 canvas；滚动条要出现时用 before=canvas 插到它左边（右侧）——
+        # 打包顺序恒为「滚动条先、canvas 后」，空间不够时被压缩的才是 canvas，
+        # 反过来滚动条会被挤成 1px（按钮行上踩过同一个坑）。
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._settings_pages.append((canvas, inner, sb))
+
+        def _on_inner(_e=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 1, 1))
+            self._sync_page_scrollbar(canvas, inner, sb)
+
+        def _on_canvas(e) -> None:
+            # 内容宽 = 画布宽：fill=X 的控件（输入框/词库框）才撑得开，也不会横向溢出
+            canvas.itemconfigure(slot, width=e.width)
+            self._sync_page_scrollbar(canvas, inner, sb)
+
+        inner.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>", _on_canvas)
+        return inner
+
+    def _sync_page_scrollbar(self, canvas: tk.Canvas, inner: ttk.Frame,
+                             sb: ttk.Scrollbar) -> None:
+        """内容比可视高度高才显示滚动条；装得下就收起来（多数语言根本用不上）。"""
+        have = canvas.winfo_height()
+        if have <= 1:
+            return          # 弹窗还 withdraw 着、没布局过：等 <Configure> 或打开时再判
+        if inner.winfo_reqheight() > have + 1:
+            if sb.winfo_manager() != "pack":
+                sb.pack(side=tk.RIGHT, fill=tk.Y, before=canvas)
+        elif sb.winfo_manager() == "pack":
+            sb.pack_forget()
+
+    def _sync_settings_pages(self) -> None:
+        """弹窗显示出来后补一次滚动条判定：建窗时它 withdraw 着，那时量不到可视高度。"""
+        try:
+            self._settings_win.update_idletasks()
+            for canvas, inner, sb in self._settings_pages:
+                self._sync_page_scrollbar(canvas, inner, sb)
+        except Exception as exc:  # noqa: BLE001 — 滚动条判错不该影响弹窗能用
+            print(f"[ui] ⚠️ 设置弹窗滚动条同步失败（不影响使用）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_settings_wheel(self, event) -> None:
+        """滚轮滚**当前那一页**；指针停在自带滚动的控件上（词库 tk.Text）时不抢。
+
+        Tk 的 bindtag 顺序是「控件 → 类 → 顶层 → all」，而 tk.Text 的类绑定滚完自己
+        并不 return break，所以这里必须显式跳过它，否则一次滚轮两边一起滚。
+        """
+        try:
+            w = getattr(event, "widget", None)
+            if w is not None and w.winfo_class() in ("Text", "Listbox"):
+                return
+            nb = self._settings_nb
+            canvas = self._settings_pages[nb.index(nb.select())][0]
+        except Exception:  # noqa: BLE001 — 弹窗没建好/已销毁，滚轮直接忽略
+            return
+        delta, num = getattr(event, "delta", 0), getattr(event, "num", 0)
+        if delta:
+            step = -1 if delta > 0 else 1
+        elif num == 4:                            # X11 没有 MouseWheel，只有 Button-4/5
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            return
+        canvas.yview_scroll(step * 3, "units")
+
+    def _size_settings_window(self) -> None:
+        """按当前语言实测各页需求高度，定弹窗的固定尺寸（宽固定、高按内容 + 两道上限）。
+
+        上限两道：SETTINGS_MAX_H（1080p 屏也要整窗可见）与「屏高 - 90」（更小的屏优先保命，
+        标题栏/任务栏也要占地方）。真装不下的部分由页面滚动兜底，不再靠「窗口被裁」糊过去。
+        """
+        win = self._settings_win
+        try:
+            win.update_idletasks()
+            need = max((inner.winfo_reqheight() for _c, inner, _s in self._settings_pages),
+                       default=0)
+            screen_h = int(win.winfo_screenheight() or 0)
+            cap = min(SETTINGS_MAX_H, screen_h - 90) if screen_h else SETTINGS_MAX_H
+            h = max(SETTINGS_MIN_H, min(need + SETTINGS_CHROME_H, cap))
+            self._settings_size = (SETTINGS_WIDTH, h)
+            win.geometry(f"{SETTINGS_WIDTH}x{h}")
+            print(f"[ui] 设置弹窗 {SETTINGS_WIDTH}x{h}"
+                  f"（最高一页需 {need}px，屏高 {screen_h}px）", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 尺寸算错不该拦住启动
+            self._settings_size = (SETTINGS_WIDTH, SETTINGS_MAX_H)
+            win.geometry(f"{SETTINGS_WIDTH}x{SETTINGS_MAX_H}")
+            print(f"[ui] ⚠️ 设置弹窗尺寸自适应失败，按上限值开窗："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+    # ---------------------------------------------------------------- 设置弹窗 · 常规页
+    def _build_settings_general(self, body: ttk.Frame) -> None:
+        """「常规」页：API key（新用户第一件事，放最前）+ 界面语言。"""
         # ---- API Key ----
         # 安全约束（与 vlt/credentials.py 一致）：
         # - 输入框用 ● 掩码；保存成功后**立刻清空输入框**，明文不留在界面上；
@@ -1113,19 +1271,43 @@ class TranslationGUI:
                                     width=34, style="Key.TEntry")
         self._key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         self._key_entry.bind("<Return>", lambda _e: self._on_save_key())
-        self._key_status = ttk.Label(body, text="", style="Dim.TLabel")
+        self._key_status = ttk.Label(body, text="", style="Dim.TLabel",
+                                     justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._key_status.pack(anchor=tk.W)
         self._refresh_key_status()
 
         ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
 
+        # ---- 界面语言 ----
+        # 本批只做到「重启后生效」：控件文案全在建窗时按当前语言取词，
+        # 运行中换语言不重建树（正在进行的翻译/设备列表状态绝不受影响）。
+        ttk.Label(body, text=t("界面语言"), style="Section.TLabel").pack(anchor=tk.W)
+        lang_row = ttk.Frame(body)
+        lang_row.pack(fill=tk.X, pady=(8, 4))
+        self._ui_lang_names = dict(i18n.available_languages())   # code → 母语名称
+        self._ui_lang_var = tk.StringVar(
+            value=self._ui_lang_names.get(i18n.current_language(), "简体中文"))
+        self._ui_lang_combo = ttk.Combobox(
+            lang_row, values=list(self._ui_lang_names.values()),
+            state="readonly", width=14, textvariable=self._ui_lang_var)
+        self._ui_lang_combo.pack(side=tk.LEFT)
+        self._ui_lang_combo.bind("<<ComboboxSelected>>", self._on_ui_lang_change)
+        self._ui_lang_note = ttk.Label(body, text=t("界面语言在重启程序后生效"),
+                                       style="Muted.TLabel", justify=tk.LEFT,
+                                       wraplength=SETTINGS_WRAP)
+        self._ui_lang_note.pack(anchor=tk.W)
+
+    # ---------------------------------------------------------------- 设置弹窗 · 音频页
+    def _build_settings_audio(self, body: ttk.Frame) -> None:
+        """「音频」页：设备选择 → 输入门限 → 译音音色（都是「声音怎么进出」这一件事）。"""
         # ---- 音频设备 ----
         dev_head = ttk.Frame(body)
         dev_head.pack(fill=tk.X)
-        ttk.Label(dev_head, text=t("音频设备"), style="Section.TLabel").pack(side=tk.LEFT)
+        # 按钮先占右侧（压不动），标题后打包 —— 空间不足时被裁的才是标题
         self._refresh_btn = ttk.Button(dev_head, text=t("刷新"),
                                        command=self._on_refresh_devices)
         self._refresh_btn.pack(side=tk.RIGHT)
+        ttk.Label(dev_head, text=t("音频设备"), style="Section.TLabel").pack(side=tk.LEFT)
 
         grid = ttk.Frame(body)
         grid.pack(fill=tk.X, pady=(8, 2))
@@ -1167,10 +1349,12 @@ class TranslationGUI:
 
         if self._linux_fixed_audio:
             ttk.Label(body, text=t("Linux：VRChat 音频与译音输出已自动处理"),
-                      style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+                      style="Muted.TLabel", justify=tk.LEFT,
+                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
         else:
             ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
-                      style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+                      style="Muted.TLabel", justify=tk.LEFT,
+                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）----
         # 与设备选择同属「输入侧」：设备选好之后，紧接着就是「收到的东西要多响才送」。
@@ -1184,7 +1368,8 @@ class TranslationGUI:
         self._gate_check = tk.Checkbutton(
             body, variable=self._gate_enabled_var,
             text=t("启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）"),
-            command=self._on_gate_change, **self._indicator_kw())
+            command=self._on_gate_change, wraplength=SETTINGS_WRAP,
+            justify=tk.LEFT, anchor="w", **self._indicator_kw())
         self._gate_check.pack(anchor=tk.W, pady=(8, 4))
 
         ggrid = ttk.Frame(body)
@@ -1192,7 +1377,7 @@ class TranslationGUI:
         ggrid.columnconfigure(1, weight=1)
         # 实时电平条：横轴 -70 ~ 0 dBFS；蓝 = 当前已超过门限（这段会被翻译），
         # 白竖线 = 门限位置。数据来自 loopback 采集腿 —— 没在翻译时显示「—」。
-        self._gate_level_canvas = tk.Canvas(ggrid, width=240, height=15,
+        self._gate_level_canvas = tk.Canvas(ggrid, width=320, height=15,
                                             bg=SURFACE, highlightthickness=1,
                                             highlightbackground=BORDER, bd=0)
         ttk.Label(ggrid, text=t("当前电平:"), style="Dim.TLabel").grid(
@@ -1206,7 +1391,7 @@ class TranslationGUI:
             row=1, column=0, sticky="w", pady=3)
         self._gate_scale = tk.Scale(
             ggrid, from_=INPUT_GATE_MIN_DB, to=INPUT_GATE_MAX_DB, resolution=1,
-            orient=tk.HORIZONTAL, variable=self._gate_var, showvalue=False, length=240,
+            orient=tk.HORIZONTAL, variable=self._gate_var, showvalue=False, length=320,
             bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
             highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
             command=self._on_gate_change)
@@ -1215,7 +1400,8 @@ class TranslationGUI:
                                        style="Dim.TLabel", width=9)
         self._gate_val_lbl.grid(row=1, column=2, sticky="w")
         ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）"),
-                  style="Muted.TLabel", justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 音色 ----
         # 两条出声音色来自**不同模型**，音色 id 不通用（跨模型混用会被服务端拒），
@@ -1266,9 +1452,13 @@ class TranslationGUI:
         self._tts_voice_combo.bind("<Return>", self._on_tts_voice_change)
         self._voice_note = ttk.Label(body, text=t("说话译音跟随「译音输出」开关（改完下次开始翻译生效）；"
                                                   "打字译音立刻生效"),
-                                     style="Muted.TLabel", justify=tk.LEFT)
+                                     style="Muted.TLabel", justify=tk.LEFT,
+                                     wraplength=SETTINGS_WRAP)
         self._voice_note.pack(anchor=tk.W, pady=(6, 0))
 
+    # ---------------------------------------------------------------- 设置弹窗 · 词库页
+    def _build_settings_glossary(self, body: ttk.Frame) -> None:
+        """「词库」页：专有名词怎么译（社团名 / 人名 / 术语）。"""
         # ---- 专有词库 ----
         # 用户场景：VRChat 里念社团名 / 人名 / 术语，模型要么听错、要么按字面意译
         # （「VRChat」被翻成「虚拟聊天」这种）。词库就是把这些词**钉死**：
@@ -1286,7 +1476,6 @@ class TranslationGUI:
         # 为什么这里用 tk.Text 而不是 ttk.Entry：一个词库是**多行**的，单行输入框
         # 逼用户去手改 YAML（这功能就等于没做）。样式手动对齐 SURFACE/TEXT 体系，
         # 因为 tk.Text 不走 ttk style。
-        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
         ttk.Label(body, text=t("专有词库"), style="Section.TLabel").pack(anchor=tk.W)
         # 作用方向：显示名（i18n）→ 内部 scope key。顺序固定：全局 / 我说 / 别人说
         self._glossary_scope_names = {
@@ -1306,17 +1495,20 @@ class TranslationGUI:
         gloss_box = ttk.Frame(body)
         gloss_box.pack(fill=tk.X, pady=(8, 2))
         self._glossary_text = tk.Text(
-            gloss_box, height=6, width=44, wrap=tk.NONE, undo=True,
+            gloss_box, height=9, width=44, wrap=tk.NONE, undo=True,
             bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
             selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
             highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
-        self._glossary_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        gloss_sb = ttk.Scrollbar(gloss_box, orient=tk.VERTICAL,
+        # 滚动条**先**占住右侧（它压不动），词库框后打包并 fill=X expand 吸收压缩；
+        # 顺序反过来窗口变窄时滚动条会被挤成 1px。样式要显式引用，否则是 clam 的浅灰。
+        gloss_sb = ttk.Scrollbar(gloss_box, orient=tk.VERTICAL, style="Vertical.TScrollbar",
                                  command=self._glossary_text.yview)
         gloss_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._glossary_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._glossary_text.configure(yscrollcommand=gloss_sb.set)
         self._glossary_hint = ttk.Label(
-            body, text="", style="Muted.TLabel", justify=tk.LEFT, wraplength=340)
+            body, text="", style="Muted.TLabel", justify=tk.LEFT,
+            wraplength=SETTINGS_WRAP)
         self._glossary_hint.pack(anchor=tk.W, pady=(4, 4))
         gloss_row = ttk.Frame(body)
         gloss_row.pack(fill=tk.X)
@@ -1329,11 +1521,30 @@ class TranslationGUI:
         # 这样「打开设置 → 已经是磁盘上的最新内容」这条保证在首屏也成立）
         self._refresh_glossary_box()
 
+    # ---------------------------------------------------------------- 设置弹窗 · 关于页
+    def _build_settings_about(self, body: ttk.Frame) -> None:
+        """「关于」页：软件更新 + 日志（出问题时要交给维护者的东西）+ 开发者署名。
+
+        这两区改造前排在长列**最末尾**，正好是掉到屏幕外、用户根本看不到也点不着的部分。
+        """
+        # ---- 软件更新 ----
+        upd_head = ttk.Frame(body)
+        upd_head.pack(fill=tk.X)
+        # 按钮先占右侧（压不动），标题后打包 —— 空间不足时被裁的才是标题
+        self._update_check_btn = ttk.Button(
+            upd_head, text=t("检查更新"),
+            command=lambda: self._schedule_update_check(manual=True))
+        self._update_check_btn.pack(side=tk.RIGHT)
+        ttk.Label(upd_head, text=t("软件更新"), style="Section.TLabel").pack(side=tk.LEFT)
+        self._update_info = ttk.Label(
+            body, text=t("当前版本 v{ver} · 启动时会自动检查一次", ver=__version__),
+            style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+        self._update_info.pack(anchor=tk.W, pady=(6, 0))
+
         # ---- 日志 ----
-        ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
         log_head = ttk.Frame(body)
         log_head.pack(fill=tk.X)
-        ttk.Label(log_head, text=t("日志"), style="Section.TLabel").pack(side=tk.LEFT)
         self._log_export_btn = ttk.Button(log_head, text=t("导出日志压缩包…"),
                                           command=self._on_export_logs)
         self._log_export_btn.pack(side=tk.RIGHT)
@@ -1341,23 +1552,18 @@ class TranslationGUI:
         self._log_open_btn = ttk.Button(log_head, text=t("打开日志文件夹"),
                                         command=self._on_open_log_folder)
         self._log_open_btn.pack(side=tk.RIGHT, padx=(0, 6))
-        self._log_info = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT)
+        ttk.Label(log_head, text=t("日志"), style="Section.TLabel").pack(side=tk.LEFT)
+        self._log_info = ttk.Label(body, text="", style="Muted.TLabel", justify=tk.LEFT,
+                                   wraplength=SETTINGS_WRAP)
         self._log_info.pack(anchor=tk.W, pady=(6, 0))
         self._refresh_log_info()
 
-        # ---- 软件更新 ----
-        ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
-        upd_head = ttk.Frame(body)
-        upd_head.pack(fill=tk.X)
-        ttk.Label(upd_head, text=t("软件更新"), style="Section.TLabel").pack(side=tk.LEFT)
-        self._update_check_btn = ttk.Button(
-            upd_head, text=t("检查更新"),
-            command=lambda: self._schedule_update_check(manual=True))
-        self._update_check_btn.pack(side=tk.RIGHT)
-        self._update_info = ttk.Label(
-            body, text=t("当前版本 v{ver} · 启动时会自动检查一次", ver=__version__),
-            style="Muted.TLabel", justify=tk.LEFT)
-        self._update_info.pack(anchor=tk.W, pady=(6, 0))
+        # ---- 开发者 ----
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("开发者"), style="Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(body, text=t("由可爱的赛博巫师和他的朋友们 开发"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
     def _log_dir(self) -> Path:
         from .crashlog import _LOG_PATH      # noqa: SLF001  （跟着实际日志走）
@@ -1441,21 +1647,32 @@ class TranslationGUI:
         print(f"[gui] 已打开日志文件夹：{d}", flush=True)
 
     def _open_settings(self) -> None:
-        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近。"""
+        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近且**整窗都在屏幕内**。"""
         win = self._settings_win
         self._refresh_key_status()          # 每次打开都刷新来源/打码显示
         self._refresh_glossary_box()        # 手改过 config.yaml 的话，别让旧内容把它覆盖回去
         win.update_idletasks()
+        ww, wh = self._settings_size
         rx, ry = self._root.winfo_x(), self._root.winfo_y()
         rw = self._root.winfo_width()
-        ww, wh = win.winfo_reqwidth(), win.winfo_reqheight()
-        win.geometry(f"+{rx + max((rw - ww) // 2, 20)}+{ry + 48}")
+        x, y = rx + max((rw - ww) // 2, 20), ry + 48
+        # 夹进屏幕：改造前不做这一步，1485px 高的弹窗从 y=352 起、底边落到 1837
+        # （屏高 1600），最下面两个分区整个在屏幕外 —— 不是难找，是够不着。
+        screen_w = int(win.winfo_screenwidth() or 0)
+        screen_h = int(win.winfo_screenheight() or 0)
+        if screen_w:
+            x = max(8, min(x, screen_w - ww - 8))
+        if screen_h:
+            y = max(8, min(y, screen_h - wh - 48))    # 底部留 48px 给任务栏
+        win.geometry(f"{ww}x{wh}+{x}+{y}")
         win.deiconify()
         win.lift()
         win.focus_set()
         # 建窗时它处于 withdraw 状态，那时调 DWM 拿不到有效 hwnd、会静默失败
         # （实测弹窗标题栏仍是浅色、跟主窗口不一致）。显示出来之后再设一次。
         self._apply_dark_titlebar(win)
+        # 也是同理：withdraw 时量不到可视高度，滚动条的显隐得等显示出来再判一次
+        self._sync_settings_pages()
 
     def _close_settings(self) -> None:
         self._settings_win.withdraw()
