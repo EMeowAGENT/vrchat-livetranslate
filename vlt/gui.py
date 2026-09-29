@@ -27,11 +27,12 @@ from tkinter import messagebox, ttk
 import yaml
 
 from . import __version__, crashlog, i18n, tts, update_check
-from .config import Direction, DEFAULT_CONFIG, load_api_key, load_config
+from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_config
 from .config_io import (
     _fmt_scalar,
     _write_config_text,
     _yaml_set_in_text,
+    _yaml_set_mapping,
     _yaml_set_or_create,
 )
 from .i18n import t
@@ -267,6 +268,43 @@ def _is_unsupported_voice_err(msg: str) -> bool:
     return any(m in low for m in _UNSUPPORTED_VOICE_MARKERS)
 
 
+# ---------------------------------------------------------------- 专有词库的文本格式
+# 界面上一行一条：`原文=译名`。为什么用这个格式而不是 JSON / YAML：
+#   · 用户是主播，不是程序员 —— 敲 `原文=译名` 不需要懂缩进和引号；
+#   · 一行一条，删一条就删一行，改坏了也不影响别人（JSON 少个逗号整段报废）；
+#   · 与 config.yaml 里的映射表一一对应，肉眼能对上。
+# 解析纪律：以 `#` 开头的行是注释、空行忽略；**只按第一个等号切**，
+# 这样译名里带 `=`（或中文全角 `＝`）也不会切错。
+
+def _parse_glossary_lines(text: str) -> dict[str, str]:
+    """把界面文本框的内容解析成 {原文: 译名}（纯函数，离线可测）。
+
+    重复的原文以**后出现的为准**（用户在下面写一条更具体的覆盖上面那条，
+    与「后写覆盖先写」的直觉一致）。
+    """
+    out: dict[str, str] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            # 容忍全角等号（中文输入法下极易打出来），否则用户会以为「保存没反应」
+            if "＝" not in line:
+                continue
+            src, _, tgt = line.partition("＝")
+        else:
+            src, _, tgt = line.partition("=")
+        src, tgt = src.strip(), tgt.strip()
+        if src and tgt:
+            out[src] = tgt
+    return out
+
+
+def _glossary_to_lines(mapping: dict[str, str] | None) -> list[str]:
+    """反向：{原文: 译名} → 界面文本框的行（保持配置里的顺序）。"""
+    return [f"{k}={v}" for k, v in (mapping or {}).items()]
+
+
 class TranslationGUI:
     """主界面。headless=True 时不创建 Tk 窗口（给 --self-test / --self-test-dual 用）。"""
 
@@ -457,6 +495,8 @@ class TranslationGUI:
         # 标签不可点）；**未配置 → 可点按钮**，点击用默认浏览器打开千问云开通页（QIANWEN_SIGNUP_URL）。
         style.configure("Chip.TLabel", font=FONT_STATUS, foreground=TEXT_DIM)
         style.configure("ChipWarn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
+        # 设置弹窗里「保存失败」这类就地提示：警示色，但只是文字（不抢按钮的视觉重量）
+        style.configure("Warn.TLabel", font=FONT_STATUS, foreground=COLOR_WARN)
         # 未配置按钮：暗橙底 + 警示橙字，悬停/按下亮一档 —— 警示色系但不刺眼。
         style.configure("ChipWarn.TButton", font=FONT_STATUS, foreground=COLOR_WARN,
                         background="#33291c", borderwidth=0, focusthickness=0,
@@ -1061,6 +1101,47 @@ class TranslationGUI:
                                      style="Muted.TLabel", justify=tk.LEFT)
         self._voice_note.pack(anchor=tk.W, pady=(6, 0))
 
+        # ---- 专有词库 ----
+        # 用户场景：VRChat 里念社团名 / 人名 / 术语，模型要么听错、要么按字面意译
+        # （「VRChat」被翻成「虚拟聊天」这种）。词库就是把这些词**钉死**：
+        #   · 实时那条腿 → session.translation.corpus.phrases（顺带提升识别率）
+        #   · 打字那条腿 → translation_options.terms（qwen-mt 的术语干预）
+        # 词库分「全局 + 方向级」两层，`config.merge_hotwords` 是唯一合并口径：
+        #   界面这里只编辑**全局**那份（作用到两个方向）；
+        #   方向性词条（同一个 key 在两个方向需要**不同**译名）要手改 config.yaml 的
+        #   directions.<X>.hotwords —— 放全局会让反方向的译名被换掉（实测）。
+        #
+        # 为什么这里用 tk.Text 而不是 ttk.Entry：一个词库是**多行**的，单行输入框
+        # 逼用户去手改 YAML（这功能就等于没做）。样式手动对齐 SURFACE/TEXT 体系，
+        # 因为 tk.Text 不走 ttk style。
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("专有词库"), style="Section.TLabel").pack(anchor=tk.W)
+        gloss_box = ttk.Frame(body)
+        gloss_box.pack(fill=tk.X, pady=(8, 2))
+        self._glossary_text = tk.Text(
+            gloss_box, height=6, width=44, wrap=tk.NONE, undo=True,
+            bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
+            selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
+        self._glossary_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        gloss_sb = ttk.Scrollbar(gloss_box, orient=tk.VERTICAL,
+                                 command=self._glossary_text.yview)
+        gloss_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._glossary_text.configure(yscrollcommand=gloss_sb.set)
+        for line in _glossary_to_lines((self._cfg.session_base or {}).get("glossary") or {}):
+            self._glossary_text.insert(tk.END, line + "\n")
+        self._glossary_hint = ttk.Label(
+            body, text=t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）"),
+            style="Muted.TLabel", justify=tk.LEFT, wraplength=340)
+        self._glossary_hint.pack(anchor=tk.W, pady=(4, 4))
+        gloss_row = ttk.Frame(body)
+        gloss_row.pack(fill=tk.X)
+        self._glossary_save_btn = ttk.Button(gloss_row, text=t("保存词库"),
+                                            command=self._on_save_glossary)
+        self._glossary_save_btn.pack(side=tk.RIGHT)
+        self._glossary_status = ttk.Label(gloss_row, text="", style="Muted.TLabel")
+        self._glossary_status.pack(side=tk.LEFT)
+
         # ---- 日志 ----
         ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
         log_head = ttk.Frame(body)
@@ -1176,6 +1257,7 @@ class TranslationGUI:
         """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近。"""
         win = self._settings_win
         self._refresh_key_status()          # 每次打开都刷新来源/打码显示
+        self._refresh_glossary_box()        # 手改过 config.yaml 的话，别让旧内容把它覆盖回去
         win.update_idletasks()
         rx, ry = self._root.winfo_x(), self._root.winfo_y()
         rw = self._root.winfo_width()
@@ -2364,6 +2446,98 @@ class TranslationGUI:
             _write_config_text(p, text)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] {err_label}失败：{exc}", flush=True)
+
+    # ---- 专有词库 ----
+
+    def _on_save_glossary(self) -> None:
+        """把文本框里的词库写回 config.yaml，并让正在跑的引擎**立刻**用上新词库。
+
+        三件事必须都做到，少一件都会变成「界面说保存了、实际没生效」：
+          1) 落盘（`glossary:` 段整段替换，保住段外注释）；
+          2) 同步**内存里的同一个 cfg 对象** —— 引擎每次都从它现读，不打桩就白存；
+          3) 通知正在跑的引擎重建会话（实时那条腿的词库是会话级配置，改不了热更新）。
+        引擎因 RPM 预算没法立刻重建时会自己出 warn 状态，这里不需要替它圆场。
+        """
+        try:
+            mapping = _parse_glossary_lines(self._glossary_text.get("1.0", tk.END))
+        except Exception as exc:  # noqa: BLE001
+            self._set_glossary_status(t("保存失败：{err}", err=f"{type(exc).__name__}: {exc}"),
+                                      warn=True)
+            return
+
+        saved = self._save_glossary_config(mapping)
+        if isinstance(self._cfg.session_base, dict):
+            # 引擎持有的是**同一个** AppConfig 对象（见 _start_engine 的 cfg=self._cfg）
+            self._cfg.session_base["glossary"] = dict(mapping)
+        self._push_glossary_to_engines(mapping)
+
+        if saved:
+            self._set_glossary_status(t("已保存 {n} 条词条（正在翻译时会重建会话生效）",
+                                        n=len(mapping)))
+            print(f"[gui] 专有词库已保存：{len(mapping)} 条", flush=True)
+        else:
+            # 写盘失败只在日志留痕、且**不回显成功**：不能骗用户说存好了
+            self._set_glossary_status(t("保存失败：{err}", err="写入 config.yaml 失败，见日志"),
+                                      warn=True)
+
+    def _save_glossary_config(self, mapping: dict[str, str]) -> bool:
+        """整段替换 config.yaml 的 `glossary:`；成功返回 True。"""
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return False
+        try:
+            text = p.read_text(encoding="utf-8")
+            _write_config_text(p, _yaml_set_mapping(text, ["glossary"], mapping))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存专有词库失败：{exc}", flush=True)
+            return False
+
+    def _push_glossary_to_engines(self, mapping: dict[str, str]) -> None:
+        for eng in self._engines:
+            if eng.running:
+                eng.set_glossary(mapping)
+
+    def _set_glossary_status(self, text: str, *, warn: bool = False) -> None:
+        lbl = getattr(self, "_glossary_status", None)
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text=text, style="Warn.TLabel" if warn else "Muted.TLabel")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_glossary_box(self) -> None:
+        """把文本框重填成**磁盘上当前**的词库（读不到就退回内存快照）。
+
+        为什么每次打开设置都要重填：用户完全可能**手改 config.yaml**（模板里就写着怎么改），
+        而内存里的 `session_base['glossary']` 只是启动那一刻的快照。不重填的话，
+        他改完文件、再点设置里的「保存词库」，就会用界面上的旧内容把手工改动**覆盖掉**
+        —— 这是最容易被骂「把我配置搞丢了」的一类 bug。
+
+        所以这里读的是**文件**，不是内存（与 `_refresh_api_key_in_cfg` 同一口径：
+        配置文件的真相在磁盘上）。文件读不到 / 解析失败时退回内存快照 ——
+        配置坏了不该连设置窗都打不开。改动同时清掉上次的状态提示（那说的是上一次保存）。
+        """
+        box = getattr(self, "_glossary_text", None)
+        if box is None:
+            return
+        mapping: dict[str, str] | None = None
+        try:
+            raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict):
+                mapping = _as_str_map(raw.get("glossary"), "glossary（专有词库）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 读磁盘词库失败，退回内存快照：{type(exc).__name__}: {exc}", flush=True)
+        if mapping is None:
+            mapping = dict((self._cfg.session_base or {}).get("glossary") or {})
+        try:
+            box.delete("1.0", tk.END)
+            for line in _glossary_to_lines(mapping):
+                box.insert(tk.END, line + "\n")
+            self._set_glossary_status("")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 刷新词库文本框失败：{exc}", flush=True)
 
     # ---- 音色试听 ----
     def _on_preview_speech_voice(self) -> None:

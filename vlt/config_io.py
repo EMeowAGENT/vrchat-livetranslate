@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -142,6 +143,56 @@ def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
 
     _walk(path, 0, 0, len(lines))
     return "\n".join(lines)
+
+
+def _yaml_quote(x: object) -> str:
+    """YAML 双引号标量（复用 JSON 的转义规则 —— YAML 双引号风格是它的超集）。
+
+    一律加引号，是为了社团名/术语里那些 `#`、`:`、前后空格、`-` 开头不让 YAML 变味
+    （`VRChat: VRChat` 不加引号也合法，但 `Rob: a club` 就不是了）。
+    """
+    return json.dumps("" if x is None else str(x), ensure_ascii=False)
+
+
+def _yaml_set_mapping(text: str, path: list[str], mapping: dict[str, str]) -> str:
+    """就地写入一整段**块映射**（如顶层 `glossary:` 专有词库），保留注释与键顺序。
+
+    为什么需要第三个函数：`_yaml_set_in_text` / `_yaml_set_or_create` 都只改**单个叶子
+    标量**。词库是一整段映射 —— 用它们得为每个词条各走一遍，还得先把不存在的条目
+    删干净（否则用户删掉一条、文件里还留着，下次启动又「复活」）。整段替换语义明确：
+    **这段归程序管，以界面里的当前内容为准**。
+
+    ⚠️ 取舍（写下来免得后人踩）：段**内部**的注释会随整段一起被替换掉；段外（上方）
+    的说明注释不受影响。所以模板里的词库说明一律写在 `glossary:` 上方，不写在段内。
+
+    实现取巧但可靠：先借 `_yaml_set_or_create` 把该键收敛成 `key: {}`（顺带搞定
+    「老配置里整段不存在」的补建），再把这**一行**展开成块映射。这样父级补建、
+    注释保留、块行清理三个难点都复用了已经过测试的代码路径。
+
+    mapping 为空 → 保留 `glossary: {}`（键在，用户才知道有这个功能）。
+    """
+    text = _yaml_set_or_create(text, path, "{}")
+    if not mapping:
+        return text
+
+    indent = 2 * (len(path) - 1)
+    leaf = path[-1]
+    pad = " " * indent
+    lines = text.split("\n")
+    pat = re.compile(rf"^{re.escape(pad)}{re.escape(leaf)}:\s*(\{{\}})?\s*(#.*)?$")
+    for i, line in enumerate(lines):
+        m = pat.match(line)
+        if m is None:
+            continue
+        comment = (m.group(2) or "").strip()
+        block = [f"{pad}{leaf}:" + (f"   {comment}" if comment else "")]
+        for k, v in mapping.items():
+            # json.dumps 产出的就是合法的 YAML 双引号标量（含转义），且不会把 / 转义掉；
+            # 一律加引号是为了社团名里那些 `#`、`:`、前后空格不让 YAML 变味。
+            block.append(f"{pad}  {_yaml_quote(k)}: {_yaml_quote(v)}")
+        lines[i:i + 1] = block
+        return "\n".join(lines)
+    return text          # 理论上不可达（上一步刚写过这行）；宁可这次没生效，也不乱改
 
 
 def _write_config_text(path: Path, text: str) -> None:
