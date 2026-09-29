@@ -159,13 +159,19 @@ STRINGS: dict[str, str] = {
 
     # ---- 设置弹窗：专有词库 ----
     "专有词库": "Glossary",
-    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）":
-        "One per line as source=target (club names, player names, jargon; applies to both directions)",
+    "作用方向:": "Scope:",
+    "全局": "Global",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；作用于两个方向 —— 两个方向都要同一个译名时才放这里":
+        "One per line as source=target (club names, player names, jargon); applies to BOTH "
+        "directions — only put entries here when both directions want the same name",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条腿生效，同名词条会覆盖全局":
+        "One per line as source=target (club names, player names, jargon); only affects the "
+        "\"{dir}\" leg, and entries here override the global table",
     "保存词库": "Save Glossary",
-    "已保存 {n} 条词条（正在翻译时会重建会话生效）":
-        "Saved {n} entries (takes effect after the session is rebuilt while translating)",
-    "已保存 {n} 条词条；{bad} 行看不懂已忽略（要写成 原文=译名）":
-        "Saved {n} entries; {bad} unreadable line(s) ignored (use source=target)",
+    "已保存 {n} 条词条到「{scope}」（正在翻译时会重建会话生效）":
+        "Saved {n} entries to \"{scope}\" (takes effect after the session is rebuilt while translating)",
+    "已保存 {n} 条词条到「{scope}」；{bad} 行看不懂已忽略（要写成 原文=译名）":
+        "Saved {n} entries to \"{scope}\"; {bad} unreadable line(s) ignored (use source=target)",
     "保存失败：{err}": "Save failed: {err}",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",

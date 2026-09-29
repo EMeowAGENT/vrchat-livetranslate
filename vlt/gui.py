@@ -1266,16 +1266,35 @@ class TranslationGUI:
         # （「VRChat」被翻成「虚拟聊天」这种）。词库就是把这些词**钉死**：
         #   · 实时那条腿 → session.translation.corpus.phrases（顺带提升识别率）
         #   · 打字那条腿 → translation_options.terms（qwen-mt 的术语干预）
-        # 词库分「全局 + 方向级」两层，`config.merge_hotwords` 是唯一合并口径：
-        #   界面这里只编辑**全局**那份（作用到两个方向）；
-        #   方向性词条（同一个 key 在两个方向需要**不同**译名）要手改 config.yaml 的
-        #   directions.<X>.hotwords —— 放全局会让反方向的译名被换掉（实测）。
+        #
+        # 词库分两层，`config.merge_hotwords` 是**唯一**合并口径：
+        #   全局（`glossary`）—— 两个方向共用；
+        #   方向级（`directions.<X>.hotwords`）—— 只作用于一条腿，同名词条**覆盖**全局。
+        # 两层都得能改，所以下面给一个「作用方向」下拉切换的是"**编辑哪张表**"：
+        # 两个方向的目标语言通常不同（同一个社团名，别人说时要中文译名、我说时要保持原样），
+        # 只让用户编辑全局那份的话，这功能对最常见的场景等于白给（实测过：全局写
+        # `Nekoya=猫屋` 会让「我说 → 英文」的译文变成 `the Cat House club`）。
         #
         # 为什么这里用 tk.Text 而不是 ttk.Entry：一个词库是**多行**的，单行输入框
         # 逼用户去手改 YAML（这功能就等于没做）。样式手动对齐 SURFACE/TEXT 体系，
         # 因为 tk.Text 不走 ttk style。
         ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
         ttk.Label(body, text=t("专有词库"), style="Section.TLabel").pack(anchor=tk.W)
+        # 作用方向：显示名（i18n）→ 内部 scope key。顺序固定：全局 / 我说 / 别人说
+        self._glossary_scope_names = {
+            "global": t("全局"),
+            "mine": t("我说"),
+            "theirs": t("别人说"),
+        }
+        scope_row = ttk.Frame(body)
+        scope_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(scope_row, text=t("作用方向:"), style="Dim.TLabel").pack(side=tk.LEFT)
+        self._glossary_scope_var = tk.StringVar(value=self._glossary_scope_names["global"])
+        self._glossary_scope_combo = ttk.Combobox(
+            scope_row, values=list(self._glossary_scope_names.values()),
+            state="readonly", width=10, textvariable=self._glossary_scope_var)
+        self._glossary_scope_combo.pack(side=tk.LEFT, padx=(8, 0))
+        self._glossary_scope_combo.bind("<<ComboboxSelected>>", self._on_glossary_scope_change)
         gloss_box = ttk.Frame(body)
         gloss_box.pack(fill=tk.X, pady=(8, 2))
         self._glossary_text = tk.Text(
@@ -1288,11 +1307,8 @@ class TranslationGUI:
                                  command=self._glossary_text.yview)
         gloss_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._glossary_text.configure(yscrollcommand=gloss_sb.set)
-        for line in _glossary_to_lines((self._cfg.session_base or {}).get("glossary") or {}):
-            self._glossary_text.insert(tk.END, line + "\n")
         self._glossary_hint = ttk.Label(
-            body, text=t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）"),
-            style="Muted.TLabel", justify=tk.LEFT, wraplength=340)
+            body, text="", style="Muted.TLabel", justify=tk.LEFT, wraplength=340)
         self._glossary_hint.pack(anchor=tk.W, pady=(4, 4))
         gloss_row = ttk.Frame(body)
         gloss_row.pack(fill=tk.X)
@@ -1301,6 +1317,9 @@ class TranslationGUI:
         self._glossary_save_btn.pack(side=tk.RIGHT)
         self._glossary_status = ttk.Label(gloss_row, text="", style="Muted.TLabel")
         self._glossary_status.pack(side=tk.LEFT)
+        # 控件建齐后再按当前 scope 填一次（读盘口径与 `_refresh_glossary_box` 完全一致，
+        # 这样「打开设置 → 已经是磁盘上的最新内容」这条保证在首屏也成立）
+        self._refresh_glossary_box()
 
         # ---- 日志 ----
         ttk.Separator(body).pack(fill=tk.X, pady=(14, 10))
@@ -2609,15 +2628,78 @@ class TranslationGUI:
 
     # ---- 专有词库 ----
 
+    def _glossary_scope(self) -> str:
+        """当前下拉选中的 scope key（`global` / `mine` / `theirs`）。
+
+        认不出来就退回全局：宁可编辑到那张最不容易出事的表，也不要抛异常把设置窗干掉。
+        """
+        names = getattr(self, "_glossary_scope_names", None) or {}
+        var = getattr(self, "_glossary_scope_var", None)
+        shown = var.get() if var is not None else ""
+        for key, label in names.items():
+            if label == shown:
+                return key
+        return "global"
+
+    def _glossary_scope_label(self, scope: str) -> str:
+        """给用户看的名字（「全局」/「我说」/「别人说」）——别把内部 key 甩到界面上。"""
+        return (getattr(self, "_glossary_scope_names", None) or {}).get(scope, scope)
+
+    @staticmethod
+    def _glossary_scope_path(scope: str) -> list[str]:
+        """该 scope 在 config.yaml 里的键路径（`_yaml_set_mapping` 认这个）。"""
+        return ["glossary"] if scope == "global" else ["directions", scope, "hotwords"]
+
+    def _read_glossary_from_disk(self, scope: str) -> dict[str, str] | None:
+        """从**磁盘**读某个 scope 的词表；读不到 / 解析失败返回 None（调用方回落内存）。
+
+        为什么按 scope 分开读：界面要能切表编辑，而"用户手改过 config.yaml"这件事
+        对两张表都成立 —— 读的必须都是文件，不然切过去看到的是启动那一刻的快照。
+        """
+        try:
+            raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                return None
+            if scope == "global":
+                return _as_str_map(raw.get("glossary"), "glossary（专有词库）")
+            section = (raw.get("directions") or {}).get(scope) or {}
+            return _as_str_map(section.get("hotwords"),
+                               f"directions.{scope}.hotwords（方向级热词）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 读磁盘词库（{scope}）失败，退回内存快照："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            return None
+
+    def _read_glossary_from_memory(self, scope: str) -> dict[str, str]:
+        """内存快照（磁盘读不到时的兜底）。"""
+        if scope == "global":
+            return dict((self._cfg.session_base or {}).get("glossary") or {})
+        d = (self._cfg.directions or {}).get(scope)
+        return dict(getattr(d, "hotwords", None) or {})
+
+    def _glossary_hint_text(self, scope: str) -> str:
+        """提示语随 scope 变 —— 「全局」和「方向级」的行为完全不同，不能共用一句。"""
+        if scope == "global":
+            return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
+                     "作用于两个方向 —— 两个方向都要同一个译名时才放这里")
+        return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
+                 "只对「{dir}」这条腿生效，同名词条会覆盖全局",
+                 dir=self._glossary_scope_label(scope))
+
+    def _on_glossary_scope_change(self, _event=None) -> None:
+        """切换作用方向 = 换一张表编辑（重读磁盘，别拿上一张表的内容覆盖过去）。"""
+        self._refresh_glossary_box()
+
     def _on_save_glossary(self) -> None:
-        """把文本框里的词库写回 config.yaml，并让正在跑的引擎**立刻**用上新词库。
+        """把文本框里的词库写回 config.yaml 的**当前作用方向**那张表。
 
         三件事必须都做到，少一件都会变成「界面说保存了、实际没生效」：
-          1) 落盘（`glossary:` 段整段替换，保住段外注释）；
+          1) 落盘（对应键整段替换，保住段外注释）；
           2) 同步**内存里的同一个 cfg 对象** —— 引擎每次都从它现读，不打桩就白存；
-          3) 通知正在跑的引擎重建会话（实时那条腿的词库是会话级配置，改不了热更新）。
+          3) 通知**受影响的**跑着的引擎重建会话（词库是会话级配置，改不了热更新）。
         引擎因 RPM 预算没法立刻重建时会自己出 warn 状态，这里不需要替它圆场。
         """
+        scope = self._glossary_scope()
         try:
             mapping = _parse_glossary_lines(self._glossary_text.get("1.0", tk.END))
         except Exception as exc:  # noqa: BLE001
@@ -2625,11 +2707,20 @@ class TranslationGUI:
                                       warn=True)
             return
 
-        saved = self._save_glossary_config(mapping)
-        if isinstance(self._cfg.session_base, dict):
-            # 引擎持有的是**同一个** AppConfig 对象（见 _start_engine 的 cfg=self._cfg）
-            self._cfg.session_base["glossary"] = dict(mapping)
-        self._push_glossary_to_engines(mapping)
+        saved = self._save_glossary_config(self._glossary_scope_path(scope), mapping)
+        # 同步内存：引擎持有的是**同一个** AppConfig 对象（见 _start_engine 的 cfg=self._cfg）
+        if scope == "global":
+            if isinstance(self._cfg.session_base, dict):
+                self._cfg.session_base["glossary"] = dict(mapping)
+        else:
+            d = (self._cfg.directions or {}).get(scope)
+            if d is None:
+                # 理论上不可达（config.load 总会从模板建出两个方向）—— 但绝不静默：
+                # 内存没同步就意味着引擎不会用上新表，用户会以为「保存了却没生效」。
+                print(f"[gui] ⚠️ 配置里没有方向 {scope!r}：本次只落盘，未同步内存", flush=True)
+            else:
+                d.hotwords = dict(mapping)
+        self._push_glossary_to_engines(scope, mapping)
 
         bad = _glossary_line_issues(self._glossary_text.get("1.0", tk.END))
         if saved:
@@ -2640,35 +2731,51 @@ class TranslationGUI:
                     print(f"[gui] ⚠️ 词库第 {_lineno} 行格式看不懂（要写成 原文=译名），"
                           f"已忽略：{_raw!r}", flush=True)
                 self._set_glossary_status(
-                    t("已保存 {n} 条词条；{bad} 行看不懂已忽略（要写成 原文=译名）",
-                      n=len(mapping), bad=len(bad)), warn=True)
+                    t("已保存 {n} 条词条到「{scope}」；{bad} 行看不懂已忽略（要写成 原文=译名）",
+                      n=len(mapping), bad=len(bad), scope=self._glossary_scope_label(scope)),
+                    warn=True)
             else:
-                self._set_glossary_status(t("已保存 {n} 条词条（正在翻译时会重建会话生效）",
-                                            n=len(mapping)))
-            print(f"[gui] 专有词库已保存：{len(mapping)} 条"
+                self._set_glossary_status(
+                    t("已保存 {n} 条词条到「{scope}」（正在翻译时会重建会话生效）",
+                      n=len(mapping), scope=self._glossary_scope_label(scope)))
+            print(f"[gui] 专有词库已保存（{scope}）：{len(mapping)} 条"
                   + (f"（另有 {len(bad)} 行格式看不懂已忽略）" if bad else ""), flush=True)
         else:
             # 写盘失败只在日志留痕、且**不回显成功**：不能骗用户说存好了
             self._set_glossary_status(t("保存失败：{err}", err="写入 config.yaml 失败，见日志"),
                                       warn=True)
 
-    def _save_glossary_config(self, mapping: dict[str, str]) -> bool:
-        """整段替换 config.yaml 的 `glossary:`；成功返回 True。"""
+    def _save_glossary_config(self, path: list[str], mapping: dict[str, str]) -> bool:
+        """整段替换 config.yaml 里 `path` 指向的那张词表；成功返回 True。
+
+        路径由调用方给：全局是 `["glossary"]`，方向级是 `["directions", <名>, "hotwords"]`
+        —— `_yaml_set_mapping` 对父级缺失会自动补建，所以老配置里没有 `hotwords:` 也能存下去。
+        """
         p = DEFAULT_CONFIG
         if not p.exists():
             return False
         try:
             text = p.read_text(encoding="utf-8")
-            _write_config_text(p, _yaml_set_mapping(text, ["glossary"], mapping))
+            _write_config_text(p, _yaml_set_mapping(text, path, mapping))
             return True
         except Exception as exc:  # noqa: BLE001
-            print(f"[gui] 保存专有词库失败：{exc}", flush=True)
+            print(f"[gui] 保存专有词库失败（{path}）：{exc}", flush=True)
             return False
 
-    def _push_glossary_to_engines(self, mapping: dict[str, str]) -> None:
-        for eng in self._engines:
-            if eng.running:
+    def _push_glossary_to_engines(self, scope: str, mapping: dict[str, str]) -> None:
+        """通知**受影响的**引擎。
+
+        全局改动两条腿都吃；方向级只吃那一条 —— 只发给对应引擎，别让另一条腿
+        平白撞一次 RPM 预算（那会让用户莫名其妙看到「连接预算不足」）。
+        """
+        label = self._glossary_scope_label(scope)
+        for eng, direction in zip(self._engines, self._engine_dirs):
+            if not eng.running:
+                continue
+            if scope == "global":
                 eng.set_glossary(mapping)
+            elif direction == scope:
+                eng.set_direction_hotwords(scope, mapping, label=label)
 
     def _set_glossary_status(self, text: str, *, warn: bool = False) -> None:
         lbl = getattr(self, "_glossary_status", None)
@@ -2680,33 +2787,31 @@ class TranslationGUI:
             pass
 
     def _refresh_glossary_box(self) -> None:
-        """把文本框重填成**磁盘上当前**的词库（读不到就退回内存快照）。
+        """把文本框重填成**磁盘上当前 scope 的那张**词表（读不到就退回内存快照）。
 
-        为什么每次打开设置都要重填：用户完全可能**手改 config.yaml**（模板里就写着怎么改），
-        而内存里的 `session_base['glossary']` 只是启动那一刻的快照。不重填的话，
+        为什么每次打开设置 / 每次切作用方向都要重填：用户完全可能**手改 config.yaml**
+        （模板里就写着怎么改），而内存里的词库只是启动那一刻的快照。不重填的话，
         他改完文件、再点设置里的「保存词库」，就会用界面上的旧内容把手工改动**覆盖掉**
         —— 这是最容易被骂「把我配置搞丢了」的一类 bug。
 
         所以这里读的是**文件**，不是内存（与 `_refresh_api_key_in_cfg` 同一口径：
         配置文件的真相在磁盘上）。文件读不到 / 解析失败时退回内存快照 ——
-        配置坏了不该连设置窗都打不开。改动同时清掉上次的状态提示（那说的是上一次保存）。
+        配置坏了不该连设置窗都打不开。改动同时按 scope 刷新提示语、清掉上次的状态提示。
         """
         box = getattr(self, "_glossary_text", None)
         if box is None:
             return
-        mapping: dict[str, str] | None = None
-        try:
-            raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
-            if isinstance(raw, dict):
-                mapping = _as_str_map(raw.get("glossary"), "glossary（专有词库）")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[gui] 读磁盘词库失败，退回内存快照：{type(exc).__name__}: {exc}", flush=True)
+        scope = self._glossary_scope()
+        mapping = self._read_glossary_from_disk(scope)
         if mapping is None:
-            mapping = dict((self._cfg.session_base or {}).get("glossary") or {})
+            mapping = self._read_glossary_from_memory(scope)
         try:
             box.delete("1.0", tk.END)
             for line in _glossary_to_lines(mapping):
                 box.insert(tk.END, line + "\n")
+            hint = getattr(self, "_glossary_hint", None)
+            if hint is not None:
+                hint.configure(text=self._glossary_hint_text(scope))
             self._set_glossary_status("")
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 刷新词库文本框失败：{exc}", flush=True)

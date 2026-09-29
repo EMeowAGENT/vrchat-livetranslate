@@ -92,6 +92,10 @@ directions:
     target_lang: en
     hotwords:
       "VRChat": "VRChat (方向级)"
+  theirs:
+    source_lang: null
+    target_lang: zh
+    output_audio: false
 output:
   audio:
     enabled: false
@@ -110,7 +114,8 @@ def _mk_engine(direction: str = "mine", glossary: dict | None = None,
             "glossary": glossary if glossary is not None else {"VRChat": "VRChat"},
         },
         directions={"mine": Direction(source_lang="zh", target_lang="en",
-                                      hotwords=hotwords or {})},
+                                      hotwords=hotwords or {}),
+                    "theirs": Direction(source_lang=None, target_lang="zh")},
         chatbox={"max_chars": 144},
         merger={},
         text_input={"model": "qwen-mt-flash", "timeout_s": 5, "tts": {}},
@@ -209,6 +214,36 @@ def test_yaml_mapping_write() -> None:
 
 
 # ---------------------------------------------------------------- ③ 配置读取与合并
+
+
+def test_yaml_mapping_write_nested_siblings() -> None:
+    """⚠️ 回归：同级另有一张同名的表时，必须改**目标那张**。
+
+    `directions.mine.hotwords` 与 `directions.theirs.hotwords` 缩进相同（都是 4 空格）。
+    早先的实现按缩进在全文件里找**第一个**匹配 → 存「别人说」的词条会写进「我说」那张，
+    目标那张留成 `{}`（GUI 用例先抓到的，这里给个不依赖窗口的独立守卫）。
+    """
+    body = ('directions:\n'
+            '  mine:\n'
+            '    source_lang: zh\n'
+            '    hotwords:\n'
+            '      "A": "a"\n'
+            '  theirs:\n'
+            '    source_lang: null\n'
+            '    hotwords: {}\n'
+            'ui:\n'
+            '  direction: mine\n')
+    out = _yaml_set_mapping(body, ["directions", "theirs", "hotwords"], {"VRChat": "猫屋"})
+    data = yaml.safe_load(out)
+    assert data["directions"]["theirs"]["hotwords"] == {"VRChat": "猫屋"}, data["directions"]
+    assert data["directions"]["mine"]["hotwords"] == {"A": "a"}, "改错表了（写进 mine 去了）"
+
+    out2 = _yaml_set_mapping(out, ["directions", "mine", "hotwords"], {"B": "b"})
+    d2 = yaml.safe_load(out2)
+    assert d2["directions"]["mine"]["hotwords"] == {"B": "b"}, d2["directions"]
+    assert d2["directions"]["theirs"]["hotwords"] == {"VRChat": "猫屋"}, "反向也改错表了"
+    assert d2["ui"]["direction"] == "mine", "后面的段被破坏"
+    print("  ✓ 同级同名表（mine / theirs 的 hotwords）互不串写")
 
 
 def test_load_and_merge() -> None:
@@ -418,10 +453,122 @@ class FakeEngine:
     def __init__(self, running: bool = True) -> None:
         self.running = running
         self.glossaries: list[dict] = []
+        self.direction_hotwords: list[tuple[str, dict]] = []
 
     def set_glossary(self, mapping: dict) -> bool:
         self.glossaries.append(dict(mapping))
         return True
+
+    def set_direction_hotwords(self, name: str, mapping: dict, label: str = "") -> bool:
+        self.direction_hotwords.append((name, dict(mapping)))
+        return True
+
+
+def test_engine_set_direction_hotwords() -> None:
+    """方向级热词：写 `directions.<名>.hotwords`、覆盖全局、只影响那一条腿。"""
+    import time as _time
+
+    class _RunningLoop:
+        def is_running(self) -> bool:
+            return True
+
+    st: list[tuple] = []
+    eng = _mk_engine(glossary={"VRChat": "VRChat"})
+    eng._events = EngineEvents(on_status=lambda l, m: st.append((l, m)))
+
+    # ① 还没开会话：只改内存，返回 True；**全局那份不能被顺手带改**
+    assert eng.set_direction_hotwords("theirs", {"VRChat": "猫屋"}, label="别人说") is True
+    assert eng._cfg.directions["theirs"].hotwords == {"VRChat": "猫屋"}
+    assert eng._cfg.session_base["glossary"] == {"VRChat": "VRChat"}, "全局那张表被动了"
+    assert st == [], st
+
+    # ② 生效口径：方向级覆盖全局，且**两条腿互不影响**（这正是加方向级的理由）
+    assert eng._cfg.merged_hotwords("theirs") == {"VRChat": "猫屋"}
+    assert eng._cfg.merged_hotwords("mine") == {"VRChat": "VRChat"}
+    theirs_cfg = eng._cfg.directions["theirs"].to_session_config(eng._cfg.session_base)
+    assert theirs_cfg.hotwords == {"VRChat": "猫屋"}, theirs_cfg.hotwords
+
+    # ③ 未知方向 → False（不写坏配置、也不静默成功）
+    assert eng.set_direction_hotwords("nope", {"a": "b"}) is False
+
+    # ④ 预算不足 → False 且提示里用**人类可读的方向名**（不是内部 key mine/theirs）
+    eng._session = object()
+    eng._loop = _RunningLoop()
+    eng._connect_ts = [_time.monotonic()] * 60
+    eng._cfg.session_base["max_new_sessions_per_minute"] = 4
+    assert eng.set_direction_hotwords("theirs", {"a": "b"}, label="别人说") is False
+    assert any(l == "warn" and "别人说" in m and "预算不足" in m for l, m in st), st
+
+    # ⑤ 预算够 → 真的请求重建会话（否则「已保存」是假的）
+    st.clear()
+    eng._connect_ts = [_time.monotonic()]
+    asked: list = []
+    real_rct = asyncio.run_coroutine_threadsafe
+
+    def fake_rct(coro, loop):  # noqa: ANN001
+        asked.append(coro)
+        coro.close()
+        return None
+
+    engine_mod.asyncio.run_coroutine_threadsafe = fake_rct
+    try:
+        assert eng.set_direction_hotwords("theirs", {"c": "d"}, label="别人说") is True
+    finally:
+        engine_mod.asyncio.run_coroutine_threadsafe = real_rct
+    assert len(asked) == 1, "预算够时必须请求重建会话"
+    assert st == [], f"预算够不该报 warn：{st}"
+    print("  ✓ set_direction_hotwords：写方向级 / 覆盖全局 / 未知方向 False / 预算分支 + 人类可读提示")
+
+
+def test_gui_glossary_scope_roundtrip() -> None:
+    """「作用方向」下拉：切表编辑、写对应键、**两张表互不覆盖**、只通知对应引擎。"""
+    body = BASE_BODY.replace(
+        "directions:", 'glossary:\n  "VRChat": "VRChat"\n\ndirections:')
+    with _gui_with_config(body) as (gui, cfg_path):
+        # 默认落在「全局」，显示全局那份
+        assert gui._glossary_scope() == "global"
+        assert gui._glossary_text.get("1.0", "end").strip() == "VRChat=VRChat"
+
+        # 切到「别人说」→ 显示 directions.theirs.hotwords（模板里没有 → 空），提示语跟着换
+        gui._glossary_scope_var.set(gui._glossary_scope_names["theirs"])
+        gui._on_glossary_scope_change()
+        assert gui._glossary_scope() == "theirs"
+        assert gui._glossary_text.get("1.0", "end").strip() == "", "切表后应显示该表内容（空）"
+        assert "别人说" in gui._glossary_hint.cget("text"), gui._glossary_hint.cget("text")
+
+        # 编辑 + 保存 → 只写 directions.theirs.hotwords，只通知 they 那条腿
+        fake_mine, fake_theirs = FakeEngine(), FakeEngine()
+        gui._engines, gui._engine_dirs = [fake_mine, fake_theirs], ["mine", "theirs"]
+        gui._glossary_text.insert("1.0", "VRChat=猫屋\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gui._on_save_glossary()
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        assert data["directions"]["theirs"]["hotwords"] == {"VRChat": "猫屋"}, data["directions"]
+        assert data["glossary"] == {"VRChat": "VRChat"}, "保存方向级时把全局那张表动了！"
+        assert gui._cfg.directions["theirs"].hotwords == {"VRChat": "猫屋"}, "内存没同步"
+        assert gui._cfg.session_base["glossary"] == {"VRChat": "VRChat"}, "内存里的全局被动了"
+        assert fake_theirs.direction_hotwords == [("theirs", {"VRChat": "猫屋"})], \
+            fake_theirs.direction_hotwords
+        assert fake_mine.direction_hotwords == [] and fake_mine.glossaries == [], \
+            "方向级改动只该通知那一条腿（否则平白撞一次 RPM 预算）"
+        assert "别人说" in gui._glossary_status.cget("text"), gui._glossary_status.cget("text")
+
+        # 切回「全局」→ 内容仍是全局那份（没被方向级的内容顶掉）
+        gui._glossary_scope_var.set(gui._glossary_scope_names["global"])
+        gui._on_glossary_scope_change()
+        assert gui._glossary_text.get("1.0", "end").strip() == "VRChat=VRChat"
+
+        # 保存全局 → 不能吃掉方向级那张表
+        gui._glossary_text.delete("1.0", "end")
+        gui._glossary_text.insert("1.0", "VRChat=VRChat\n逆袭=Nixi\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gui._on_save_glossary()
+        data2 = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        assert data2["glossary"] == {"VRChat": "VRChat", "逆袭": "Nixi"}, data2["glossary"]
+        assert data2["directions"]["theirs"]["hotwords"] == {"VRChat": "猫屋"}, \
+            "保存全局时把方向级那张表吃掉了！"
+        assert fake_mine.glossaries == [{"VRChat": "VRChat", "逆袭": "Nixi"}], fake_mine.glossaries
+    print("  ✓ 作用方向下拉：切表 / 写对应键 / 两表互不覆盖 / 只通知对应引擎")
 
 
 def test_gui_glossary_roundtrip() -> None:
@@ -548,12 +695,15 @@ def main() -> int:
         test_parse_and_render_lines,
         test_terms_from_mapping,
         test_yaml_mapping_write,
+        test_yaml_mapping_write_nested_siblings,
         test_load_and_merge,
         test_bad_glossary_is_dropped_with_trace,
         test_typing_leg_sends_terms,
         test_typing_leg_prefers_direction_override,
         test_realtime_payload_carries_phrases,
         test_set_glossary_engine,
+        test_engine_set_direction_hotwords,
+        test_gui_glossary_scope_roundtrip,
         test_gui_glossary_roundtrip,
         test_gui_settings_open_rereads_disk,
         test_gui_save_failure_is_visible,
