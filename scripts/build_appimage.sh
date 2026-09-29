@@ -209,7 +209,6 @@ fi
 #     （Ubuntu 24.04 起 X11 协议头叫 `x11proto-dev`，由 `libx11-dev` 自动带入；
 #      别再写 `xorgproto` —— noble 已无此包名）
 build_xft_tk() {
-    local cache="${TOOLS}/tk-xft"
     local bundled="$APPDIR/usr/python/lib/libtcl9tk9.0.so"
     [ -f "$bundled" ] || die "AppDir 里没有 libtcl9tk9.0.so，Python 布局可能变了"
 
@@ -219,9 +218,29 @@ build_xft_tk() {
     [ -n "$ver" ] || die "认不出打包的 Tcl/Tk 版本"
     local tag="core-$(echo "$ver" | tr '.' '-')"      # 9.0.4 → core-9-0-4
 
-    if [ ! -f "${cache}/libtcl9tk9.0.so" ]; then
+    # ⚠️ 缓存目录**必须按 Tcl/Tk 版本分**，复用前还要再校验一次。
+    #    历史教训：目录不区分版本时，`uv python install 3.11` 一旦把 uv 自带的
+    #    Tcl/Tk 从 9.0.4 升到 9.0.5，脚本会读到 ver=9.0.5，却直接拿缓存里
+    #    9.0.4 的 .so 盖到 9.0.5 的 Python 上 —— ABI 不匹配，可能在用户机器上崩，
+    #    而 CI 全绿。版本目录 + 复用前校验（版本号 + 真的链了 Xft）把这堵死。
+    local cache="${TOOLS}/tk-xft-${ver}"
+    local cached_ok=0
+    if [ -f "${cache}/libtcl9tk9.0.so" ]; then
+        local cver
+        cver="$(strings -a "${cache}/libtcl9tk9.0.so" 2>/dev/null \
+                | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
+        if [ "$cver" = "$ver" ] && ldd "${cache}/libtcl9tk9.0.so" 2>/dev/null | grep -qi Xft; then
+            cached_ok=1
+        else
+            echo "    ⚠️ 缓存里的 Tk 版本/特性不符（要 ${ver}，实际 ${cver:-未知}）→ 重新编译"
+        fi
+    fi
+
+    if [ "$cached_ok" -eq 0 ]; then
         echo "    编译带 Xft 的 Tcl/Tk ${ver}（首次较慢，之后会缓存）"
-        local src="${TOOLS}/tcltk-src"
+        # 源码目录同样按版本分：老版本解出来的 tcl-*/tk-* 留着会让 find 抓到错的源，
+        # 老 tarball 也会被 `[ -f ... ]` 当成「已下载」而复用。
+        local src="${TOOLS}/tcltk-src-${ver}"
         mkdir -p "$src"
         for pkg in tcl tk; do
             [ -f "${src}/${pkg}.tar.gz" ] ||                 curl -sSL --max-time 300 -o "${src}/${pkg}.tar.gz" \
@@ -250,7 +269,7 @@ build_xft_tk() {
         mkdir -p "$cache"
         cp "${pfx}/lib/libtcl9tk9.0.so" "${cache}/"
     else
-        echo "    用缓存的 Xft 版 Tk（${cache}）"
+        echo "    用缓存的 Xft 版 Tk（${cache}，Tcl/Tk ${ver}）"
     fi
     cp "${cache}/libtcl9tk9.0.so" "$bundled"
     echo "    ✅ 已换成带 Xft 的 Tk（字体走 fontconfig）"

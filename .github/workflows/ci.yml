@@ -245,11 +245,24 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements-linux.txt
 
+      - name: 读 uv 自带 Tcl/Tk 的版本（做缓存 key 用）
+        id: tcltk
+        run: |
+          # 打包脚本的缓存目录按这个版本分（避免 uv 升级 Tcl/Tk 后复用到旧版 .so，
+          # ABI 不匹配会在用户机器上崩、CI 却看不出来）。这里把它读出来放进 cache key。
+          TKB="$(find "$HOME/.local/share/uv/python" -maxdepth 4 \
+                   -name 'libtcl9tk9.0.so' -path '*cpython-3.11*' | sort -r | head -1)"
+          if [ -n "$TKB" ]; then
+            VER="$(strings -a "$TKB" | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
+          fi
+          echo "ver=${VER:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "Tcl/Tk 版本：${VER:-未知}"
+
       - name: 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）
         uses: actions/cache@v4
         with:
           path: build/tools
-          key: appimage-tools-${{ runner.os }}-${{ hashFiles('scripts/build_appimage.sh') }}
+          key: appimage-tools-${{ runner.os }}-tk${{ steps.tcltk.outputs.ver }}-${{ hashFiles('scripts/build_appimage.sh') }}
 
       - name: 构建 AppImage
         run: ./scripts/build_appimage.sh
