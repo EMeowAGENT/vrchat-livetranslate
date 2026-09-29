@@ -1284,23 +1284,6 @@ def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65
     return np.convolve(a.astype(np.float64), h / s, mode="same")
 
 
-def _lowpass(a: np.ndarray, rate: int, cutoff_hz: float = 7000.0, taps: int = 65) -> np.ndarray:
-    """窗口化 sinc 低通，供降采样前的抗混叠用。
-
-    目标采样率 16kHz（奈奎斯特 8kHz），截止取 7kHz 留出过渡带。
-    采样率本身已低于截止的两倍时不做处理（滤不掉，也没必要）。
-    """
-    if rate <= cutoff_hz * 2:
-        return a.astype(np.float64)
-    n = np.arange(taps) - (taps - 1) / 2
-    fc = cutoff_hz / rate                      # 归一化截止频率（周期/样点）
-    h = 2 * fc * np.sinc(2 * fc * n) * np.hamming(taps)
-    s = h.sum()
-    if not s:
-        return a.astype(np.float64)
-    return np.convolve(a.astype(np.float64), h / s, mode="same")
-
-
 def to_16k_mono(pcm: bytes, rate: int, channels: int) -> bytes:
     """任意采样率/声道 → 16kHz 单声道 s16le。"""
     a = np.frombuffer(pcm, dtype=np.int16)
