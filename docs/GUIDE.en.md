@@ -268,7 +268,7 @@ output:
 | Slider | Range / step | Slider | Range / step |
 |---|---|---|---|
 | Position X / Y / Z | −0.30 ~ 0.30 m, 0.005 | Size | 0.05 ~ 0.80 m, 0.01 |
-| Pitch / Yaw / Roll | −90 ~ 90°, 1 | Curvature | 0.0 ~ 0.50, 0.01 |
+| Pitch / Yaw / Roll | −180 ~ 180°, 1 | Curvature | 0.0 ~ 0.50, 0.01 |
 | Opacity | 0.10 ~ 1.00, 0.05 | Translation font size | 20 ~ 64, 1 |
 | Source font size | 14 ~ 48, 1 | Panel height | 240 ~ 560 px, 10 |
 
