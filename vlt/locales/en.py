@@ -144,8 +144,8 @@ STRINGS: dict[str, str] = {
 
     # ---- 设置弹窗：专有词库 ----
     "专有词库": "Glossary",
-    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；两个方向共用）":
-        "One per line as source=target (club names, player names, jargon; shared by both directions)",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）":
+        "One per line as source=target (club names, player names, jargon; applies to both directions)",
     "保存词库": "Save Glossary",
     "已保存 {n} 条词条（正在翻译时会重建会话生效）":
         "Saved {n} entries (takes effect after the session is rebuilt while translating)",

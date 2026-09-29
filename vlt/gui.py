@@ -1045,7 +1045,10 @@ class TranslationGUI:
         # （「VRChat」被翻成「虚拟聊天」这种）。词库就是把这些词**钉死**：
         #   · 实时那条腿 → session.translation.corpus.phrases（顺带提升识别率）
         #   · 打字那条腿 → translation_options.terms（qwen-mt 的术语干预）
-        # 只维护**一份**（两个方向共用），两条腿在各自边界上转形状 —— 见 config.merge_hotwords。
+        # 词库分「全局 + 方向级」两层，`config.merge_hotwords` 是唯一合并口径：
+        #   界面这里只编辑**全局**那份（作用到两个方向）；
+        #   方向性词条（同一个 key 在两个方向需要**不同**译名）要手改 config.yaml 的
+        #   directions.<X>.hotwords —— 放全局会让反方向的译名被换掉（实测）。
         #
         # 为什么这里用 tk.Text 而不是 ttk.Entry：一个词库是**多行**的，单行输入框
         # 逼用户去手改 YAML（这功能就等于没做）。样式手动对齐 SURFACE/TEXT 体系，
@@ -1067,7 +1070,7 @@ class TranslationGUI:
         for line in _glossary_to_lines((self._cfg.session_base or {}).get("glossary") or {}):
             self._glossary_text.insert(tk.END, line + "\n")
         self._glossary_hint = ttk.Label(
-            body, text=t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；两个方向共用）"),
+            body, text=t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）"),
             style="Muted.TLabel", justify=tk.LEFT, wraplength=340)
         self._glossary_hint.pack(anchor=tk.W, pady=(4, 4))
         gloss_row = ttk.Frame(body)
