@@ -80,12 +80,38 @@ directions:
     source_lang: zh
     target_lang: en          # 可改 ja / ko / fr / de / es / ru ...
     output_audio: false      # true 则同时拿译音（走虚拟声卡那条腿）
-    hotwords: {}             # 例：{"VRChat": "VRChat", "逆袭": "Nixi"}
+    hotwords: {}             # 方向级热词（可选）：只对**这个方向**生效，覆盖下面 glossary 的同名词条
+                             # 例：{"Nekoya": "Nekoya"} —— 我说英文名、英文译文保持原样
   # ② 别人说 → 手腕屏
   theirs:
     source_lang: null        # null = 自动识别（多国玩家场景）
     target_lang: zh
     output_audio: false
+    hotwords: {}             # 例：{"Nekoya": "猫屋"} —— 对方念英文名、中文译文用中文名
+
+# ---------------------------------------------------------------
+# 专有词库：把社团名 / 人名 / 术语**钉死**成你要的写法。
+# 说话那条腿 → 实时会话的热词；打字那条腿 → Qwen-MT 术语干预。
+#
+# ⚠️ 它是**给模型的提示（术语干预）**，不是字符串替换：模型会尽量按你给的译名走，
+#    但搭配由模型处理（`Nekoya Studio` 会译成「猫屋工作室」）；模型自己音译出的写法
+#    （如「尼可亚」）不会被改写，那种要把该写法也写成一条。
+#    附带好处：key 同时也是**识别热词**，能纠正听写（实测 Nekoya 不再被听成 Nikoya）。
+#
+# 写法：`原文: 译名`。「原文」按**源语言**里的实际写法填。
+#
+# ⚠️ 这个 `glossary` 是**全局**的，会同时作用到两个方向。两个方向的目标语言不同，
+#    所以只放「两个方向都要同一个译名」的词（如 VRChat 保持原样）。
+#    只在某一个方向成立、或两向需要**不同**译名的词条，放上面 `directions.<方向>.hotwords`：
+#        mine.hotwords:   {"Nekoya": "Nekoya"}    # 我说 → 英文：保持原样
+#        theirs.hotwords: {"Nekoya": "猫屋"}      # 别人说 → 中文：用中文名
+#    放错的后果（实测）：全局写 "Nekoya": "猫屋"，则「我说 → 英文」的译文会变成
+#        I come from the Cat House club.          # 社团名被换掉了
+# 界面入口：⚙ 设置 → 专有词库（一行一条 `原文=译名`）——界面**只能编辑这份全局的**。
+# 段内注释会被界面保存时整段覆盖 —— 要写说明请写在本段**上方**（就像现在这样）。
+glossary:
+  "VRChat": "VRChat"
+  "逆袭": "Nixi"
 
 chatbox:
   host: 127.0.0.1

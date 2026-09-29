@@ -167,6 +167,28 @@ def test_request_payload() -> bool:
     # 缺 translation_options 会被服务端 400 —— 这里保证它始终存在且非空
     cond = "translation_options" in opts or True
     ok &= cond
+
+    # 专有词库 → terms 术语干预（缺它就是「社团名被意译」的根因）
+    f = FakeOpener(body)
+    textin._opener = f
+    textin.translate_text("念 VRChat", target_lang="en", source_lang="zh", api_key="sk-x",
+                          terms=textin.terms_from_mapping(
+                              {"VRChat": "VRChat", "逆袭": "Nixi"}))
+    opts = json.loads(f.req.data.decode("utf-8"))["translation_options"]
+    cond = opts["terms"] == [{"source": "VRChat", "target": "VRChat"},
+                             {"source": "逆袭", "target": "Nixi"}]
+    print(f"  专有词库：terms={opts.get('terms')}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # 空词库 → **不下发** terms（别给服务端塞空表）
+    f = FakeOpener(body)
+    textin._opener = f
+    textin.translate_text("你好", target_lang="en", api_key="sk-x",
+                          terms=textin.terms_from_mapping({}))
+    opts = json.loads(f.req.data.decode("utf-8"))["translation_options"]
+    cond = "terms" not in opts
+    print(f"  空词库：options={opts}  {'OK' if cond else '✗'}")
+    ok &= cond
     return ok
 
 

@@ -156,6 +156,15 @@ STRINGS: dict[str, str] = {
     "还没配置 API key，无法试听（见右上角「设置」）":
         "No API key configured — can't preview (see \"Settings\" at the top right)",
     "请先选择或填写音色": "Please pick or type a voice first",
+
+    # ---- 设置弹窗：专有词库 ----
+    "专有词库": "Glossary",
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语；作用于两个方向）":
+        "One per line as source=target (club names, player names, jargon; applies to both directions)",
+    "保存词库": "Save Glossary",
+    "已保存 {n} 条词条（正在翻译时会重建会话生效）":
+        "Saved {n} entries (takes effect after the session is rebuilt while translating)",
+    "保存失败：{err}": "Save failed: {err}",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",
     "导出日志压缩包": "Export Log Archive",
