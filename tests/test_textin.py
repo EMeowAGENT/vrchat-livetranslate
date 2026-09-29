@@ -19,6 +19,7 @@ import json
 import math
 import struct
 import sys
+import time
 import wave
 from pathlib import Path
 from urllib.error import HTTPError
@@ -432,6 +433,53 @@ class FakeTtsOpener:
         return FakeResp(self.json_body) if url == tts_mod.ENDPOINT else FakeBinResp(self.audio)
 
 
+class FakeSseResp:
+    """SSE 响应替身：可迭代出行，带 headers（流式判定看 Content-Type）。"""
+
+    def __init__(self, lines: list[str], ctype: str = "text/event-stream;charset=UTF-8") -> None:
+        self._body = "".join(lines).encode("utf-8")
+        self.headers = {"Content-Type": ctype}
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __iter__(self):
+        return iter(self._body.splitlines(keepends=True))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class ExplodingSseResp(FakeSseResp):
+    """读到第 fail_after 行时炸掉 —— 模拟流式中途断线。"""
+
+    def __init__(self, lines: list[str], fail_after: int) -> None:
+        super().__init__(lines)
+        self.fail_after = fail_after
+
+    def __iter__(self):
+        for i, line in enumerate(self._body.splitlines(keepends=True)):
+            if i >= self.fail_after:
+                raise ConnectionResetError("stream broke")
+            yield line
+
+
+class FakeSseOpener:
+    """返回 SSE 替身（或直接抛错），并留下请求对象供断言。"""
+
+    def __init__(self, resp, err: Exception | None = None) -> None:
+        self.resp, self.err, self.req = resp, err, None
+
+    def open(self, req, timeout=None):  # noqa: ANN001
+        self.req = req
+        if self.err is not None:
+            raise self.err
+        return self.resp
+
+
 def test_tts_payload_and_decode() -> bool:
     ok = True
     wav = _wav24k(0.5)
@@ -529,7 +577,8 @@ def test_engine_tts() -> bool:
     engine_mod.synthesize = lambda text, **kw: pcm24
     try:
         # ① 译音腿在 → 推进虚拟麦（48k 立体声，字节数 = 4×）+ 封句尾
-        eng = _mk_engine()
+        #    这里固定走**整段**路径（stream=false），流式路径见 test_engine_tts_stream
+        eng = _mk_engine(tts={"stream": False})
         vm, st = FakeVirtualMic(), []
         eng._virtualmic, eng._chatbox = vm, FakeChatbox()
         eng._events = EngineEvents(on_status=lambda l, m: st.append((l, m)))
@@ -562,7 +611,7 @@ def test_engine_tts() -> bool:
         # ④ 合成失败 → 只 warn，文字照常出去（绝不能因为出声失败把整条打字打死）
         engine_mod.synthesize = lambda text, **kw: (_ for _ in ()).throw(
             tts_mod.TtsError("模拟 TTS 失败"))
-        eng4 = _mk_engine()
+        eng4 = _mk_engine(tts={"stream": False})
         cb4, st4 = FakeChatbox(), []
         eng4._virtualmic, eng4._chatbox = FakeVirtualMic(), cb4
         eng4._events = EngineEvents(on_status=lambda l, m: st4.append((l, m)))
@@ -572,6 +621,206 @@ def test_engine_tts() -> bool:
         ok &= cond
     finally:
         engine_mod.translate_text, engine_mod.synthesize = real_t, real_s
+    return ok
+
+
+def _capture(fn):
+    """跑 fn() 并把 stdout 收下来 —— 用来断言「降级必须留痕」这类日志。"""
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        result = fn()
+    return result, buf.getvalue()
+
+
+def test_tts_streaming() -> bool:
+    """流式合成：SSE 分片直出 + 每条降级路径都留痕 + 收窄的 4xx 兜底 + 汇总片去重。"""
+    ok = True
+    c1, c2, c3 = (b"\x01\x02" * 2400, b"\x03\x04" * 2400, b"\x05\x06" * 2400)   # 各 0.1s @24k
+
+    def ev(pcm: bytes) -> str:
+        return ("data: " + json.dumps({"output": {"audio": {"data": base64.b64encode(pcm).decode()}}})
+                + "\n")
+
+    sse = [ev(c1), "data: {坏 JSON，要跳过}\n", ev(c2), "data: [DONE]\n", ev(c3)]
+
+    # ① SSE 路径：脏分片跳过、[DONE] 不当数据、顺序与字节数原样、请求带 SSE 头
+    f = FakeSseOpener(FakeSseResp(sse))
+    tts_mod._opener = f
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x", language="zh"))
+    hdrs = {k.lower(): v for k, v in (f.req.headers or {}).items()}
+    cond = (parts == [c1, c2, c3] and f.req.full_url == tts_mod.ENDPOINT
+            and hdrs.get("x-dashscope-sse") == "enable"
+            and "event-stream" in hdrs.get("accept", ""))
+    print(f"  SSE 路径：{len(parts)} 个分片（各 {len(parts[0]) if parts else 0}B），"
+          f"请求带 SSE 头={'是' if 'x-dashscope-sse' in hdrs else '否'}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ② 服务端降级成整段 JSON（没有 event-stream）→ 当一整块 yield，并留痕
+    body = json.dumps({"output": {"audio": {"data": base64.b64encode(_wav24k(0.25)).decode()}}})
+    tts_mod._opener = FakeSseOpener(FakeSseResp([body], ctype="application/json"))
+    parts, log = _capture(lambda: list(tts_mod.synthesize_stream("你好", api_key="sk-x")))
+    cond = (len(parts) == 1 and abs(len(parts[0]) - 12000) <= 2
+            and "没按 SSE 回" in log)
+    print(f"  降级整段：{len(parts)} 块 / {len(parts[0]) if parts else 0}B（期望≈12000）、"
+          f"留痕={'有' if '没按 SSE 回' in log else '无'}  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ③ 流式请求被「协议性」拒绝（HTTP 400）→ 自动退回整段 synthesize()，并留痕
+    err = HTTPError(tts_mod.ENDPOINT, 400, "Bad Request", {},
+                    io.BytesIO(b'{"message":"sse not supported"}'))
+    real_s = tts_mod.synthesize
+    tts_mod.synthesize = lambda text, **kw: b"\x07" * 100
+    try:
+        tts_mod._opener = FakeSseOpener(None, err=err)
+        parts, log = _capture(lambda: list(tts_mod.synthesize_stream("你好", api_key="sk-x")))
+        cond = parts == [b"\x07" * 100] and "不认流式" in log
+        print(f"  流式被拒(400) → 整段兜底：{len(parts)} 块、"
+              f"留痕={'有' if '不认流式' in log else '无'}  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        tts_mod.synthesize = real_s
+
+    # ③b 401（key 不对）不属于「协议不认」→ **不兜底**：再发一次同样会失败、白耗配额
+    tts_mod.synthesize = lambda text, **kw: (_ for _ in ()).throw(AssertionError("401 不该兜底"))
+    try:
+        tts_mod._opener = FakeSseOpener(
+            None, err=HTTPError(tts_mod.ENDPOINT, 401, "Unauthorized", {},
+                                io.BytesIO(b'{"message":"invalid api key"}')))
+        raised: Exception | None = None
+        try:
+            list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+        except tts_mod.TtsError as exc:
+            raised = exc
+        cond = raised is not None and "401" in str(raised)
+        print(f"  401 不兜底：直接抛 TtsError（{str(raised)[:34]}）  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        tts_mod.synthesize = real_s
+
+    # ④ 中途断流 → 保住已 yield 的分片，并抛 TtsStreamTruncated（调用方据此提示「只念了一半」）
+    tts_mod._opener = FakeSseOpener(ExplodingSseResp(sse, fail_after=2))
+    kept: list[bytes] = []
+    raised_cut: Exception | None = None
+
+    def _drain_break() -> None:
+        nonlocal raised_cut
+        try:
+            kept.extend(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+        except tts_mod.TtsStreamTruncated as exc:
+            raised_cut = exc
+
+    _, log = _capture(_drain_break)
+    cond = (kept == [c1] and raised_cut is not None and "已保留 1 个分片" in log)
+    print(f"  中途断流：保留 {len(kept)} 个分片、抛 TtsStreamTruncated="
+          f"{'是' if raised_cut else '否'}、留痕={'有' if '已保留 1 个分片' in log else '无'}  "
+          f"{'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑤ 服务端在流末尾补发的「整段汇总」必须被吃掉（实测踩过：整句被念两遍）
+    tts_mod._opener = FakeSseOpener(FakeSseResp([ev(c1), ev(c2), ev(c1 + c2)]))
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    cond = parts == [c1, c2]
+    print(f"  末尾整段汇总：{len(parts)} 个分片（期望 2，汇总片被丢弃）  {'OK' if cond else '✗'}")
+    ok &= cond
+
+    # ⑥ 流式一个分片都没给（只有心跳 / [DONE]）→ 退回整段，并留痕
+    tts_mod.synthesize = lambda text, **kw: b"\x09" * 64
+    try:
+        tts_mod._opener = FakeSseOpener(FakeSseResp([": ping\n", "data: [DONE]\n"]))
+        parts, log = _capture(lambda: list(tts_mod.synthesize_stream("你好", api_key="sk-x")))
+        cond = parts == [b"\x09" * 64] and "一个分片都没拿到" in log
+        print(f"  零分片 → 整段兜底：{len(parts)} 块、"
+              f"留痕={'有' if '一个分片都没拿到' in log else '无'}  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        tts_mod.synthesize = real_s
+    return ok
+
+
+def test_engine_tts_stream() -> bool:
+    """引擎侧：默认流式逐分片直推、stream=false 退回整段、连打两条严格串行、中途断流给 warn。"""
+    ok = True
+    real_t = engine_mod.translate_text
+    real_s, real_ss = engine_mod.synthesize, engine_mod.synthesize_stream
+    pcm24 = b"\x01\x00" * 2400                        # 0.1s @24k 单声道
+    engine_mod.translate_text = lambda text, **kw: "Hello from typing"
+    engine_mod.synthesize = lambda text, **kw: pcm24
+    inflight = {"now": 0, "max": 0}
+
+    def fake_stream(text, **kw):
+        def gen():
+            inflight["now"] += 1
+            inflight["max"] = max(inflight["max"], inflight["now"])
+            try:
+                for _ in range(3):
+                    time.sleep(0.02)
+                    yield pcm24
+            finally:
+                inflight["now"] -= 1
+        return gen()
+
+    engine_mod.synthesize_stream = fake_stream
+    try:
+        # ① 默认（流式）：逐分片推进虚拟麦（48k 立体声 = 4×）+ 封句尾一次
+        eng = _mk_engine()
+        vm, st = FakeVirtualMic(), []
+        eng._virtualmic, eng._chatbox = vm, FakeChatbox()
+        eng._events = EngineEvents(on_status=lambda l, m: st.append((l, m)))
+        asyncio.run(eng._async_send_text("你好"))
+        cond = (len(vm.pushed) == 3 and all(len(p) == len(pcm24) * 4 for p in vm.pushed)
+                and vm.sentences == 1 and any("已出声" in m for _l, m in st))
+        print(f"  默认流式：推入 {len(vm.pushed)} 段（每段 {len(vm.pushed[0]) if vm.pushed else 0}B），"
+              f"封句 {vm.sentences} 次，状态={[m for _l, m in st][-1:]}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ② stream=false → 整段合成一次（行为与老版本一致）
+        eng2 = _mk_engine(tts={"stream": False})
+        vm2 = FakeVirtualMic()
+        eng2._virtualmic, eng2._chatbox = vm2, FakeChatbox()
+        asyncio.run(eng2._async_send_text("你好"))
+        cond = len(vm2.pushed) == 1 and vm2.sentences == 1
+        print(f"  stream=false：推入 {len(vm2.pushed)} 段（整段）  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ③ 连打两条：两路流式必须严格串行（并发会让分片交错 → 听感「整段反复重念」）
+        inflight["now"] = inflight["max"] = 0
+        eng3 = _mk_engine()
+        vm3 = FakeVirtualMic()
+        eng3._virtualmic, eng3._chatbox = vm3, FakeChatbox()
+
+        async def two() -> None:
+            await asyncio.gather(eng3._async_send_text("一"), eng3._async_send_text("二"))
+
+        asyncio.run(two())
+        cond = inflight["max"] == 1 and len(vm3.pushed) == 6
+        print(f"  连打两条：同时进行的流式合成上限={inflight['max']}（必须 1），"
+              f"推入 {len(vm3.pushed)} 段  {'OK' if cond else '✗'}")
+        ok &= cond
+
+        # ④ 中途断流 → 已推入的音频保留 + 一条 warn 状态（用户听出「这句没说完」时有交代）
+        def cut_stream(text, **kw):
+            def gen():
+                yield pcm24
+                raise tts_mod.TtsStreamTruncated("流式中途中断（用例模拟）")
+            return gen()
+
+        engine_mod.synthesize_stream = cut_stream
+        eng4 = _mk_engine()
+        vm4, st4 = FakeVirtualMic(), []
+        eng4._virtualmic, eng4._chatbox = vm4, FakeChatbox()
+        eng4._events = EngineEvents(on_status=lambda l, m: st4.append((l, m)))
+        asyncio.run(eng4._async_send_text("你好"))
+        warns = [m for lv, m in st4 if lv == "warn"]
+        cond = (len(vm4.pushed) == 1 and vm4.sentences == 1
+                and len(warns) == 1 and "只念了一半" in warns[0])
+        print(f"  中途断流：推入 {len(vm4.pushed)} 段、封句 {vm4.sentences} 次、"
+              f"warn={warns[:1]}  {'OK' if cond else '✗'}")
+        ok &= cond
+    finally:
+        engine_mod.translate_text = real_t
+        engine_mod.synthesize, engine_mod.synthesize_stream = real_s, real_ss
     return ok
 
 
@@ -585,7 +834,9 @@ def main() -> int:
         ("界面接线", test_gui_wiring()),
         ("TTS 请求体/解码", test_tts_payload_and_decode()),
         ("TTS 错误路径", test_tts_errors()),
+        ("TTS 流式合成", test_tts_streaming()),
         ("引擎出声路由", test_engine_tts()),
+        ("引擎流式出声", test_engine_tts_stream()),
     ]
     bad = [name for name, ok in results if not ok]
     print("ALL PASSED" if not bad else f"FAILED: {', '.join(bad)}")

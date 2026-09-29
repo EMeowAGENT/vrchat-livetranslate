@@ -44,7 +44,14 @@ from .devices import (
     enumerate_mic_devices,
     format_device_display,
 )
-from .engine import Engine, EngineEvents
+from .engine import (
+    INPUT_GATE_MAX_DB,
+    INPUT_GATE_MIN_DB,
+    LEVEL_FLOOR_DB,
+    Engine,
+    EngineEvents,
+    input_gate_settings,
+)
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
@@ -366,6 +373,15 @@ class TranslationGUI:
         self._loopback_names: list[str] = []
         self._audio_out_names: list[str] = []
         self._device_scan_pending = False
+
+        # 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）
+        self._gate_level_canvas: tk.Canvas | None = None
+        self._gate_level_lbl: ttk.Label | None = None
+        self._gate_level_hold = LEVEL_FLOOR_DB     # 峰值保持：读数跳动时靠它平滑
+        self._gate_level_tick = 0                  # _poll 节流（50ms → 100ms 刷一次）
+        self._gate_save_job: str | None = None
+        self._gate_hold_ms = 500.0                 # 只从配置读（界面不暴露，避免旋钮过多）
+        self._gate_preroll_ms = 250
 
         self._cfg = load_config(require_key=False)   # 没填 key 也要能起界面（否则没法填 key）
         # 界面语言解析顺序：用户选过（ui.lang）→ 系统语言 → zh。
@@ -987,6 +1003,51 @@ class TranslationGUI:
 
         ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
                   style="Muted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+
+        # ---- 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）----
+        # 与设备选择同属「输入侧」：设备选好之后，紧接着就是「收到的东西要多响才送」。
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+        ttk.Label(body, text=t("输入门限"), style="Section.TLabel").pack(anchor=tk.W)
+        # 取值统一走 engine.input_gate_settings：配置里的非法值在那里留痕并回落默认值，
+        # 界面与引擎看到的就是同一套值（省得两边各解析一遍、口径还不一致）。
+        _gate_en, _gate_db, self._gate_hold_ms, self._gate_preroll_ms = \
+            input_gate_settings(capture_cfg)
+        self._gate_enabled_var = tk.BooleanVar(value=_gate_en)
+        self._gate_check = tk.Checkbutton(
+            body, variable=self._gate_enabled_var,
+            text=t("启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）"),
+            command=self._on_gate_change, **self._indicator_kw())
+        self._gate_check.pack(anchor=tk.W, pady=(8, 4))
+
+        ggrid = ttk.Frame(body)
+        ggrid.pack(fill=tk.X)
+        ggrid.columnconfigure(1, weight=1)
+        # 实时电平条：横轴 -70 ~ 0 dBFS；蓝 = 当前已超过门限（这段会被翻译），
+        # 白竖线 = 门限位置。数据来自 loopback 采集腿 —— 没在翻译时显示「—」。
+        self._gate_level_canvas = tk.Canvas(ggrid, width=240, height=15,
+                                            bg=SURFACE, highlightthickness=1,
+                                            highlightbackground=BORDER, bd=0)
+        ttk.Label(ggrid, text=t("当前电平:"), style="Dim.TLabel").grid(
+            row=0, column=0, sticky="w", pady=3)
+        self._gate_level_canvas.grid(row=0, column=1, sticky="w", padx=(8, 6), pady=3)
+        self._gate_level_lbl = ttk.Label(ggrid, text="—", style="Dim.TLabel", width=9)
+        self._gate_level_lbl.grid(row=0, column=2, sticky="w")
+
+        self._gate_var = tk.DoubleVar(value=_gate_db)
+        ttk.Label(ggrid, text=t("门限:"), style="Dim.TLabel").grid(
+            row=1, column=0, sticky="w", pady=3)
+        self._gate_scale = tk.Scale(
+            ggrid, from_=INPUT_GATE_MIN_DB, to=INPUT_GATE_MAX_DB, resolution=1,
+            orient=tk.HORIZONTAL, variable=self._gate_var, showvalue=False, length=240,
+            bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+            highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+            command=self._on_gate_change)
+        self._gate_scale.grid(row=1, column=1, sticky="w", padx=(8, 6), pady=3)
+        self._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
+                                       style="Dim.TLabel", width=9)
+        self._gate_val_lbl.grid(row=1, column=2, sticky="w")
+        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）"),
+                  style="Muted.TLabel", justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
 
         # ---- 音色 ----
         # 两条出声音色来自**不同模型**，音色 id 不通用（跨模型混用会被服务端拒），
@@ -2961,6 +3022,132 @@ class TranslationGUI:
         self._cfg.output["capture"]["loopback_device"] = loop_name
         self._cfg.output.setdefault("audio", {})["device_name"] = out_name
 
+    # ------------------------------------------------ 输入门限（VRChat 输出侧过滤）
+
+    def _on_gate_change(self, _v=None) -> None:  # noqa: ANN001
+        """门限开关 / 滑块变化：立刻更新显示与正在跑的引擎，落盘延后 300ms。
+
+        这个回调要同时当两种用：`tk.Scale` 的 command 每次移动都触发（参数是字符串），
+        `tk.Checkbutton` 的 command 不带参数 —— 所以形参默认为 None。
+        """
+        db = float(self._gate_var.get())
+        self._gate_val_lbl.configure(text=f"{db:g} dB")
+        self._apply_gate_live()
+        if self._gate_save_job is not None:
+            try:
+                self._root.after_cancel(self._gate_save_job)
+            except Exception:  # noqa: BLE001
+                pass
+        # 拖动时别每像素写盘：停手 300ms 才落盘（同手腕屏微调的取舍）
+        self._gate_save_job = self._root.after(300, self._save_gate_cfg)
+
+    def _apply_gate_live(self) -> None:
+        """把界面上的门限热更新到**正在跑**的引擎（不必等下次「开始翻译」）。
+
+        gate 由采集线程读、界面线程写；写进去的是不可变标量（bool / float），
+        CPython 里原子且不会读到半截值 —— 不用加锁。正在送的那一块音频不受影响：
+        下一次 feed() 才看新阈值。
+        """
+        en = bool(self._gate_enabled_var.get())
+        db = float(self._gate_var.get())
+        n = 0
+        for e in self._engines:
+            g = getattr(e, "input_gate", None)
+            if g is None:
+                continue
+            g.enabled = en
+            g.threshold_db = db
+            n += 1
+        if n:
+            print(f"[gui] 输入门限已热更新（{n} 条腿）：{'开' if en else '关'} "
+                  f"{db:g} dBFS", flush=True)
+
+    def _save_gate_cfg(self) -> None:
+        """把门限写回 config.yaml 的 capture 段（就地改，保住注释与键顺序）。
+
+        只写界面暴露的两项（`gate_enabled` / `gate_db`）：hold / preroll 保持文件里的
+        原值 —— 那是手改的精细参数，不该被界面一次次覆盖回默认值。
+        """
+        self._gate_save_job = None
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        enabled = bool(self._gate_enabled_var.get())
+        db = round(float(self._gate_var.get()), 1)
+        try:
+            text = p.read_text(encoding="utf-8")
+            text = _yaml_set_or_create(text, ["capture", "gate_enabled"], _fmt_scalar(enabled))
+            text = _yaml_set_or_create(text, ["capture", "gate_db"], _fmt_scalar(db))
+            # hold / preroll 是「想细调才动」的旋钮，界面不暴露：
+            # 文件里**缺**就补上当前生效值（让人在配置里看得见有这两个旋钮），
+            # **已有就一个字都不动** —— 绝不覆盖用户手调过的精细值。
+            try:
+                cap_now = (yaml.safe_load(text) or {}).get("capture") or {}
+            except Exception:  # noqa: BLE001
+                cap_now = {}
+            for key, val in (("gate_hold_ms", self._gate_hold_ms),
+                             ("gate_preroll_ms", self._gate_preroll_ms)):
+                if key not in cap_now:
+                    text = _yaml_set_or_create(text, ["capture", key], _fmt_scalar(int(val)))
+            _write_config_text(p, text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存输入门限失败：{exc}", flush=True)
+            return
+        cap = self._cfg.output.setdefault("capture", {})
+        cap["gate_enabled"] = enabled
+        cap["gate_db"] = db
+        print(f"[gui] 输入门限已写入 config.yaml：enabled={enabled} gate_db={db:g}"
+              f"（hold {self._gate_hold_ms:g}ms / preroll {self._gate_preroll_ms}ms 沿用配置）",
+              flush=True)
+        self._set_status("info", t("输入门限已保存：{db} dB", db=f"{db:g}"))
+
+    def _refresh_gate_level(self) -> None:
+        """刷新设置窗里的实时电平条（每 100ms 一次）。
+
+        横轴 -70 ~ 0 dBFS：门限是白竖线，蓝色填充 = 当前电平已超过门限（这段会被翻译）。
+        数据来源是运行中引擎的 `input_gate.level_db`（loopback 采集腿每 100ms 更新）；
+        没有引擎在跑就只画门限线、读数显示「—」—— 电平只有真在采集时才有意义，
+        不假装有数据。
+        """
+        cv = self._gate_level_canvas
+        gvar = getattr(self, "_gate_var", None)
+        if cv is None or gvar is None:
+            return
+        try:
+            if not cv.winfo_exists():
+                return
+            w = max(10, int(cv.winfo_width()))
+            h = max(6, int(cv.winfo_height()))
+        except Exception:  # noqa: BLE001
+            return
+        active = bool(self._gate_enabled_var.get())
+        thr = max(INPUT_GATE_MIN_DB, min(0.0, float(gvar.get())))
+        lo, hi = INPUT_GATE_MIN_DB, 0.0
+        x_thr = (thr - lo) / (hi - lo) * w
+        cv.delete("all")                       # 每 100ms 重建（2 个图元，开销可忽略）
+        cv.create_line(x_thr, 0, x_thr, h, fill=TEXT, width=2)
+        if not self._engines:
+            self._gate_level_hold = LEVEL_FLOOR_DB
+            if self._gate_level_lbl is not None:
+                try:
+                    self._gate_level_lbl.configure(text="—")
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        lvl = LEVEL_FLOOR_DB
+        for e in self._engines:
+            g = getattr(e, "input_gate", None)
+            if g is not None:
+                lvl = max(lvl, float(g.level_db))
+        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声
+        self._gate_level_hold = max(lvl, self._gate_level_hold - 1.5, LEVEL_FLOOR_DB)
+        db = max(lo, min(hi, self._gate_level_hold))
+        x_lvl = (db - lo) / (hi - lo) * w
+        cv.create_rectangle(0, 0, x_lvl, h, outline="",
+                            fill=(ACCENT if (active and db >= thr) else SURFACE_HOVER))
+        if self._gate_level_lbl is not None:
+            self._gate_level_lbl.configure(text=f"{db:.0f} dB")
+
     # ================================================================ 队列轮询
 
     def _poll(self) -> None:
@@ -3004,6 +3191,10 @@ class TranslationGUI:
             self._engine_dirs = []
         if self._overlay_out is not None:
             self._overlay_out.tick()      # 手腕屏的热重载 / 淡出
+        # 输入门限的实时电平条：每 100ms 刷一次（_poll 本身 50ms 一跳）
+        self._gate_level_tick += 1
+        if self._gate_level_canvas is not None and self._gate_level_tick % 2 == 0:
+            self._refresh_gate_level()
         self._root.after(50, self._poll)
 
     # ================================================================ 聊天气泡
