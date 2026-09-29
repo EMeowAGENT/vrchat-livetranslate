@@ -1034,11 +1034,13 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
 
 
 def _resolve_mic_name(device_name: str | None, device_pattern: str | None) -> str | None:
-    """把用户配置（设备名 / 关键词）解析成一个 sounddevice 能按名打开的设备名。
+    """把用户配置（设备名 / 关键词）解析成一个**设备名**，交给平台层打开。
 
-    返回值直接喂给 `sd.RawInputStream(device=...)` —— sounddevice 接受字符串设备名，
-    这样就**不需要**在「我们设备表的索引」和「PortAudio 的索引」之间做映射
-    （Linux 上我们的表来自 pw-dump，索引跟 PortAudio 毫无关系）。
+    这里只负责「名字」，不碰索引：设备名怎么变成底层句柄按平台定 ——
+    Linux 直接把名字递给 `sd.RawInputStream(device="名字")`；
+    Windows 由 `vlt/platform/win.py: open_mic` 再解析成 PortAudio 索引
+    （保持 v0.3.x 同名端点的打开口径，见那边的说明）。
+    `device_pattern` 是界面「设备关键词」那条兼容路径：在我们的输入设备表里做子串匹配。
     """
     if device_name:
         return device_name

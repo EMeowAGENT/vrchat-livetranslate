@@ -117,9 +117,11 @@ class DeviceBackend(Protocol):
 class CaptureBackend(DeviceBackend, Protocol):
     """采集流工厂。
 
-    `open_mic` 用设备名（两端一致：sounddevice 接受名字）。
-    `open_loopback` 用 `LoopbackTarget` 抹平「Windows 是设备 index、Linux 是 sink 名」
-    的差异。两者都返回 `AudioSource`，调用方不感知底层是 PortAudio 还是子进程。
+    `open_mic` 的设备口径按平台定：**Linux 传名字、Windows 传 PortAudio 索引**
+    （名字怎么变索引由 Windows 的 `open_mic` 自己解析，调用方只管把用户配的
+    设备名交进来）。`open_loopback` 用 `LoopbackTarget` 抹平「Windows 是设备 index、
+    Linux 是 sink 名」的差异。两者都返回 `AudioSource`，调用方不感知底层是
+    PortAudio 还是子进程。
     """
 
     def default_output_index(self) -> int: ...

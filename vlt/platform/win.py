@@ -182,10 +182,29 @@ class PyaudioLoopbackSource(QueueAudioSource):
 
 def open_mic(device_name: str | None, *, rate: int = 16000, channels: int = 1,
              blocksize: int) -> AudioSource:
-    """麦克风采集（与 Linux 共用同一个实现）。"""
-    import asyncio
+    """麦克风采集（与 Linux 共用同一个实现）。
 
-    src = SoundDeviceMicSource(asyncio.get_running_loop(), device_name,
+    ⚠️ **Windows 按 PortAudio 索引打开**（`device=<int>`），这是 v0.3.x 的口径，
+    不要退化成「直接把名字丢给 sounddevice」：`sd.RawInputStream(device="名字")`
+    用的是 PortAudio 自己的取名规则，与我们的 `resolve_device_name`（全名精确 →
+    忽略大小写 → 去重子串）口径不同 —— 同名端点（两块同型号声卡 / 多个虚拟声卡）
+    并存时，可能打开到与旧版不同的物理端点。
+
+    索引由 `resolve_device_name(..., "input")` 从 **sounddevice 自己的设备表**解析，
+    正是 PortAudio 要的那个；解析不到则回落默认输入设备（IndexError 交给我们）。
+    """
+    import asyncio
+    import logging
+
+    index: int | None = None
+    if device_name:
+        from ..devices import resolve_device_name   # 局部导入，避免与 devices 循环导入
+        index = resolve_device_name(device_name, "input")
+        if index is None:
+            logging.getLogger(__name__).warning(
+                "[mic] 未找到设备 %r，回退系统默认输入设备", device_name)
+
+    src = SoundDeviceMicSource(asyncio.get_running_loop(), index,
                                rate=rate, channels=channels, blocksize=blocksize)
     src.start()
     return src

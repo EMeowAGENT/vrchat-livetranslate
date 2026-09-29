@@ -122,17 +122,25 @@ class SoundDeviceMicSource(QueueAudioSource):
     """麦克风采集（sounddevice / PortAudio）——**两个平台共用**。
 
     Windows 走 WASAPI、Linux 走 ALSA（pipewire-alsa），但 sounddevice 的接口一致，
-    所以没必要分平台。设备用**名字**指定（`sd.RawInputStream` 接受字符串设备名），
-    这样就不必在「我们自己的设备表索引」和「sounddevice 的索引」之间做映射 ——
-    那两个索引在 Linux 上根本不是一回事（我们的表来自 pw-dump）。
+    所以实现共用；差别只在**设备怎么指定**：
+
+    * Linux 用**名字**（`sd.RawInputStream` 接受字符串）—— 我们的设备表来自
+      pw-dump，索引与 PortAudio 根本不是一回事，不能混用；
+    * Windows 用 **PortAudio 索引** —— 由 `vlt/platform/win.py: open_mic` 经
+      `resolve_device_name(name, "input")` 解析得到，与 v0.3.x 的打开口径一致
+      （同名端点并存时，选中的物理端点才不会漂）。
+
+    所以这里两种都能收：`str | int | None`。
     """
 
     label = "mic"
 
-    def __init__(self, loop, device_name: str | None, *, rate: int = 16000,
+    def __init__(self, loop, device: str | int | None, *, rate: int = 16000,
                  channels: int = 1, blocksize: int = 1600) -> None:
         super().__init__(loop, rate=rate, channels=channels)
-        self._device = device_name or None
+        # ⚠️ 不能用 `device or None`：PortAudio 的索引 0 是合法设备，
+        #    被 `or` 判成假值就悄悄回落默认设备了。
+        self._device = None if device in (None, "") else device
         self._blocksize = blocksize
 
     def _pump(self, stop: threading.Event) -> None:
