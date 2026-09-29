@@ -1328,6 +1328,38 @@ def _resolve_mic_name(device_name: str | None, device_pattern: str | None) -> st
     return None
 
 
+async def _send_gated(session, tele, label: str, pcm16: bytes,
+                      gate: "_LevelGate | None") -> int:
+    """按输入门限放行一块 16k 单声道 PCM 并送到会话。返回**真正上送**的字节数。
+
+    两条 loopback 采集腿（Windows 的 `_pump_capture` / Linux 的 `_pump_vrchat_capture`）
+    共用这一处口径：判据只认**混好并重采样之后的同一块**，门限放行 0..N 块
+    （开闸时带回 preroll，所以不是「要么全给要么不给」）；`sent` 与 telemetry
+    也只算真正上送的块，被拦掉的不计。
+
+    为什么要抽出来共用：#12 就是「同一件事在两条腿上各写一遍」写漏了一半 ——
+    Linux 腿当初压根没接门限，界面说开了、实际不生效。口径只留这一处。
+    """
+    out_chunks = ([pcm16] if gate is None else
+                  gate.feed(pcm16, now=time.monotonic(),
+                            dur_s=len(pcm16) / 2 / 16000.0))
+    sent = 0
+    for c in out_chunks:
+        await session.send_audio(c)
+        sent += len(c)                    # 只算真正上送的（门限拦掉的不计）
+        if tele is not None:
+            tele.add(f"{label}_chunk", bytes=len(c))
+    return sent
+
+
+def _gate_tail(gate: "_LevelGate | None") -> str:
+    """「采集结束」行上的输入门限小结（两条腿共用一处口径，别各写一遍）。"""
+    if gate is not None and gate.enabled and (gate.dropped_chunks or gate.opened):
+        return (f"｜输入门限（{gate.threshold_db:g} dBFS）：拦截 {gate.dropped_chunks} 块、"
+                f"开闸 {gate.opened} 次")
+    return ""
+
+
 async def _pump_capture(session, tele, seconds: float, stop_event, label: str, opener,
                        gate: "_LevelGate | None" = None) -> int:
     """共用的采集泵：开流 → 拉块 → 送会话 → 一定关流。返回送出的字节数。
@@ -1346,15 +1378,7 @@ async def _pump_capture(session, tele, seconds: float, stop_event, label: str, o
             pcm16 = to_16k_mono(chunk, source.rate, source.channels)
             if not pcm16:
                 continue
-            # 输入门限：放行 0..N 块（开闸时带回 preroll，所以不是「要么全给要么不给」）
-            out_chunks = ([pcm16] if gate is None else
-                          gate.feed(pcm16, now=time.monotonic(),
-                                    dur_s=len(pcm16) / 2 / 16000.0))
-            for c in out_chunks:
-                await session.send_audio(c)
-                sent += len(c)                # 只算真正上送的（门限拦掉的不计）
-                if tele is not None:
-                    tele.add(f"{label}_chunk", bytes=len(c))
+            sent += await _send_gated(session, tele, label, pcm16, gate)
     finally:
         source.close()
     return sent
@@ -1597,11 +1621,16 @@ def to_16k_mono(pcm: bytes, rate: int, channels: int) -> bytes:
 async def run_loopback(session, tele, patterns: list[str] | None = None,
                        seconds: float = 0.0, device_name: str | None = None,
                        stop_event: threading.Event | None = None,
-                       on_status: Callable[[str, str], None] | None = None) -> None:
+                       on_status: Callable[[str, str], None] | None = None,
+                       gate: "_LevelGate | None" = None) -> None:
     """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。
     `gate` 是输入门限（`_LevelGate`）：VRChat 输出混了所有人，远处玩家声音小、
     本来就听不清，达不到门限的块就不上送（开闸时会带回 preroll 补句首）。
     只作用于这条腿 —— 麦克风（自己说话）不走门限。
+
+    ⚠️ 两个平台都必须把 `gate` 用上（Linux 走 `_run_loopback_linux` 转发进
+    `_pump_vrchat_capture`）。#12 的教训：合并时漏了 Linux 侧，界面上门限
+    「开着」、实际一条块都没判。
 
     平台差异全部压在 `CaptureBackend.open_loopback()` 后面：
       * Windows：WASAPI loopback（pyaudiowpatch），非阻塞轮询 + 读线程；
@@ -1610,7 +1639,8 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
                  VRChat 退出（输出流消失）后回到等待，VRChat 重新启动自动续上。
     """
     if platform.IS_LINUX:
-        await _run_loopback_linux(session, tele, seconds, stop_event, on_status)
+        await _run_loopback_linux(session, tele, seconds, stop_event, on_status,
+                                  gate=gate)
         return
 
     target = pick_loopback_target(patterns, device_name)
@@ -1628,15 +1658,11 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
                                lambda: platform.capture_backend().open_loopback(
                                    target, blocksize=CHUNK_BYTES),
                                gate=gate)
-    tail = ""
-    if gate is not None and gate.enabled and (gate.dropped_chunks or gate.opened):
-        tail = (f"｜输入门限（{gate.threshold_db:g} dBFS）：拦截 {gate.dropped_chunks} 块、"
-                f"开闸 {gate.opened} 次")
-    print(f"[loopback] 采集结束，共 {sent} bytes ≈ {sent / 2 / 16000:.0f}s{tail}")
+    print(f"[loopback] 采集结束，共 {sent} bytes ≈ {sent / 2 / 16000:.0f}s{_gate_tail(gate)}")
 
 
 async def _run_loopback_linux(session, tele, seconds: float, stop_event,
-                              on_status) -> None:
+                              on_status, gate: "_LevelGate | None" = None) -> None:
     """Linux 的 loopback 腿：**等 VRChat → 定向采集（多路混音）→ 流变化 → 再等**。
 
     为什么不是「挑一个 sink 就开始录」：VRChat 的播放输出是应用流节点，
@@ -1645,6 +1671,10 @@ async def _run_loopback_linux(session, tele, seconds: float, stop_event,
     VRChat 没跑（或中途退出）就空转等待，回来时重开 `pw-record`。
 
     VRChat 会开**多个**播放流（实测 2 路），逐路各开一条 `pw-record` 后混音。
+
+    `gate`（输入门限）原样转给 `_pump_vrchat_capture`，由它在**多路混音之后**
+    按块判 —— 与 Windows 腿同一处口径（`_send_gated`）。门限对象跨「等待 →
+    采集 → 流变化 → 再等」整段存活，hold / preroll / 拦截计数连续累积。
     """
     total = 0
     while not _stop_requested(stop_event):
@@ -1656,18 +1686,21 @@ async def _run_loopback_linux(session, tele, seconds: float, stop_event,
               f"{targets[0].sample_rate}Hz ×{targets[0].channels}ch → 16kHz 单声道", flush=True)
         if on_status is not None:
             on_status("info", f"检测到 VRChat 音频（{len(targets)} 路）→ 开始采集")
-        sent, stopped = await _pump_vrchat_capture(session, tele, stop_event, targets)
+        sent, stopped = await _pump_vrchat_capture(session, tele, stop_event, targets,
+                                                   gate=gate)
         total += sent
         if stopped or seconds > 0:
             break
         print("[loopback] VRChat 音频输出已变化（退出 / 增减播放流）→ 重新等待/接上", flush=True)
         if on_status is not None:
             on_status("warn", "VRChat 音频输出消失 → 等待 VRChat 重新启动")
-    print(f"[loopback] 采集结束，共 {total} bytes ≈ {total / 2 / 16000:.0f}s", flush=True)
+    print(f"[loopback] 采集结束，共 {total} bytes ≈ {total / 2 / 16000:.0f}s"
+          f"{_gate_tail(gate)}", flush=True)
 
 
 async def _pump_vrchat_capture(session, tele, stop_event,
-                               targets: list[LoopbackTarget]) -> tuple[int, bool]:
+                               targets: list[LoopbackTarget],
+                               gate: "_LevelGate | None" = None) -> tuple[int, bool]:
     """采集 VRChat 的若干路输出流并混音。返回 (送出字节数, 是否被停止)。
 
     与共享的 `_pump_capture` 的区别有两点，都是被实测逼出来的：
@@ -1677,6 +1710,9 @@ async def _pump_vrchat_capture(session, tele, stop_event,
       2. 每 ~3s 回查一次 PipeWire 图：VRChat 退出（流全消失）**或播放流增减**
          就主动收尾 —— 不能只指望 `pw-record` 子进程自己退出：目标节点消失后
          它是**不会**退的，而共享泵只看「队列超时」是发现不了这件事的。
+
+    `gate`（输入门限）：判在**多路混音 + 重采样之后**的同一块上，与 Windows 腿
+    同口径（走 `_send_gated`）——「别人说」这条腿远处的玩家小声就该被滤掉。
     """
     opened: list = []
     for t in targets:
@@ -1691,10 +1727,7 @@ async def _pump_vrchat_capture(session, tele, stop_event,
             if chunk is not None:
                 pcm16 = to_16k_mono(chunk, source.rate, source.channels)
                 if pcm16:
-                    await session.send_audio(pcm16)
-                    sent += len(pcm16)
-                    if tele is not None:
-                        tele.add("loopback_chunk", bytes=len(pcm16))
+                    sent += await _send_gated(session, tele, "loopback", pcm16, gate)
             now = time.monotonic()
             if now - last_check >= VRCHAT_RECHECK_S:
                 last_check = now
