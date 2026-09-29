@@ -201,6 +201,14 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "capture": {
             "mic_device": str(raw_capture.get("mic_device") or ""),
             "loopback_device": str(raw_capture.get("loopback_device") or ""),
+            # 输入门限（只作用于 loopback = VRChat 输出「别人说话」那条腿）：
+            # 原样透传，取值校验在 engine.input_gate_settings 里做（非法值留痕 + 回落默认值）。
+            # ⚠️ 默认值必须与 engine 的 INPUT_GATE_DEFAULT_* 一致（这里不能 import engine：
+            #    engine 反向 import 本模块，会成环）。
+            "gate_enabled": raw_capture.get("gate_enabled", True),
+            "gate_db": raw_capture.get("gate_db", -45.0),
+            "gate_hold_ms": raw_capture.get("gate_hold_ms", 500),
+            "gate_preroll_ms": raw_capture.get("gate_preroll_ms", 250),
         },
     }
     return AppConfig(
@@ -222,6 +230,8 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 "enabled": bool((raw_textin.get("tts") or {}).get("enabled", True)),
                 "model": str((raw_textin.get("tts") or {}).get("model") or "qwen3-tts-flash"),
                 "voice": str((raw_textin.get("tts") or {}).get("voice") or "Cherry"),
+                # 流式合成（SSE）：首段音频 0.36~0.42s 就能起播（整段合成要等 1.6~1.9s 才开口）
+                "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
             },
         },
