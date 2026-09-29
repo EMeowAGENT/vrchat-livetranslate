@@ -383,6 +383,33 @@ def _is_unsupported_voice_err(msg: str) -> bool:
 # 解析纪律：以 `#` 开头的行是注释、空行忽略；**只按第一个等号切**，
 # 这样译名里带 `=`（或中文全角 `＝`）也不会切错。
 
+def _iter_glossary_lines(text: str):
+    """逐行分类：产出 `(行号, 原文, 译名, 忽略原因, 原样内容)`。
+
+    - 空行 / `#` 注释 = 正常跳过（原因 `""`）
+    - 原文/译名为 `None` 且原因非空 = 用户**写了内容但格式看不懂** —— 以前这类行被静默丢掉，
+      用户写了 `原文：译名` 只会觉得「保存没反应」，所以要能报出来。
+    """
+    for lineno, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            yield lineno, None, None, "", line
+            continue
+        if "=" in line:
+            src, _, tgt = line.partition("=")
+        elif "＝" in line:
+            # 容忍全角等号（中文输入法下极易打出来），否则用户会以为「保存没反应」
+            src, _, tgt = line.partition("＝")
+        else:
+            yield lineno, None, None, "缺少等号", line
+            continue
+        src, tgt = src.strip(), tgt.strip()
+        if not (src and tgt):
+            yield lineno, None, None, "等号有一侧是空的", line
+            continue
+        yield lineno, src, tgt, "", line
+
+
 def _parse_glossary_lines(text: str) -> dict[str, str]:
     """把界面文本框的内容解析成 {原文: 译名}（纯函数，离线可测）。
 
@@ -390,21 +417,18 @@ def _parse_glossary_lines(text: str) -> dict[str, str]:
     与「后写覆盖先写」的直觉一致）。
     """
     out: dict[str, str] = {}
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            # 容忍全角等号（中文输入法下极易打出来），否则用户会以为「保存没反应」
-            if "＝" not in line:
-                continue
-            src, _, tgt = line.partition("＝")
-        else:
-            src, _, tgt = line.partition("=")
-        src, tgt = src.strip(), tgt.strip()
-        if src and tgt:
+    for _lineno, src, tgt, _reason, _raw in _iter_glossary_lines(text):
+        if src:
             out[src] = tgt
     return out
+
+
+def _glossary_line_issues(text: str) -> list[tuple[int, str]]:
+    """格式看不懂的行 `[(行号, 原样内容)]`（纯函数，离线可测）。
+
+    界面拿它给用户一句提示：以前这些行是**静默**丢掉的，用户很容易以为「保存没反应」。
+    """
+    return [(n, raw) for n, src, _tgt, reason, raw in _iter_glossary_lines(text) if reason]
 
 
 def _glossary_to_lines(mapping: dict[str, str] | None) -> list[str]:
@@ -2607,10 +2631,22 @@ class TranslationGUI:
             self._cfg.session_base["glossary"] = dict(mapping)
         self._push_glossary_to_engines(mapping)
 
+        bad = _glossary_line_issues(self._glossary_text.get("1.0", tk.END))
         if saved:
-            self._set_glossary_status(t("已保存 {n} 条词条（正在翻译时会重建会话生效）",
-                                        n=len(mapping)))
-            print(f"[gui] 专有词库已保存：{len(mapping)} 条", flush=True)
+            if bad:
+                # 格式看不懂的行**必须说出来**：以前是静默丢掉，用户写 `原文：译名`
+                # 只会觉得「保存没反应」，然后反复重试。
+                for _lineno, _raw in bad:
+                    print(f"[gui] ⚠️ 词库第 {_lineno} 行格式看不懂（要写成 原文=译名），"
+                          f"已忽略：{_raw!r}", flush=True)
+                self._set_glossary_status(
+                    t("已保存 {n} 条词条；{bad} 行看不懂已忽略（要写成 原文=译名）",
+                      n=len(mapping), bad=len(bad)), warn=True)
+            else:
+                self._set_glossary_status(t("已保存 {n} 条词条（正在翻译时会重建会话生效）",
+                                            n=len(mapping)))
+            print(f"[gui] 专有词库已保存：{len(mapping)} 条"
+                  + (f"（另有 {len(bad)} 行格式看不懂已忽略）" if bad else ""), flush=True)
         else:
             # 写盘失败只在日志留痕、且**不回显成功**：不能骗用户说存好了
             self._set_glossary_status(t("保存失败：{err}", err="写入 config.yaml 失败，见日志"),

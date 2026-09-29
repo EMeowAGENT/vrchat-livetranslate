@@ -248,8 +248,13 @@ def synthesize_stream(
                 _raise_if_error(obj)
                 raw = _extract_audio(obj, timeout)
                 if raw:
+                    # ⚠️ 顺序不能反：**先解码成功、再算「已送出」**。曾经先 `got += 1` 再 yield，
+                    # 解码一失败就报「已保留 1 个分片（少半句、不整句丢）」—— 可实际上一个字
+                    # 都没送出去，调用方会把「这段音频根本解不开」误当成「流式只给了半句」，
+                    # 也不会再走「一个分片都没拿到 → 整段兜底」（实测复现）。
+                    pcm = _decode_to_24k_mono(raw)
                     got += 1
-                    yield _decode_to_24k_mono(raw)
+                    yield pcm
             else:
                 for line in resp:
                     line = line.strip()

@@ -1583,8 +1583,11 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
 
     target = pick_loopback_target(patterns, device_name)
     if target is None:
+        # ⚠️ 文案按平台分叉：这条分支只可能是 Windows（Linux 已在上面 return），
+        # 以前统一写「PipeWire/音频服务」，Windows 用户照着找 PipeWire 纯属误导。
+        hint = "PipeWire/音频服务" if platform.IS_LINUX else "系统音频服务（WASAPI）"
         print("[loopback] ❌ 没找到任何可采集的系统输出"
-              "（VRChat 在跑吗？PipeWire/音频服务正常吗？）")
+              f"（VRChat 在跑吗？{hint}正常吗？）")
         return
     print(f"[loopback] 采集端点「{target.name}」{target.sample_rate}Hz ×{target.channels}ch"
           f" → 16kHz 单声道")

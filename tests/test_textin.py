@@ -736,6 +736,22 @@ def test_tts_streaming() -> bool:
         ok &= cond
     finally:
         tts_mod.synthesize = real_s
+    # ⑦ 降级整段、但音频根本解不开 → **不能**报「已保留 1 个分片」（一个字都没送出去），
+    #    要抛解码失败的真原因。曾经 `got += 1` 记在解码之前，导致误报（实测复现）。
+    bad = json.dumps({"output": {"audio": {"data": base64.b64encode(b"not-audio").decode()}}})
+    tts_mod._opener = FakeSseOpener(FakeSseResp([bad], ctype="application/json"))
+    raised_bad: Exception | None = None
+    try:
+        list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    except tts_mod.TtsError as exc:
+        raised_bad = exc
+    cond = (raised_bad is not None
+            and not isinstance(raised_bad, tts_mod.TtsStreamTruncated)
+            and "已保留" not in str(raised_bad)
+            and "解码失败" in str(raised_bad))
+    print(f"  降级整段解码失败：抛 {type(raised_bad).__name__}「{str(raised_bad)[:28]}」"
+          f"（不得误报「已保留 N 个分片」）  {'OK' if cond else '✗'}")
+    ok &= cond
     return ok
 
 
