@@ -1,6 +1,6 @@
 # vrchat-livetranslate · Руководство
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | **Русский**
 
 [← Вернуться к README](README.ru.md)
 
@@ -56,7 +56,7 @@
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 ## 3. Настройка API-ключа

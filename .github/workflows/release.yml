@@ -44,8 +44,13 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-windows.txt
           python -m pip install "pyinstaller>=6.6"
+
+      # ★ 依赖门禁：这是**真正发布**的路径，缺了 openvr / pyaudiowpatch
+      #   会静默产出「没有 SteamVR 手腕屏、没有 VRChat 音频下拉」的 exe。
+      - name: 断言 Windows 独占依赖可导入
+        run: python -c "import openvr, pyaudiowpatch; print('Windows 独占依赖 OK')"
 
       - name: 打包单文件 exe
         # --no-verify：打完自带的自检要真 API key + 联网，CI 里没有 → 跳过

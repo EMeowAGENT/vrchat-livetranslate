@@ -1,6 +1,6 @@
 # vrchat-livetranslate · ガイド
 
-> [中文](GUIDE.md) | [English](GUIDE.en.md) | **日本語** | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
+> [中文](../GUIDE.md) | [English](GUIDE.en.md) | **日本語** | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 
 [← README に戻る](README.ja.md)
 
@@ -56,7 +56,7 @@
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 ## 3. API key の設定
