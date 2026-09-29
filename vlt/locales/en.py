@@ -116,6 +116,17 @@ STRINGS: dict[str, str] = {
     "VRChat 音频:": "VRChat Audio:",
     "译音输出:": "Voice Output:",
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
+    # ---- 设置弹窗：输入门限（只作用于 VRChat 输出 /「别人说话」）----
+    "输入门限": "Input Gate",
+    "启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）":
+        "Enable — audio below the threshold is not translated "
+        "(filters out players talking softly in the distance)",
+    "当前电平:": "Level:",
+    "门限:": "Threshold:",
+    "只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）":
+        "Only audio louder than the threshold gets translated; changes apply at once "
+        "(the live level appears here while translation is running)",
+    "输入门限已保存：{db} dB": "Input gate saved: {db} dB",
     # ---- 设置弹窗：音色 ----
     "音色": "Voice Timbre",
     "说话译音:": "Spoken voice:",
