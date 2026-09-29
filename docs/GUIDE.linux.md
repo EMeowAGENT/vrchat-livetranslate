@@ -177,6 +177,7 @@ overlay:
 | `output.audio.device` / `device_name` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink`，`device_name` 被忽略 |
 | `overlay.font` | `C:/Windows/Fonts/msyh.ttc` | **留空即可**，自动用 fontconfig 找中日韩字体 |
 | `overlay.backend` | `auto` | `auto`（= 自建 OpenXR）/ `null`（禁用） |
+| `capture.gate_*`（输入门限） | ✅ 生效 | ✅ **一致** —— 判在 VRChat 多路输出**混音之后**的同一块上（远处小声的玩家一样被拦，hold / preroll / 拦截计数同样成立） |
 
 其它（方向、语言、chatbox 参数、静默闸门、repeat 抑制、字号、配色……）**完全一致**。
 
@@ -212,6 +213,7 @@ overlay:
 | 一直显示「等待 VRChat 音频输出」 | VRChat 没在跑（或输出流还没建立） | 起 VRChat。日志里出现 `[loopback] 检测到 VRChat 音频：…` 即已接上，**不用重启本程序** |
 | 采不到「别人说话」 | 日志里始终没有「检测到 VRChat 音频」 | 用上面那条 `pw-dump` 命令确认 VRChat 有没有 `Stream/Output/Audio` 节点；没有说明 VRChat 没起来 / 没在放声音 |
 | 别人说话里混进了音乐、浏览器声 | ⚠️ 不该发生 | 采集的是 VRChat 自己的输出流，不是默认输出；若真混进来请报 bug，并附 VRChat 节点的 `node.name` |
+| 门限「开着」，远处小声的玩家照样被翻 | ⚠️ 不该发生 | 门限判在**多路混音之后**（与 Windows 同口径）。真发生请报 bug，并附启动日志里的 `[gate]` 行 |
 | VRChat 的麦克风列表里没有 `VLT Mic` | 设备只在程序运行期间存在 | **先起本程序再起 VRChat**；或在 VRChat 音频设置里刷新设备列表 |
 | 对方听不到译音 | 译音腿没开 / VRChat 没选 `VLT Mic` | 界面上勾「译音输出」，并在 VRChat 里把麦克风选成 `VLT Mic` |
 | `pactl: Connection refused` | PulseAudio 兼容层没跑/不可达 | **不影响我们** —— 全程用 `pw-*` 原生工具。用 `pw-dump` 验证 PipeWire 本身是否正常 |

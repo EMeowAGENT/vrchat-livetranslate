@@ -111,6 +111,35 @@ class _FakeSource:
         self.closed = True
 
 
+class _ScriptedSource:
+    """按脚本逐块吐样本值的采集源（用完就静音）——复刻「远处小声 → 近处大声」的时序。
+
+    `values` 里每个数是一块 100ms（1600 样点）的样本值：整块恒值 ⇒ 块的 RMS = 该值，
+    电平 = 20·log10(值/32768) dBFS。脚本放完返回 None（=「还活着但暂时没声音」）。
+    """
+
+    rate = 16000
+    channels = 1
+
+    def __init__(self, values: list[int], samples: int = 1600) -> None:
+        self._values = list(values)
+        self._samples = samples
+        self._i = 0
+        self.closed = False
+
+    async def read(self, timeout: float = 1.0) -> bytes | None:
+        if self.closed or self._i >= len(self._values):
+            return None
+        v = self._values[self._i]
+        self._i += 1
+        await asyncio.sleep(0)
+        return b"".join(int(v).to_bytes(2, "little", signed=True)
+                        for _ in range(self._samples))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.bytes = 0
@@ -122,11 +151,15 @@ class _FakeSession:
 
 
 class _FakeCaptureBackend:
-    """每路 target 各给一个源（按 target.id 区分，模拟多条 pw-record）。"""
+    """每路 target 各给一个源（按 target.id 区分，模拟多条 pw-record）。
 
-    def __init__(self, values: dict[str, int] | None = None) -> None:
+    `values[tid]` 给**定值** → 每块都吐同一个样本值（`_FakeSource`）；
+    给**列表** → 按脚本逐块吐（`_ScriptedSource`），用来构造「小声 → 大声」的时序。
+    """
+
+    def __init__(self, values: dict[str, int | list[int]] | None = None) -> None:
         self._values = values or {}
-        self.sources: dict[str, _FakeSource] = {}
+        self.sources: dict[str, _FakeSource | _ScriptedSource] = {}
         self.opened: list[LoopbackTarget] = []
 
     def open_loopback(self, target, *, blocksize):  # noqa: ANN001, ANN201
@@ -134,9 +167,11 @@ class _FakeCaptureBackend:
         src = self._sources_for(target.id)
         return src
 
-    def _sources_for(self, tid: str) -> _FakeSource:
+    def _sources_for(self, tid: str) -> _FakeSource | _ScriptedSource:
         if tid not in self.sources:
-            self.sources[tid] = _FakeSource(self._values.get(tid, 1))
+            v = self._values.get(tid, 1)
+            self.sources[tid] = (_ScriptedSource(v) if isinstance(v, list)
+                                 else _FakeSource(v))
         return self.sources[tid]
 
 
@@ -400,6 +435,7 @@ def test_loopback_linux_returns_to_waiting() -> None:
     stop = threading.Event()
     statuses: list[tuple[str, str]] = []
     waits = {"n": 0}
+    forwarded: dict = {}
 
     async def _fake_wait(stop_event, on_status=None, *, poll_s=2.0):  # noqa: ANN001, ANN202, ARG001
         waits["n"] += 1
@@ -408,23 +444,114 @@ def test_loopback_linux_returns_to_waiting() -> None:
         stop_event.set()                # 第二次等：用户点了「停止翻译」
         return None
 
-    async def _fake_pump(session, tele, stop_event, targets):  # noqa: ANN001, ANN202, ARG001
+    async def _fake_pump(session, tele, stop_event, targets, gate=None):  # noqa: ANN001, ANN202
+        forwarded["gate"] = gate
         return 42, False
 
+    gate = E._LevelGate(True, -45.0, 500.0, 250)          # noqa: SLF001
     r1 = _patch(E, "_wait_for_vrchat", _fake_wait)
     r2 = _patch(E, "_pump_vrchat_capture", _fake_pump)
     try:
         asyncio.run(E._run_loopback_linux(_FakeSession(), None, 0.0, stop,
-                                          lambda k, m: statuses.append((k, m))))
+                                          lambda k, m: statuses.append((k, m)),
+                                          gate=gate))
     finally:
         r2()
         r1()
 
     kinds = " | ".join(m for _, m in statuses)
+    assert forwarded["gate"] is gate, "Linux 采集腿没把输入门限转给采集泵"
     assert any("检测到 VRChat 音频" in m for _, m in statuses), f"没报检测到：{kinds}"
     assert any("VRChat 音频输出消失" in m for _, m in statuses), f"变化后没回到等待：{kinds}"
     assert waits["n"] == 2, f"应在流变化后**再次等待**：{waits}"
-    print("  采集腿「等 → 采 → 变化 → 再等」OK")
+    print("  采集腿「等 → 采 → 变化 → 再等」OK（门限一路带到采集泵）")
+
+
+# ---------------------------------------------------------------- ⑥ 输入门限（在混音之后判）
+
+CHUNK = 3200            # 100ms @16kHz s16le 单声道 = 1600 样点
+
+
+def test_run_loopback_forwards_gate_to_linux_leg() -> None:
+    """run_loopback 在 Linux 上必须把 gate 转给 _run_loopback_linux。
+
+    #12 的现场：调用点传了 gate，而 `run_loopback()` 的形参里没有它 →
+    一启动就 TypeError（上层显示「运行错误」），这条腿整条不工作。
+    """
+    import vlt.engine as E
+    from vlt import platform
+
+    seen: dict = {}
+
+    async def fake_linux(session, tele, seconds, stop_event, on_status, **kw):  # noqa: ANN001, ANN003
+        seen.update(kw)
+
+    gate = E._LevelGate(True, -45.0, 500.0, 250)          # noqa: SLF001
+    r1 = _patch(platform, "IS_LINUX", True)
+    r2 = _patch(E, "_run_loopback_linux", fake_linux)
+    try:
+        asyncio.run(E.run_loopback(_FakeSession(), None, gate=gate))
+    finally:
+        r2()
+        r1()
+    assert seen.get("gate") is gate, f"Linux 早退分支没把输入门限带下去：{seen}"
+    print("  run_loopback → _run_loopback_linux 带上 gate OK")
+
+
+def test_capture_gate_blocks_quiet_and_keeps_preroll_on_mix() -> None:
+    """★ 门限判在**多路混音之后**：小声整段不上送，越阈值才开闸并补句首。
+
+    两路各按脚本吐 5 块（100ms/块）：
+      3 块小声（各 50 → 混音后 100 ≈ −50 dBFS，低于默认 −45）→ 全部拦下；
+      2 块大声（各 3277 → 混音后 6554 ≈ −14 dBFS）→ 第 1 块开闸：补发最近 250ms 的
+      preroll（前 2 块）再上送当前块，第 2 块起逐块透传。
+    """
+    import vlt.engine as E
+    from vlt import platform
+
+    targets = [LoopbackTarget(id="14061", name="s#5", sample_rate=16000, channels=1),
+               LoopbackTarget(id="14002", name="s#1", sample_rate=16000, channels=1)]
+    script = [50, 50, 50, 3277, 3277]
+
+    def run(gate):  # noqa: ANN001, ANN202
+        cap = _FakeCaptureBackend({"14061": list(script), "14002": list(script)})
+        session = _FakeSession()
+        checks = {"n": 0}
+
+        def _find():  # noqa: ANN202
+            checks["n"] += 1
+            return targets if checks["n"] == 1 else []      # 第 2 次回查：流没了 → 收尾
+
+        r1 = _patch(platform, "capture_backend", lambda: cap)
+        r2 = _patch(E, "pick_vrchat_targets", _find)
+        r3 = _patch(E, "VRCHAT_RECHECK_S", 0.05)
+        try:
+            sent, stopped = asyncio.run(
+                E._pump_vrchat_capture(session, None, threading.Event(), targets,
+                                       gate=gate))
+        finally:
+            r3()
+            r2()
+            r1()
+        return sent, stopped, session, cap
+
+    gate = E._LevelGate(True, -45.0, 500.0, 250)              # noqa: SLF001
+    sent, stopped, session, cap = run(gate)
+    assert stopped is False, "流变化不该被当成「停止」"
+    assert len(cap.opened) == 2, f"两路都要各开一条记录：{cap.opened}"
+    assert sent == session.bytes and sent > 0, \
+        f"送出的字节数应与会话收到的一致：{sent}/{session.bytes}"
+    assert gate.dropped_chunks == 3, f"3 块小声应全被拦下：{gate.dropped_chunks}"
+    assert (gate.opened, gate.replay_count) == (1, 1), \
+        f"应只开闸一次并补发一次 preroll：开闸 {gate.opened} / 补发 {gate.replay_count}"
+    assert len(session.pcm) == 4 * CHUNK, \
+        f"上送块数应为 4（补发 2 + 当前 1 + 大声 1）：{len(session.pcm) // CHUNK}"
+
+    # 对照：不传门限（gate=None）→ 同一段脚本一块不漏（「无门限」的行为没被改动）
+    _sent, _stopped, bare, _cap = run(None)
+    assert len(bare.pcm) == 5 * CHUNK, \
+        f"无门限时应原样上送全部 5 块：{len(bare.pcm) // CHUNK}"
+    print("  门限接在混音之后：小声全拦、开闸补 preroll、无门限不受影响 OK")
 
 
 # ---------------------------------------------------------------- ⑤ Linux 界面只剩麦克风
@@ -511,5 +638,7 @@ if __name__ == "__main__":
     test_capture_ends_when_vrchat_exits()
     test_capture_reopens_when_stream_set_changes()
     test_loopback_linux_returns_to_waiting()
+    test_run_loopback_forwards_gate_to_linux_leg()
+    test_capture_gate_blocks_quiet_and_keeps_preroll_on_mix()
     test_linux_ui_hides_loopback_and_output_combos()
     print("ALL PASSED")

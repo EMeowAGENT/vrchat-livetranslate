@@ -287,6 +287,30 @@ def test_engine_wires_gate_only_to_loopback() -> None:
     print("  接线：门限只挂 loopback 腿 OK")
 
 
+def test_real_signatures_accept_gate() -> None:
+    """★ 对**真实函数签名**下断言（上面那条用例用假替身，正好测不出签名漂移）。
+
+    #12 就是这么漏的：`Engine._feed_audio()` 传 `gate=`，而 `run_loopback()` 的形参里
+    根本没有它 —— 一跑就 TypeError，采集腿整条死掉（两个平台都一样）；而接线用例里
+    的替身是 `fake_*(**kw)`，什么关键字都照收。所以这里直接量真签名：
+    loopback 链路上的每一环都必须能接住 gate，麦克风腿必须不接。
+    """
+    import inspect
+
+    import vlt.engine as E
+
+    chain = (E.run_loopback,                      # 入口（两个平台共用）
+             E._run_loopback_linux,               # noqa: SLF001 —— Linux 转发
+             E._pump_vrchat_capture,              # noqa: SLF001 —— Linux 混音后判定
+             E._pump_capture)                     # noqa: SLF001 —— Windows 共用泵
+    for fn in chain:
+        params = inspect.signature(fn).parameters
+        assert "gate" in params, f"{fn.__name__} 的签名里没有 gate：{list(params)}"
+    assert "gate" not in inspect.signature(E.run_mic).parameters, \
+        "麦克风腿（自己说话）不该接输入门限"
+    print("  真实签名：loopback 链路每一环都能接 gate、麦克风腿不接 OK")
+
+
 def test_engine_gate_disabled_and_legacy_config() -> None:
     """老配置（capture 段没有 gate_*）→ 用默认值；显式关掉 → enabled=False。"""
     from vlt.engine import Engine, EngineEvents
@@ -360,6 +384,7 @@ if __name__ == "__main__":
     test_preroll_budget_and_zero()
     test_near_and_far_players_scenario()
     test_engine_wires_gate_only_to_loopback()
+    test_real_signatures_accept_gate()
     test_engine_gate_disabled_and_legacy_config()
     test_gui_gate_controls_and_config_write()
     print("ALL PASSED")
