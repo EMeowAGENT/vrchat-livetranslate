@@ -58,16 +58,29 @@ def _yaml_set_in_text(text: str, path: list[str], value: str) -> str:
             #    - 0.0
             #  而本函数当时只换了 `pos:` 那一行，热重载就报
             #  `expected <block end>, but found '-'`，界面上拖滑块完全没效果。
+            #
+            # ⚠️ 但**纯注释行绝不删**：说明注释常写成「比所属键缩进更深」的续行
+            #   （如 `rot:` 下面那几行「换左手要镜像」），旧版本把注释当子块一并吃掉 ——
+            #   实测拖一次滑块 / 选一次设备就少 5~6 行说明（PR #4 审查：70 → 65）。
+            #   注释不影响 YAML 语义，保留它们、只删真正的块行即可（见下方 drop）。
+            drop: list[int] = []
             j = i + 1
             while j < hi and lines[j].strip():
                 stripped = lines[j].lstrip()
                 ind_j = len(lines[j]) - len(stripped)
+                if stripped.startswith("#"):
+                    if ind_j > indent:      # 本键的深层注释：保留，但继续往下扫块行
+                        j += 1
+                        continue
+                    break                   # 同级注释：保留，块到此为止
                 # 更深的缩进 = 属于本键的块；同级但以 "- " 开头 = 块序列（PyYAML 默认就不缩进）
                 if ind_j > indent or (ind_j == indent and stripped.startswith("- ")):
+                    drop.append(j)
                     j += 1
                     continue
                 break
-            del lines[i + 1:j]
+            for k in reversed(drop):        # 从后往前删，前面的行号才不会漂移
+                del lines[k]
             lines[i] = new_line
             return "\n".join(lines)
     lines.insert(hi, f"{' ' * indent}{leaf}: {value}")
@@ -125,18 +138,27 @@ def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
             m = re.compile(rf"^(\s*){re.escape(key_path[0])}:(\s*)([^#\n]*)(\s*#.*)?$").match(lines[i])
             comment = (m.group(4) or "").strip() if m else ""
             lines[i] = f"{' ' * indent}{key_path[0]}: {value}" + (f"   {comment}" if comment else "")
+            # 与 `_yaml_set_in_text` 同一取舍：删块行、**不删纯注释行**（见那边的说明）。
+            drop: list[int] = []
             j = i + 1
             while j < chi:
                 s = lines[j].lstrip()
-                if not s:
+                if not s:                   # 空行保留、继续扫（本函数原本就跨空行找子块）
                     j += 1
                     continue
                 ind_j = len(lines[j]) - len(s)
+                if s.startswith("#"):
+                    if ind_j > indent:
+                        j += 1
+                        continue
+                    break
                 if ind_j > indent or (ind_j == indent and s.startswith("- ")):
+                    drop.append(j)
                     j += 1
                     continue
                 break
-            del lines[i + 1:j]
+            for k in reversed(drop):
+                del lines[k]
             return
         _walk(key_path[1:], indent + 2, clo, chi)
 
