@@ -42,6 +42,25 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
 
 ## 二、安装
 
+### 最快：下现成的 AppImage（不用装 Python 和依赖）
+
+到 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)** 下载
+`VRChatLiveTranslate-x86_64.AppImage`，`chmod +x` 之后双击（或直接运行）即可：
+
+```bash
+chmod +x VRChatLiveTranslate-x86_64.AppImage
+./VRChatLiveTranslate-x86_64.AppImage
+```
+
+- 解释器与全部依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`
+- 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
+- 仍然要自备一个**阿里云百炼 API key**（见下一节）
+- 运行时需要 **Wayland 会话**；手腕屏还要 OpenXR 运行时（Monado / WiVRn）+ 头显已连
+
+### 或者：源码安装（`./setup.sh`）
+
+想改代码、或不想用 AppImage 的走这条：
+
 ```bash
 ./setup.sh
 ```

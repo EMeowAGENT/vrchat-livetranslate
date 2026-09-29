@@ -202,79 +202,10 @@ jobs:
   # ------------------------------------------------------------------
   # Linux AppImage：构建 + **独立验收**。
   #
-  # 「Linux 上只用 OpenXR、Windows 上只用 SteamVR」这条假设不能只写在文档里。
-  # 这里把它变成红灯门禁：
-  #   * 构建脚本反向删掉 Windows 独占实现（vlt/platform/win.py、openvr 手腕屏后端）；
-  #   * scripts/verify_appimage.py 断言它们**真的不在**产物里，并跑包内导入（-P，防
-  #     误读仓库源码）+ 离线渲染；
-  #   * 字体检查挂在 xvfb 下**真跑**（无显示器时脚本会自己标「跳过 = 未验证」，不硬红）。
+  # 步骤本体在 **[appimage.yml](appimage.yml)**（可复用 workflow）—— 因为打 tag 发布时
+  # 要用**同一份**（release.yml 也是 `uses:` 它）。构建口径只留一处：这边的系统依赖清单、
+  # Tcl/Tk 版本进 cache key、构建→验收的顺序，抄第二份迟早只改一处（#12 的教训）。
+  # 这里只保留「CI 里怎么排」：先跑完 Linux 测试，再构建 AppImage，失败即红灯。
   appimage:
     needs: linux-tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      - name: 装系统依赖（构建 AppImage + 验收）
-        run: |
-          sudo apt-get update
-          # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
-          # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft 版 Tk
-          # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
-          #
-          # ⚠️ 不要写 `xorgproto`：Ubuntu 24.04(noble) 起这个包名已不存在（apt 报
-          #    E: Unable to locate package xorgproto → 整个 job 红）。X11 协议头在
-          #    noble 由 `x11proto-dev` 提供，而它本来就是 `libx11-dev` 的依赖，会随下面
-          #    这条自动装上 —— 不需要（也不能）单独列出来。
-          sudo apt-get install -y --no-install-recommends \
-            xvfb fonts-noto-cjk tk libportaudio2 libegl1 libwayland-client0 \
-            gcc make libxft-dev libfreetype6-dev libfontconfig1-dev \
-            libx11-dev libxext-dev
-
-      - name: 装 uv 并拉独立 Python 3.11（构建脚本要求可搬运的解释器）
-        run: |
-          python -m pip install --upgrade pip uv
-          uv python install 3.11
-
-      - name: 建 .venv 并装 Linux 依赖
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r requirements-linux.txt
-
-      - name: 读 uv 自带 Tcl/Tk 的版本（做缓存 key 用）
-        id: tcltk
-        run: |
-          # 打包脚本的缓存目录按这个版本分（避免 uv 升级 Tcl/Tk 后复用到旧版 .so，
-          # ABI 不匹配会在用户机器上崩、CI 却看不出来）。这里把它读出来放进 cache key。
-          TKB="$(find "$HOME/.local/share/uv/python" -maxdepth 4 \
-                   -name 'libtcl9tk9.0.so' -path '*cpython-3.11*' | sort -r | head -1)"
-          if [ -n "$TKB" ]; then
-            VER="$(strings -a "$TKB" | grep -oE '^9\.[0-9]+\.[0-9]+' | head -1)"
-          fi
-          echo "ver=${VER:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "Tcl/Tk 版本：${VER:-未知}"
-
-      - name: 缓存构建工具（appimagetool + 编好的 Xft 版 Tk）
-        uses: actions/cache@v4
-        with:
-          path: build/tools
-          key: appimage-tools-${{ runner.os }}-tk${{ steps.tcltk.outputs.ver }}-${{ hashFiles('scripts/build_appimage.sh') }}
-
-      - name: 构建 AppImage
-        run: ./scripts/build_appimage.sh
-
-      - name: ★ 独立验收（xvfb 下让字体检查真跑）
-        run: |
-          xvfb-run -a .venv/bin/python scripts/verify_appimage.py \
-            dist/VRChatLiveTranslate-x86_64.AppImage
-
-      - name: 上传产物（方便人工复验）
-        uses: actions/upload-artifact@v4
-        with:
-          name: VRChatLiveTranslate-AppImage
-          path: dist/VRChatLiveTranslate-x86_64.AppImage
-          retention-days: 7
+    uses: ./.github/workflows/appimage.yml

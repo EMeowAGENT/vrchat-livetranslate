@@ -1,8 +1,8 @@
 name: Release
 
-# 打 v* 标签 → 在 Windows 上真打包一次单文件 exe → 建 Release 并把 exe 当附件传上去。
-# 为什么放 CI 而不是本机手工传：手工那次没人能复现「这个 exe 到底是哪个 commit 打的」，
-# 而这里 tag 与包内 __version__ 会先对一次账，产物还带 SHA256。
+# 打 v* 标签 → 真打包一次（Windows 单文件 exe + Linux AppImage）→ 建 Release 把两个附件都传上去。
+# 为什么放 CI 而不是本机手工传：手工那次没人能复现「这个 exe / AppImage 到底是哪个 commit 打的」，
+# 而这里 tag 与包内 __version__ 会先对一次账，产物还带 GitHub 服务端算的 SHA256。
 on:
   push:
     tags: ["v*"]
@@ -17,7 +17,22 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  # ① Linux：AppImage（构建 + 独立验收）。
+  #
+  # 步骤本体在 `.github/workflows/appimage.yml` —— 与 CI 用的是**同一份**（系统依赖清单、
+  # Tcl/Tk 版本进 cache key、构建→验收的顺序都只写一处；抄一遍迟早只改一处，#12 的教训）。
+  # 这里拿到的 artifact 会在下面 `build` 里取回来，和 exe 一起当 Release 附件发出去。
+  appimage:
+    uses: ./.github/workflows/appimage.yml
+
+  # ② Windows：单文件 exe + 组装 Release。
+  #
+  # ⚠️ `needs: appimage` 是**故意的**：宁可整体红，也不要静默发一个「只有 exe」的版本 ——
+  #    Linux 用户照指南去附件里找 AppImage 却找不到，而这种「少了一半」不会有人报错。
+  #    （仓库里同口径：发布路径上缺 Windows 独占依赖也要红灯，见下面的依赖门禁。）
+  #    真要接受「AppImage 挂了也照发 exe」，把这个 needs 删掉即可。
   build:
+    needs: appimage
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,7 +71,19 @@ jobs:
         # --no-verify：打完自带的自检要真 API key + 联网，CI 里没有 → 跳过
         run: python scripts/build_exe.py --no-verify
 
-      - name: 自检产物（存在性 / 大小 / 图标资源）
+      # Linux 附件来自上面 `appimage` job（可复用 workflow 的产物）。
+      # 单个文件的 artifact 里存的就是文件名本身 → 下到 dist/ 即 dist/xxx.AppImage。
+      # ⚠️ 必须放在下面「自检产物」**之前**：那一步会断言 AppImage 已经在 dist/ 里
+      #    （第一次跑就是顺序错了，在 fork 上实测到「没找到 Linux 附件」→ 这一步炸）。
+      # ⚠️ `download-artifact` 的 major 要与 appimage.yml 里 `upload-artifact` 的 major 配对
+      #    （现在两边都是 v4）：跨 major 取不到东西，而这一步只在打 tag 时才跑，容易没人发现。
+      - name: 取回 AppImage 产物（Linux 附件）
+        uses: actions/download-artifact@v4
+        with:
+          name: VRChatLiveTranslate-AppImage
+          path: dist
+
+      - name: 自检产物（存在性 / 大小）
         shell: pwsh
         run: |
           $exe = "dist/VRChatLiveTranslate.exe"
@@ -68,8 +95,18 @@ jobs:
           # ⚠️ 过渡期必须继续产出 SHA256SUMS.txt：**≤ v0.2.0 的老客户端把「exe + SHA256SUMS.txt
           #    两个附件」写死在更新检查里**，缺一个就静默地永远查不到新版本（v0.2.0 → v0.2.1 实测踩到）。
           #    新客户端优先用 GitHub 的 asset digest，这个文件纯粹给老客户端兜底。
+          #    ★ 只写 exe 一行：老客户端是拿 exe 的名字去这个文件里找校验值的；往里塞 AppImage
+          #      没有好处还有风险。AppImage 的校验值看 GitHub 附件旁的 digest（点一下即可复制）。
           "$hash  VRChatLiveTranslate.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Write-Host ("sha256：{0}" -f $hash)
+
+          # Linux 附件必须**真的在这儿**：`needs: appimage` 只保证那个 job 成功，
+          # 取回来这一步要是没落进 dist/，就得在这里炸掉，而不是发一个只有 exe 的 Release。
+          $img = "dist/VRChatLiveTranslate-x86_64.AppImage"
+          if (-not (Test-Path $img)) { Write-Error "没找到 Linux 附件 $img（appimage job 的产物没取回来？）"; exit 1 }
+          $i = Get-Item $img
+          Write-Host ("产物：{0}  {1:N1} MB" -f $i.Name, ($i.Length / 1MB))
+          if ($i.Length -lt 40MB) { Write-Error "AppImage 体积异常（<40MB），大概率没打全"; exit 1 }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
@@ -80,7 +117,7 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: 建 Release 并附上 exe
+      - name: 建 Release 并附上 exe + AppImage
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
@@ -91,11 +128,16 @@ jobs:
           body: |
             ## VRChat 实时同传 ${{ github.ref_name }}
 
-            **下载附件里的 `VRChatLiveTranslate.exe`（单文件、免安装、无控制台），双击即用。**
+            **Windows**：下载附件里的 `VRChatLiveTranslate.exe`（单文件、免安装、无控制台），双击即用。
             校验值看附件旁的 `sha256:`（GitHub 算的，鼠标点一下即可复制）；`SHA256SUMS.txt` 是给 v0.2.0 及更早客户端识别更新用的，手动下载的用户不需要它。
 
+            **Linux**：下载附件里的 `VRChatLiveTranslate-x86_64.AppImage`，`chmod +x` 后双击即用 ——
+            不用装 Python、不用装依赖（解释器与依赖都打在包里）。需要 **Wayland 会话**；
+            「别人说 → 手腕屏」还要 OpenXR 运行时（Monado / WiVRn）+ 头显已连。
+            详见 **[docs/GUIDE.linux.md](https://github.com/nixi-agent/vrchat-livetranslate/blob/main/docs/GUIDE.linux.md)**。
+
             ### 用它之前需要什么
-            - **Windows 10/11**（这版起 **Linux 也能用**，见下方第 4 条）
+            - **Windows 10/11**，或 **Linux**（Wayland 会话；这版起 Linux 也能用，见下方第 4 条）
             - **一个阿里云百炼 API key**（自备，按量计费）：界面「⚙ 设置」粘贴保存，或设环境变量 `DASHSCOPE_API_KEY`
             - VRChat 设置里打开 **OSC**（`OSC enabled: True`）、chat bubble visibility 设为 **Everyone**
 
@@ -123,7 +165,7 @@ jobs:
             **4. Linux 支持（新平台）**
 
             - 抽出平台抽象层，新增 Linux：PipeWire 采集 VRChat 播放输出（多路混音）、自建 OpenXR 手腕屏、虚拟声卡输出。
-            - 安装、依赖、排障见 **[docs/GUIDE.linux.md](https://github.com/nixi-agent/vrchat-livetranslate/blob/main/docs/GUIDE.linux.md)**。本 Release 的附件是 Windows 单文件 exe，Linux 的 AppImage 由 CI 产出（Actions 里 `VRChatLiveTranslate-AppImage` 产物）或按指南自行构建。
+            - 安装、依赖、排障见 **[docs/GUIDE.linux.md](https://github.com/nixi-agent/vrchat-livetranslate/blob/main/docs/GUIDE.linux.md)**。**本 Release 的附件里有 Linux 用的 `VRChatLiveTranslate-x86_64.AppImage`**（`chmod +x` 后双击即用，不用装 Python 与依赖）；想从源码跑或自己构建也照指南来。
             - 输入门限在 **Windows 与 Linux 两边都生效**（判在混音之后，同一个口径）。
 
             **5. 手腕屏旋转滑块范围 ±90° → ±180°**（issue #6）
@@ -145,4 +187,5 @@ jobs:
           files: |
             dist/VRChatLiveTranslate.exe
             dist/SHA256SUMS.txt
+            dist/VRChatLiveTranslate-x86_64.AppImage
           fail_on_unmatched_files: true
