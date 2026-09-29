@@ -164,6 +164,8 @@ STRINGS: dict[str, str] = {
     "保存词库": "Save Glossary",
     "已保存 {n} 条词条（正在翻译时会重建会话生效）":
         "Saved {n} entries (takes effect after the session is rebuilt while translating)",
+    "已保存 {n} 条词条；{bad} 行看不懂已忽略（要写成 原文=译名）":
+        "Saved {n} entries; {bad} unreadable line(s) ignored (use source=target)",
     "保存失败：{err}": "Save failed: {err}",
     "日志": "Logs",
     "导出日志压缩包…": "Export Log Archive…",

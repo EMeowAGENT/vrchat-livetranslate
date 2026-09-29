@@ -512,6 +512,37 @@ def test_gui_save_failure_is_visible() -> None:
     print("  ✓ 写盘失败 → 界面如实报错（不回显「已保存」）")
 
 
+def test_gui_unreadable_lines_are_visible() -> None:
+    """格式看不懂的行：解析照旧忽略，但**必须报出来**——以前静默丢掉，用户以为「保存没反应」。"""
+    import vlt.gui as gui_mod
+
+    text = ("VRChat=VRChat\n"
+            "逆袭：Nixi\n"          # 用了全角冒号：最容易踩的那种
+            "# 注释行\n"
+            "\n"
+            "只有左边=\n"
+            "=只有右边\n"
+            "坏行\n")
+    mapping = gui_mod._parse_glossary_lines(text)
+    issues = gui_mod._glossary_line_issues(text)
+    assert mapping == {"VRChat": "VRChat"}, mapping
+    assert [n for n, _ in issues] == [2, 5, 6, 7], issues
+    print(f"  ✓ 解析照旧忽略格式错误行，但行号报得出来：{[n for n, _ in issues]}")
+
+    body = BASE_BODY.replace("directions:", "glossary:\n  \"旧词\": \"Old\"\n\ndirections:")
+    with _gui_with_config(body) as (gui, cfg_path):
+        gui._glossary_text.delete("1.0", "end")
+        gui._glossary_text.insert("1.0", text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gui._on_save_glossary()
+        status = gui._glossary_status.cget("text")
+        style = gui._glossary_status.cget("style")
+        assert "忽略" in status and "1 条" in status and style == "Warn.TLabel", (status, style)
+        saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8")).get("glossary")
+        assert saved == {"VRChat": "VRChat"}, saved
+    print(f"  ✓ 界面用警告样式提示「{status}」，配置里只落有效词条")
+
+
 def main() -> int:
     tests = [
         test_parse_and_render_lines,
@@ -526,6 +557,7 @@ def main() -> int:
         test_gui_glossary_roundtrip,
         test_gui_settings_open_rereads_disk,
         test_gui_save_failure_is_visible,
+        test_gui_unreadable_lines_are_visible,
     ]
     print("test_glossary:")
     failed = 0
