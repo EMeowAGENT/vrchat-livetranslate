@@ -584,6 +584,38 @@ class Engine:
         绝不能出现「界面上词库已保存、实际还是老词库」这种静默不一致。
         """
         self._cfg.session_base["glossary"] = dict(glossary or {})
+        return self._apply_hotwords_change("专有词库")
+
+    def set_direction_hotwords(self, name: str, hotwords: dict[str, str],
+                               label: str = "") -> bool:
+        """运行时更新**某一条腿**的热词表（同名词条覆盖全局那几条）。
+
+        与 `set_glossary` 的唯一区别是**写哪儿**：全局写 `session_base["glossary"]`，
+        方向级写 `directions[name].hotwords` —— 合并口径仍是唯一那处
+        `config.merge_hotwords`（方向级优先），两条腿都从它取，不另起一套。
+
+        `label` 只用于给用户看的提示（界面传「我说」/「别人说」，
+        别把内部 key `mine`/`theirs` 甩到状态栏里）。
+
+        为什么要这个入口：两个方向的目标语言通常不同 —— 同一个社团名在
+        「别人说 → 中文」要中文译名，在「我说 → 英文」却要保持原样。写进全局那份
+        会同时作用到两侧（实测过反方向的译名被换掉），所以得能分开改。
+        """
+        d = self._cfg.directions.get(name)
+        if d is None:
+            # 未知方向：宁可返回 False + 留痕，也不能静默成功 ——
+            # 调用方（界面）会把「没生效」如实显示出来。
+            print(f"[engine] ⚠️ 配置里没有方向 {name!r}，热词未生效（只改了磁盘，内存里没这个方向）",
+                  flush=True)
+            return False
+        d.hotwords = dict(hotwords or {})
+        return self._apply_hotwords_change(f"「{label or name}」的热词")
+
+    def _apply_hotwords_change(self, what: str) -> bool:
+        """词库类改动共用的收尾：没会话就只改内存；有会话就按预算重建。
+
+        `what` 是给用户看的名字（进警告文案），调用方给。
+        """
         if self._session is None or self._loop is None or not self._loop.is_running():
             return True          # 还没开会话：下次创建时自然带上新词库
         now = time.monotonic()
@@ -591,7 +623,7 @@ class Engine:
         recent = [t for t in self._connect_ts if now - t < 60]
         if len(recent) >= rpm:
             self._events.on_status("warn",
-                f"专有词库已保存，但连接预算不足（{len(recent)}/{rpm} min），"
+                f"{what}已保存，但连接预算不足（{len(recent)}/{rpm} min），"
                 f"本次未重建会话；停止后重新开始翻译即可生效")
             return False
         asyncio.run_coroutine_threadsafe(self._rebuild_session(), self._loop)

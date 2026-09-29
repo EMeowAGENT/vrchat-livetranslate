@@ -197,13 +197,47 @@ def _yaml_set_mapping(text: str, path: list[str], mapping: dict[str, str]) -> st
     if not mapping:
         return text
 
-    indent = 2 * (len(path) - 1)
     leaf = path[-1]
-    pad = " " * indent
     lines = text.split("\n")
+
+    # ⚠️ 必须**逐级定位父块**再在里面找那一行，绝不能全文件按缩进找：
+    #    同一层里可能另有一张同名的表 —— `directions.mine.hotwords` 与
+    #    `directions.theirs.hotwords` 缩进都是 4 空格，全文件找第一个匹配就会改**错表**
+    #    （实测踩过：存「别人说」的词条，结果写进了「我说」那张，目标那张留成 `{}`）。
+    #    顺带：`hotwords:` 这种「值是映射、自己独占一行」的写法也匹配得到，
+    #    而它往往是兄弟块里的同名键，正是最容易踩的那一脚。
+    def _child_span(key: str, indent: int, lo: int, hi: int):
+        """在 [lo,hi) 里找缩进为 indent 的 `key:`；返回 (行号, 子块起, 子块止)。"""
+        head = re.compile(rf"^(\s*){re.escape(key)}:(\s*)([^#\n]*)(\s*#.*)?$")
+        for i in range(lo, hi):
+            stripped = lines[i].lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if len(lines[i]) - len(stripped) != indent or head.match(lines[i]) is None:
+                continue
+            child_hi = hi
+            for j in range(i + 1, hi):
+                s2 = lines[j].lstrip()
+                if not s2 or s2.startswith("#"):
+                    continue
+                if len(lines[j]) - len(s2) <= indent:
+                    child_hi = j
+                    break
+            return i, i + 1, child_hi
+        return None
+
+    lo, hi, indent = 0, len(lines), 0
+    for key in path[:-1]:
+        found = _child_span(key, indent, lo, hi)
+        if found is None:
+            return text          # 父级找不到（上一步刚写过，理论不可达）→ 宁可没生效，也不乱改
+        _, lo, hi = found
+        indent += 2
+
+    pad = " " * indent
     pat = re.compile(rf"^{re.escape(pad)}{re.escape(leaf)}:\s*(\{{\}})?\s*(#.*)?$")
-    for i, line in enumerate(lines):
-        m = pat.match(line)
+    for i in range(lo, hi):
+        m = pat.match(lines[i])
         if m is None:
             continue
         comment = (m.group(2) or "").strip()
