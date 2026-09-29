@@ -141,7 +141,7 @@ echo "    源码已就位"
 #
 # 这是 Windows 版 `--exclude-module` 的镜像操作，必须做，而且必须在这里做：
 # AppImage 里的 `vlt/` 是**明文 .py**，整份拷进去就等于把 Windows 那套也发出去了。
-#   * vlt/platform/win.py        —— WASAPI / pycaw / Win32（`platform/__init__.py`
+#   * vlt/platform/win.py        —— WASAPI / Win32（`platform/__init__.py`
 #                                   只在 IS_WINDOWS 时才 import 它，删掉安全）
 #   * vlt/output/openvr_overlay.py —— SteamVR 手腕屏后端
 # 漏删的后果不是「变胖」而是**边界破功**：`scripts/check_platform_purity.py

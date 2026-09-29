@@ -46,7 +46,7 @@ ICON = REPO / "assets" / "app.ico"        # exe 图标（16/24/32/48/64/128/256 
 
 # 按需导入的库（静态分析看不到）→ 显式声明
 HIDDEN = [
-    "pyaudiowpatch", "pycaw", "comtypes", "openvr", "sounddevice", "miniaudio",
+    "pyaudiowpatch", "openvr", "sounddevice", "miniaudio",
     "pythonosc", "websockets", "yaml", "PIL", "numpy",
     "vlt", "vlt.paths", "vlt.config", "vlt.credentials", "vlt.crashlog",
     "vlt.devices", "vlt.engine", "vlt.gui", "vlt.app",
@@ -56,7 +56,7 @@ HIDDEN = [
     "vlt.platform", "vlt.platform.base", "vlt.platform.win",
 ]
 # 带二进制/数据文件的库 → 连数据一起收
-COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "comtypes", "openvr", "pythonosc", "pycaw"]
+COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "openvr", "pythonosc"]
 
 # ⚠️ Windows 产物里**不允许**出现 Linux 独占实现 —— 这条要求不能靠人记，靠构建排除：
 #   * vlt.platform.linux       —— PipeWire 设备枚举（pw-dump）+ 采集/虚拟声卡
