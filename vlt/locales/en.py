@@ -104,6 +104,11 @@ STRINGS: dict[str, str] = {
 
     # ---- 设置弹窗 ----
     "设置": "Settings",
+    # 分页标签（Notebook tab）
+    "常规": "General",
+    "音频": "Audio",
+    "词库": "Glossary",
+    "关于": "About",
     "界面语言": "Interface Language",
     "界面语言在重启程序后生效": "Takes effect after restarting the app",
     "已保存：重启程序后界面将切换为 {lang}":
@@ -178,6 +183,8 @@ STRINGS: dict[str, str] = {
     "导出日志压缩包": "Export Log Archive",
     "ZIP 压缩包": "ZIP Archive",
     "所有文件": "All Files",
+    "开发者": "Developer",
+    "由可爱的赛博巫师和他的朋友们 开发": "Made by the lovely Cyber Wizard and friends",
     "软件更新": "Software Update",
     "检查更新": "Check for Updates",
     "当前版本 v{ver} · 启动时会自动检查一次":
