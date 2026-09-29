@@ -27,7 +27,7 @@ from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono
 from .session.base import SessionConfig, TextDelta, create_session
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
 from .textin import DEFAULT_TIMEOUT_S as DEFAULT_TEXT_TIMEOUT_S
-from .textin import TextTranslateError, split_for_chatbox, translate_text
+from .textin import TextTranslateError, split_for_chatbox, terms_from_mapping, translate_text
 from .tts import DEFAULT_MODEL as DEFAULT_TTS_MODEL
 from .tts import DEFAULT_TIMEOUT_S as DEFAULT_TTS_TIMEOUT_S
 from .tts import DEFAULT_VOICE as DEFAULT_TTS_VOICE
@@ -403,6 +403,31 @@ class Engine:
                     f"连接预算不足（{len(recent)}/{rpm} min），请稍后再试")
                 return False
             asyncio.run_coroutine_threadsafe(self._rebuild_session(), self._loop)
+        return True
+
+    def set_glossary(self, glossary: dict[str, str]) -> bool:
+        """运行时更新**全局专有词库**：立即生效，但要重建会话。
+
+        为什么必须重建：`corpus.phrases` 是 `session.update` 下发的会话级配置，
+        服务端不会中途换词库（实时那条腿没有「热更新词库」的事件）。所以这里的
+        语义与 `set_languages` 完全一致 —— 改内存 → 重建会话 → 新词库上线。
+        打字那条腿不用重建：它每次调用都现读配置。
+
+        返回 False 表示**这次没能生效**（预算不足），调用方必须让用户看见，
+        绝不能出现「界面上词库已保存、实际还是老词库」这种静默不一致。
+        """
+        self._cfg.session_base["glossary"] = dict(glossary or {})
+        if self._session is None or self._loop is None or not self._loop.is_running():
+            return True          # 还没开会话：下次创建时自然带上新词库
+        now = time.monotonic()
+        rpm = int(self._cfg.session_base.get("max_new_sessions_per_minute", 4))
+        recent = [t for t in self._connect_ts if now - t < 60]
+        if len(recent) >= rpm:
+            self._events.on_status("warn",
+                f"专有词库已保存，但连接预算不足（{len(recent)}/{rpm} min），"
+                f"本次未重建会话；停止后重新开始翻译即可生效")
+            return False
+        asyncio.run_coroutine_threadsafe(self._rebuild_session(), self._loop)
         return True
 
     # ---------------------------------------------------------------- 内部生命周期
@@ -814,6 +839,9 @@ class Engine:
                 model=str(tcfg.get("model") or DEFAULT_TEXT_MODEL),
                 api_key=str(self._cfg.session_base.get("api_key") or ""),
                 timeout=float(tcfg.get("timeout_s", DEFAULT_TEXT_TIMEOUT_S)),
+                # 专有词库：与说话那条腿同一份（全局 + 方向级覆盖），
+                # 让社团名/人名/术语按用户指定译法走，而不是被模型自由发挥。
+                terms=terms_from_mapping(self._cfg.merged_hotwords(self._direction)),
             )
         except TextTranslateError as exc:
             self._events.on_status("error", f"打字翻译失败：{exc}")
