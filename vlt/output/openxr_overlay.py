@@ -196,6 +196,22 @@ def layer_geometry(width_m: float, aspect: float, curvature: float) -> dict:
             "pose_offset": (0.0, 0.0, width_m / angle)}
 
 
+# 柱面合成层是 Khronos 扩展（`XR_KHR_composition_layer_cylinder`），**并非所有运行时
+# 都提供**。运行时没有它、却还构造 `CompositionLayerCylinderKHR` 的话，`xrEndFrame`
+# 会整帧失败 → 手腕屏这条腿整个没了。所以按「运行时实际启用的扩展」决定用不用柱面，
+# 拿不到就退回平面层，并在调用点留一行 `[overlay:xr]`（降级不许静默）。
+CYLINDER_EXT = "XR_KHR_composition_layer_cylinder"
+
+
+def effective_curvature(curvature: float, extensions: list[str]) -> float:
+    """按**运行时实际启用**的扩展决定这一帧用不用柱面层。
+
+    没有 `XR_KHR_composition_layer_cylinder` 时把 curvature 归 0 —— `layer_geometry()`
+    据此返回平面 `quad`。用户看到的仍是不弯的面板，而不是整条手腕屏消失。
+    """
+    return curvature if CYLINDER_EXT in extensions else 0.0
+
+
 def should_rebuild(old: OverlayConfig, new: OverlayConfig) -> tuple[bool, bool]:
     """配置热重载时判断要做什么：返回 `(几何/锚点变了, 渲染参数变了)`。
 
@@ -425,6 +441,10 @@ class XrOverlaySession:
         # 「整层 alpha + 转字节」的记忆化缓存：(帧, alpha, bytes)。
         # 帧循环每帧重提同一张图，没有它就要每帧白跑一次 LUT。
         self._prep: tuple[Any, float, bytes] | None = None
+        # 本会话**实际启用**的扩展名（`create()` 传进来的那批）。`submit()` 靠它判断
+        # 运行时到底支不支持柱面层，不支持就退回平面（见 `effective_curvature()`）。
+        self.extensions: list[str] = []
+        self._cylinder_warned = False        # 柱面降级只在第一次留痕，不每帧刷日志
         # 会话状态（IDLE→READY→SYNCHRONIZED→VISIBLE→FOCUSED）。**很关键**：
         # `xrSyncActions` 在非 FOCUSED 时会直接抛 `XR_ERROR_SESSION_NOT_FOCUSED`
         # （Monado 源码 oxr_input.c 明写 "Can only call this function if the session
@@ -436,6 +456,7 @@ class XrOverlaySession:
         """建 instance → system → overlay session（三层都建，任一层失败就抛）。"""
         import xr
         self._xr = xr
+        self.extensions = list(extensions)   # 记下真正启用的那批（submit 判断柱面能力用）
         self.instance = xr.create_instance(xr.InstanceCreateInfo(
             application_info=xr.ApplicationInfo(application_name="VRChat LiveTranslate",
                                                 application_version=1),
@@ -691,7 +712,13 @@ class XrOverlaySession:
             swapchain=self.swapchain,
             image_rect=xr.Rect2Di(offset=xr.Offset2Di(0, 0),
                                   extent=xr.Extent2Di(w, h)))
-        geo = layer_geometry(cfg.width_m, w / h if h else 1.0, cfg.curvature)
+        curv = effective_curvature(cfg.curvature, self.extensions)
+        if cfg.curvature > 0.0 and curv == 0.0 and not self._cylinder_warned:
+            self._cylinder_warned = True        # 只留一次痕，别每帧刷
+            log.warning("[overlay:xr] ⚠️ 运行时没有 %s 扩展 → 弯曲度 %.2f 退回平面层"
+                        "（面板仍在，只是不弯；要弯曲请改用支持该扩展的运行时）",
+                        CYLINDER_EXT, cfg.curvature)
+        geo = layer_geometry(cfg.width_m, w / h if h else 1.0, curv)
         # ★ 柱面层的 pose 是**圆柱的轴（圆心）**，不是面板位置：不补偿的话圆心会落在
         #   用户设的位置、而可见弧面整体沿局部 −Z 漂出 radius 远（实测现象就是
         #   「圆点跑到我设的位置、面板飘走了」）。把轴沿面板局部 +Z 挪 radius，
@@ -954,18 +981,24 @@ class OpenXrOverlay:
 
     @staticmethod
     def _extensions() -> list[str]:
-        """挑出可用的扩展（运行时不支持的就不启用，免得 create_instance 直接失败）。"""
+        """挑出可用的扩展（运行时不支持的就不启用，免得 create_instance 直接失败）。
+
+        ⚠️ 枚举失败时**不猜**：只请求「没有它这条腿根本起不来」的必需项，不把可选的
+        柱面扩展（`CYLINDER_EXT`）算进去。请求一个运行时没有的扩展会让 `create_instance`
+        直接失败 —— 那是**整条手腕屏消失**，比「不弯」严重得多。柱面的能力判定改由
+        `submit()` 按实际启用的扩展做，拿不到就退回平面（`effective_curvature()`）。
+        """
         import xr
+        required = ["XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable"]
         try:
             have = set()
             for e in xr.enumerate_instance_extension_properties():
                 n = e.extension_name
                 have.add(n.decode() if isinstance(n, bytes) else str(n))
         except Exception:  # noqa: BLE001
-            have = set()
-        want = ["XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable",
-                "XR_KHR_composition_layer_cylinder"]
-        return [e for e in want if not have or e in have]
+            return list(required)            # 枚举不出来就只赌必需项，不赌柱面
+        want = required + [CYLINDER_EXT]
+        return [e for e in want if e in have]
 
     def close(self) -> None:
         """请求 XR 线程退出并等它收尾。

@@ -26,9 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from vlt.output.openxr_overlay import (  # noqa: E402
+    CYLINDER_EXT,
     TRACKER_ROLES,
+    OpenXrOverlay,
     anchor_paths,
     apply_overlay_alpha,
+    effective_curvature,
     euler_to_quaternion,
     layer_alpha_flags,
     layer_geometry,
@@ -218,6 +221,83 @@ def test_cylinder_pose_offset_rotates_with_panel():
     assert abs(off[0]) < 1e-12 and abs(off[1]) < 1e-12
     assert abs(off[2] - r0["radius"]) < 1e-12
     print("  柱面 pose 偏移 OK（随面板 rot 旋转 · 弧面中点回到原位）")
+
+
+def test_effective_curvature_degrades_without_extension():
+    """★ #26-5：运行时没有柱面扩展 → 这一帧按平面层提交，**不许**硬构造柱面层。
+
+    柱面合成层是 `XR_KHR_composition_layer_cylinder` 扩展；拿不到还构造的话
+    `xrEndFrame` 会整帧失败（整条手腕屏没了），而这里要的只是「不弯」。
+    """
+    aspect, w = 1024 / 440, 0.23
+    assert effective_curvature(0.3, [CYLINDER_EXT]) == 0.3, "有扩展就该保留弯曲度"
+    assert effective_curvature(0.3, ["XR_EXTX_overlay"]) == 0.0, "没扩展必须归 0"
+    assert effective_curvature(0.3, []) == 0.0
+    assert effective_curvature(0.0, []) == 0.0 and effective_curvature(-1.0, []) == 0.0
+
+    # 归 0 之后几何确实退回平面（这才是 submit 里真正会走的路）
+    assert layer_geometry(w, aspect, effective_curvature(0.3, []))["kind"] == "quad"
+    assert layer_geometry(w, aspect, effective_curvature(0.3, [CYLINDER_EXT]))["kind"] == "cylinder"
+    print("  柱面扩展缺失 → effective_curvature 归 0、退回平面 OK")
+
+
+def test_extensions_does_not_gamble_on_cylinder_when_unknown():
+    """★ #26-5：枚举失败时**不赌**可选扩展 —— 只请求必需项，绝不带上柱面。
+
+    请求一个运行时没有的扩展会让 `create_instance` 直接失败（整条腿消失），
+    比「不弯」严重得多。
+    """
+    import types
+
+    class _E:
+        def __init__(self, name: str) -> None:
+            self.extension_name = name.encode()
+
+    fake = types.ModuleType("xr")
+    fake.enumerate_instance_extension_properties = lambda: [  # type: ignore[attr-defined]
+        _E("XR_EXTX_overlay"), _E("XR_KHR_opengl_enable"), _E("XR_MNDX_egl_enable")]
+
+    saved = sys.modules.get("xr")
+    sys.modules["xr"] = fake
+    try:
+        got = OpenXrOverlay._extensions()          # noqa: SLF001
+        assert CYLINDER_EXT not in got, f"运行时没报柱面扩展却启用了它：{got}"
+        assert "XR_EXTX_overlay" in got, "必需项不该被漏掉"
+
+        # 枚举抛异常（旧实现走「全都要」，会把柱面也塞进去）→ 只赌必需项
+        def boom():
+            raise RuntimeError("模拟：枚举设备失败")
+
+        fake.enumerate_instance_extension_properties = boom  # type: ignore[attr-defined]
+        got2 = OpenXrOverlay._extensions()         # noqa: SLF001
+        assert CYLINDER_EXT not in got2, f"枚举失败时不该赌柱面：{got2}"
+        assert "XR_KHR_opengl_enable" in got2, "枚举失败也要保住必需项"
+
+        # 运行时确实报了柱面扩展 → 保留（降级只在真拿不到时发生）
+        fake.enumerate_instance_extension_properties = lambda: [  # type: ignore[attr-defined]
+            _E(CYLINDER_EXT), _E("XR_EXTX_overlay"), _E("XR_KHR_opengl_enable"),
+            _E("XR_MNDX_egl_enable")]
+        assert CYLINDER_EXT in OpenXrOverlay._extensions()  # noqa: SLF001
+    finally:
+        if saved is None:
+            sys.modules.pop("xr", None)
+        else:
+            sys.modules["xr"] = saved
+    print("  _extensions 不赌柱面 OK（枚举失败只留必需项 · 真有扩展才启用）")
+
+
+def test_submit_records_and_uses_enabled_extensions():
+    """★ #26-5 接线：`submit()` 用**本会话实际启用的扩展**判定柱面能力。
+
+    纯逻辑测试跑不了真 XR，但可以扫源码钉住「submit 里确实调了 effective_curvature
+    并用 self.extensions」，避免哪天有人把它改回无条件的 `cfg.curvature`。
+    """
+    src = (ROOT / "vlt" / "output" / "openxr_overlay.py").read_text(encoding="utf-8")
+    assert "effective_curvature(cfg.curvature, self.extensions)" in src, \
+        "submit() 必须按实际启用的扩展决定弯曲度"
+    assert "self.extensions = list(extensions)" in src, \
+        "create() 必须记下实际启用的扩展"
+    print("  submit/create 接线 OK（记下扩展 · 按扩展决定弯曲度）")
 
 
 def test_should_rebuild_detects_changes():
@@ -444,6 +524,9 @@ if __name__ == "__main__":
     test_swapchain_format_prefers_rgba8()
     test_layer_geometry_matches_windows_curvature()
     test_cylinder_pose_offset_rotates_with_panel()
+    test_effective_curvature_degrades_without_extension()
+    test_extensions_does_not_gamble_on_cylinder_when_unknown()
+    test_submit_records_and_uses_enabled_extensions()
     test_should_rebuild_detects_changes()
     test_layer_alpha_flags_value()
     test_apply_overlay_alpha_scales_only_alpha()
