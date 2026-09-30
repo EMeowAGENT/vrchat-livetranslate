@@ -3710,16 +3710,16 @@ class TranslationGUI:
         （兜底那次是为了保证「窗口关着时绝不可能还开着采集」—— 万一有别的路径
         把窗口藏起来而没走 `_close_settings`，这里最迟一跳就把它停掉）。
 
-        失败**不自动重试**：探针开不了设备时自己留一行 `[level]` 日志然后停下，
-        这里看到「有个已经停了的探针」就原样留着 —— 否则每 100ms 重试一次、
-        把日志刷成噪声。用户取消勾选 / 关窗 / 开始再停止翻译都会把它丢掉，
-        那时自然会再试一次。
+        「目标不在 / 目标变了」由**探针自己在后台低频处理**（`LevelProbe` 里
+        每 `RETRY_S` 重试、每 `RECHECK_S` 复查采集目标）—— 界面这里不重建对象：
+        这样不会每 100ms 刷一行日志，也不需要界面去懂 PipeWire 的目标集合。
+        只有「用户取消勾选 / 关窗 / 开始翻译」才会把探针整个丢掉、设备立刻释放。
         """
         if not self._gate_probe_wanted():
             self._stop_gate_probe()
             return
         if self._gate_probe is not None:
-            return                          # 在跑就别动；跑失败了也不重试（见上）
+            return                          # 在跑（或在后台等目标）就别动它
         capture_cfg = (self._cfg.output or {}).get("capture") or {}
         name = capture_cfg.get("loopback_device") or None
         probe = LevelProbe(device_name=name)
@@ -3755,9 +3755,9 @@ class TranslationGUI:
                     lvl = max(lvl, float(g.level_db))
             return lvl
         probe = self._gate_probe
-        # 探针开不了设备 / 读取异常时会自己停下并留痕（LevelProbe.last_error）——
-        # 这里跟着显示「—」，绝不拿一个已经死掉的来源假装有电平。
-        if probe is not None and probe.running:
+        # 探针开不了设备（在后台低频重试）/ 还没有第一块数据时 `has_data=False` / 读取
+        # 异常停下 —— 这几种都显示「—」，绝不拿一个没有可信读数或已经死掉的来源假装有电平。
+        if probe is not None and probe.running and probe.has_data:
             return float(probe.level_db)
         return None
 

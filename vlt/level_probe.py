@@ -24,6 +24,17 @@
 同一时刻**只允许一路**电平来源：有引擎就用引擎的（见 gui 侧的优先级），
 再开一路 loopback 会与引擎抢同一个采集端点。
 
+## 必须复查采集目标（Linux 的坑，实测）
+
+`pw-record --target=<serial>` 在**目标节点消失后不会退出**：session manager 会按
+`node.autoconnect` 把它**回落到默认源（麦克风）**。于是 VRChat 中途退出时，不复查的
+探针既不停、也不冻住，而是继续产数据 —— 读数活得好好的，但那其实是麦克风。
+用户照着它调门限，调出来的门限是照着麦克风调的。
+
+所以探针照抄引擎那条腿的做法（`engine._pump_vrchat_capture`）：每 `VRCHAT_RECHECK_S`
+复查一次 `pick_vrchat_targets()` 的 `serial` 集合，**变了立刻关掉当前一路、按新目标
+重开**；目标没了就进「等待」并低频重试（VRChat 再起自动接上）。
+
 ## 线程模型
 
 与 `Engine` 一致：daemon 线程里跑一个自己的 asyncio 事件循环。这不是可选项 ——
@@ -42,12 +53,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import Any, Callable
 
 from . import platform
 from .engine import (
     CHUNK_BYTES,
     LEVEL_FLOOR_DB,
+    VRCHAT_RECHECK_S,
     chunk_level_db,
     pick_loopback_target,
     pick_vrchat_targets,
@@ -62,6 +75,30 @@ LOG = "[level]"
 # 取 0.2s：远小于引擎的 1.0s，关设置窗时不会有可感的卡顿。
 READ_TIMEOUT_S = 0.2
 JOIN_TIMEOUT_S = 3.0
+# 复查采集目标的周期：与引擎那条腿同一常数，避免两条路对「流还在不在」判断不一致。
+RECHECK_S = VRCHAT_RECHECK_S
+# 开不出设备时的低频重试周期。取 5s：既能自愈（先开窗、后启动 VRChat），
+# 又不至于把日志/CPU 刷成噪声。
+RETRY_S = 5.0
+
+# 「没传这个参数」与「显式传 None（= 不复查）」要分得开，所以用哨兵而不是 None。
+_UNSET = object()
+
+
+def vrchat_target_signature() -> str:
+    """Linux：当前 VRChat 输出流集合的签名（`serial` 排序拼接）；空字符串 = 没目标。
+
+    与引擎腿同一口径（`engine._pump_vrchat_capture` 里的 `sorted(t.id ...)`）：
+    探针靠它判定「目标流没了 / 增减了」，进而关掉已经回落到麦克风的 `pw-record`。
+    """
+    return "|".join(sorted(t.id for t in pick_vrchat_targets()))
+
+
+def _describe_sig(sig: str | None) -> str:
+    """签名 → 日志里好读的「N 路 / 无目标」。"""
+    if not sig:
+        return "无目标"
+    return f"{sig.count('|') + 1} 路"
 
 
 def open_level_source(device_name: str | None = None) -> Any:
@@ -72,7 +109,7 @@ def open_level_source(device_name: str | None = None) -> Any:
     （见 `engine._run_loopback_linux`），探针必须抓同一个东西，否则用户按这条电平
     调出来的门限对不上真正被上送的音频。
 
-    打不开一律**抛异常**（由 `LevelProbe` 统一留痕）：绝不返回 None 让调用方猜原因。
+    打不开一律**抛异常**（由 `LevelProbe` 统一留痕/重试）：绝不返回 None 让调用方猜原因。
     """
     backend = platform.capture_backend()
     if platform.IS_LINUX:
@@ -101,21 +138,42 @@ class LevelProbe:
     每 100ms 掉 1.5dB），这样「有引擎」与「用探针」两条路的条子观感一模一样；
     两边各做一层峰保会双重衰减、且与引擎那条路对不上。
 
+    `has_data`：**读到第一块真数据**之前为 False —— 界面据此显示「—」。
+    起线程时 `level_db` 还是地板值，直接当读数画出来会变成假的 `-70 dB`
+    （那不是读数，是把 -120 的地板 clamp 到界面下限）。
+
+    `recheck` 依赖注入：返回「当前采集目标」的签名（Linux 默认
+    `vrchat_target_signature`）。非 None 时线程每 `recheck_s` 复查一次，
+    **签名变了就关掉当前一路、按新目标重开**（VRChat 退出 / 播放流增减都算）。
+    传 None = 不复查（Windows 的端点由用户选、不随 PipeWire 图变；测试也用）。
+
+    `retry_s`：**低频自愈**。开不出设备时（VRChat 还没跑 / PipeWire 还没就绪）
+    不退出，每 `retry_s` 重试一次；同一失败理由只留一行日志、不刷屏。
+
     `opener` 依赖注入：默认打开真设备（`open_level_source`），测试塞假源 ——
     离线测试**绝不许**碰真声卡（CI 机器上根本没有）。
 
-    跨线程只共享标量（float / int / str），CPython 里读写原子、不会读到半截值 ——
+    跨线程只共享标量（float / int / bool / str），CPython 里读写原子、不会读到半截值 ——
     与 `gui._apply_gate_live` 同一取舍，不加锁。
     """
 
     def __init__(self, opener: Callable[[], Any] | None = None, *,
                  device_name: str | None = None,
+                 recheck: Callable[[], str] | None | object = _UNSET,
                  read_timeout: float = READ_TIMEOUT_S,
-                 join_timeout: float = JOIN_TIMEOUT_S) -> None:
+                 join_timeout: float = JOIN_TIMEOUT_S,
+                 recheck_s: float = RECHECK_S,
+                 retry_s: float = RETRY_S) -> None:
         self._opener = opener or (lambda: open_level_source(device_name))
+        if recheck is _UNSET:
+            recheck = vrchat_target_signature if platform.IS_LINUX else None
+        self._recheck: Callable[[], str] | None = recheck  # type: ignore[assignment]
         self._read_timeout = float(read_timeout)
         self._join_timeout = float(join_timeout)
+        self._recheck_s = float(recheck_s)
+        self._retry_s = float(retry_s)
         self.level_db = LEVEL_FLOOR_DB     # 最近一块的电平（dBFS）
+        self.has_data = False              # 读到过第一块真数据吗（界面据此显示「—」）
         self.last_error: str | None = None  # 失败原因（已留痕的那一行），没失败为 None
         self.chunks = 0                    # 本次采到的块数（停止时写进日志，好核对）
         self._stop_evt = threading.Event()
@@ -127,12 +185,19 @@ class LevelProbe:
 
     @property
     def running(self) -> bool:
-        """采集线程是否还活着（开设备失败 / 读取异常 / stop() 之后都是 False）。"""
+        """采集线程是否还活着。
+
+        `stop()` 与读取异常之后是 False；**等待目标（VRChat 没跑）时仍为 True** ——
+        那是「暂时没得采，还在等」，不是「死了」。界面靠 `has_data` 决定显示「—」。
+        """
         return self._running
 
     def start(self) -> None:
-        """起 daemon 线程开始采集。重复调用无效 —— 一个探针只用一次，失败不自我重试
-        （要不要再来一次由界面决定：见 `_sync_gate_level_probe` 的说明）。"""
+        """起 daemon 线程开始采集。重复调用无效。
+
+        线程内部会自己处理「目标不在 / 目标变了」：低频重试 + 复查重开
+        （见类文档）。只有 stop / 读取异常才真正结束。
+        """
         if self._thread is not None:
             return
         self._running = True
@@ -165,33 +230,95 @@ class LevelProbe:
             self._running = False
 
     async def _pump(self) -> None:
-        try:
-            source = self._opener()
-        except Exception as exc:  # noqa: BLE001
-            self._fail(f"打不开系统声采集，电平条不可用：{type(exc).__name__}: {exc}")
-            return
-        self._source = source
-        try:
-            while not self._stop_evt.is_set():
-                try:
-                    chunk = await source.read(timeout=self._read_timeout)
-                except Exception as exc:  # noqa: BLE001
-                    self._fail(f"读取系统声失败，电平条停止更新："
-                               f"{type(exc).__name__}: {exc}")
-                    return
-                if chunk is None:
-                    # 超时 = 「还活着但暂时没数据」：端点静音时就是这么表现的。
-                    # 必须显式写地板值 —— 否则读数会**冻在**最后一块上，
-                    # 用户看着一条不动的电平以为还在出声。
+        """外层循环：目标不在就等（低频重试）；目标变了就按新目标重开。
+
+        只有三种情况让线程真正退出：① 用户 stop；② 读取异常；③ 线程自身异常。
+        """
+        while not self._stop_evt.is_set():
+            try:
+                source = self._opener()
+            except Exception as exc:  # noqa: BLE001
+                self._enter_waiting(exc)
+                if not await self._sleep(self._retry_s):
+                    break
+                continue
+            self._source = source
+            self.has_data = False          # 刚开的一路：读到第一块之前不许假装有电平
+            self._note_open()
+            sig = self._recheck() if self._recheck is not None else None
+            try:
+                again = await self._read_until_change(source, sig)
+            finally:
+                self._close_source()
+            if not again:
+                break                      # 读取异常：停下留痕，不自动重试
+            # 目标变了：立刻回外层重开（不小睡，尽量少丢一小段）
+
+    async def _read_until_change(self, source: Any, sig: str | None) -> bool:
+        """读块 → 写 `level_db`，直到 stop / 读取异常 / 目标签名变化。
+
+        返回 True = 目标变了、外层该重开；False = 该停下（stop 或读取异常）。
+        """
+        last_check = time.monotonic()
+        while not self._stop_evt.is_set():
+            try:
+                chunk = await source.read(timeout=self._read_timeout)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(f"读取系统声失败，电平条停止更新："
+                           f"{type(exc).__name__}: {exc}")
+                return False
+            if chunk is None:
+                # 超时 = 「还活着但暂时没数据」：端点静音时就是这么表现的。
+                # 有数据之后必须显式写地板值 —— 否则读数会**冻在**最后一块上；
+                # 还没读到第一块就保持「—」（has_data 仍 False，不假装有电平）。
+                if self.has_data:
                     self.level_db = LEVEL_FLOOR_DB
-                    continue
+            else:
                 pcm16 = to_16k_mono(chunk, source.rate, source.channels)
                 self.level_db = chunk_level_db(pcm16)
+                self.has_data = True
                 self.chunks += 1
-        finally:
-            self._close_source()
+            if sig is not None and self._recheck is not None:
+                now = time.monotonic()
+                if now - last_check >= self._recheck_s:
+                    last_check = now
+                    now_sig = self._recheck()
+                    if now_sig != sig:
+                        print(f"{LOG} 采集目标变化（{_describe_sig(sig)} → "
+                              f"{_describe_sig(now_sig)}）→ 重开采集", flush=True)
+                        return True
+        return False
 
     # ---------------------------------------------------------------- 内部
+
+    async def _sleep(self, seconds: float) -> bool:
+        """可被 `stop()` 及时打断的等待。返回 False = 收到停止位、调用方该退出。
+
+        分片睡（≤0.1s 一片）是必须的：整段 `asyncio.sleep(retry_s)` 会让
+        `stop()` 在 Tk 主线程上干等一个 join 超时，关窗会有可感的卡顿。
+        """
+        end = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < end:
+            if self._stop_evt.is_set():
+                return False
+            await asyncio.sleep(min(0.1, end - time.monotonic()))
+        return not self._stop_evt.is_set()
+
+    def _enter_waiting(self, exc: Exception) -> None:
+        """打不开设备：进「等待目标」状态（保留低频自愈），同一理由只留一行日志。"""
+        self.has_data = False
+        self.level_db = LEVEL_FLOOR_DB
+        msg = f"打不开系统声采集，电平条不可用：{type(exc).__name__}: {exc}"
+        if self.last_error != msg:         # 理由没变就不重复打，避免刷屏
+            self.last_error = msg
+            print(f"{LOG} ❌ {msg}（{self._retry_s:g}s 后重试；关窗或取消勾选即停止）",
+                  flush=True)
+
+    def _note_open(self) -> None:
+        """一路真的开出来了：清掉失败留痕；若是从失败/等待里恢复，补一行日志。"""
+        if self.last_error is not None:
+            print(f"{LOG} ✅ 已接上采集目标，继续显示实时电平", flush=True)
+        self.last_error = None
 
     def _close_source(self) -> None:
         src = self._source
@@ -207,9 +334,11 @@ class LevelProbe:
     def _fail(self, msg: str) -> None:
         """失败留痕（仓库硬约定：降级路径不许静默）。
 
-        只打这一行、**不重试**：设备开不了就是开不了，每 100ms 刷一行日志只会把
-        真问题淹掉。界面看到 `running=False` 就把读数显示成「—」。
+        只打这一行、并**结束本次采集**：读取异常按 PR#21 的取舍不自动重试
+        （流/设备坏了不是重试能救的），由用户关窗或重开触发。界面看到
+        `running=False` 就把读数显示成「—」。
         """
         self.last_error = msg
+        self.has_data = False
         self.level_db = LEVEL_FLOOR_DB
         print(f"{LOG} ❌ {msg}", flush=True)
