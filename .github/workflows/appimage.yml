@@ -53,7 +53,8 @@ jobs:
       - name: 装系统依赖（构建 AppImage + 验收）
         run: |
           sudo apt-get update
-          # xvfb / fonts-noto-cjk  —— 验收里的字体检查与打包字体
+          # xvfb / fonts-noto-cjk  —— 验收里的字体检查（AppImage 已不再打包字体，
+          #                            这里装系统字体只是为了「Tk 看得见 fontconfig」这一步能真跑）
           # gcc make + Xft/freetype/fontconfig/X11 头文件 —— 构建脚本要现编 Xft 版 Tk
           # libportaudio2 / libegl1 / libwayland-client0 —— 包内依赖的运行时
           #

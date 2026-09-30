@@ -37,8 +37,11 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
      存在（系统级路径也可能生效）。`./setup.sh` 只检查「装了哪些运行时」，**装了 ≠ 被选中**
 4. **Python 3.11** —— 只用 `setup.sh` 的话这条它会自己处理（有 `uv` 就自动拉一份 3.11）
 5. **`libportaudio`**（麦克风采集）：`pacman -S portaudio` / `apt install libportaudio2`
-6. **VRChat**：设置里打开 OSC（`OSC enabled: True`），chat bubble visibility 设为 **Everyone**
-7. **阿里云百炼 API key**（个人实名认证即可）
+6. **一套中日韩字体**（`pacman -S noto-fonts-cjk` / `apt install fonts-noto-cjk`）。
+   ⚠️ **AppImage 自 2026-10 起不再自带字体**，GUI 与手腕屏都靠宿主机 fontconfig 提供字形；
+   缺字体时界面会是空壳/豆腐块。
+7. **VRChat**：设置里打开 OSC（`OSC enabled: True`），chat bubble visibility 设为 **Everyone**
+8. **阿里云百炼 API key**（个人实名认证即可）
 
 ---
 
@@ -55,6 +58,7 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ```
 
 - 解释器与全部依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`
+- ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
 - 仍然要自备一个**阿里云百炼 API key**（见下一节）
 - 运行时需要 **Wayland 会话**；手腕屏还要 OpenXR 运行时（Monado / WiVRn）+ 头显已连
