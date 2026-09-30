@@ -1,6 +1,6 @@
 # vrchat-livetranslate · Guide
 
-> [中文](../GUIDE.md) | **English** | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
+> [中文](GUIDE.md) | **English** | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 
 > 🪟 **This is the Windows guide.**
 > On **Linux**, see **[GUIDE.linux.md](GUIDE.linux.md)** — installation (`./setup.sh`), virtual
