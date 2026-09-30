@@ -419,6 +419,9 @@ Nekoya=猫屋
 * **配置**：`config.yaml` 的 `desktop_overlay:` 段（`mode` 可切 `latest` 变成
   「只显示最新一句」的歌词式）。视觉参数（字体 / 字号 / 配色 / 行数 / 是否显示原文）
   默认**继承 `overlay:` 段**，想单独给桌面字幕一套配色就在 `desktop_overlay:` 里覆写同名键。
+* **Linux**：**X11 会话**下与 Windows 同款（找窗 / 贴窗跟随 / 鼠标穿透 / 拖动落盘 /
+  透明度）；**Wayland 会话**（niri 等，界面走 XWayland）下窗口位置与透明度由合成器决定，
+  跟随不会生效 —— 边界与排查见 [GUIDE.linux.md](GUIDE.linux.md) 的「桌面字幕」一节。
 
 > ⚠️ VRChat 必须是**窗口化 / 无边框窗口**（Unity 的 `Fullscreen mode = 3`，VRChat 默认就是）。
 > 独占全屏时任何第三方置顶窗都会被盖住 —— 那不是本程序的 bug。

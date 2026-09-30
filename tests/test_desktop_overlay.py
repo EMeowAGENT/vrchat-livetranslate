@@ -339,7 +339,7 @@ def test_attach_and_follow_fake_game_window() -> None:
         root.update()
         rect = ov.game_rect
         if rect is None:
-            # 平台门面没有找窗口的能力（Linux）→ 跟随不在这里验
+            # 平台门面没有找窗口的能力（裁剪过的构建 / 后端不可用）→ 跟随不在这里验
             print("  跳过跟随断言（本平台没有桌面窗口后端）")
             ov.close()
             return
@@ -383,12 +383,20 @@ def test_attach_and_follow_fake_game_window() -> None:
 
 # ---------------------------------------------------------------- 平台门面 / 隔离
 def test_facade_safe_defaults_without_backend() -> None:
-    """后端缺失（Linux 就是这样）时门面必须返回安全默认值，一个都不许抛。"""
-    if not platform.IS_WINDOWS:
-        assert platform.desktop_window_backend() is None
-    else:
+    """桌面窗口后端的「有 / 无」两态：缺后端时门面必须返回安全默认值，一个都不许抛。
+
+    Linux 侧从 X11 后端（`vlt/platform/linux.py` 的桌面窗口一节）落地后，探针
+    应该能认出它；Windows 侧认 `win.py`。「缺后端」的那一半用猴子补丁假装出来，
+    两条路径都要验。
+    """
+    if platform.IS_WINDOWS:
         from vlt.platform import win as w
         assert platform.desktop_window_backend() is w
+    elif platform.IS_LINUX:
+        from vlt.platform import linux as lx
+        assert platform.desktop_window_backend() is lx
+    else:
+        assert platform.desktop_window_backend() is None
 
     real = platform.desktop_window_backend
     platform.desktop_window_backend = lambda: None     # 假装本平台没有桌面窗口能力
@@ -622,9 +630,12 @@ def test_drag_moves_window_and_snaps_to_anchor() -> None:
         fake.geometry("500x300+120+90")
         fake.update()
         ov.tick()
-        want = (moved[0] + 80, moved[1] + 50)
+        # 期望值走生产公式：小屏幕（CI 的 xvfb-run 默认 640x480）下夹取真的会生效，
+        # 不能假设"字幕位移量 == 窗口位移量"（那是大屏下的特例）。
+        want = compute_position(ov.cfg.anchor, ov.cfg.offset, ov.game_rect, (320, 120),
+                                platform.screen_work_area())
         assert abs(ov.position[0] - want[0]) <= 4 and abs(ov.position[1] - want[1]) <= 4, \
-            f"跟随位移不对：{ov.position} 期望≈{want}"
+            f"跟随位置不对：{ov.position} 期望≈{want}"
         ov.close()
     finally:
         if fake is not None:
