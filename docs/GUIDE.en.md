@@ -291,6 +291,34 @@ as SteamVR's `setOverlayAlpha` on Windows.
 
 ---
 
+### Desktop subtitle (a caption window pinned to VRChat — no headset needed)
+
+**For PC desktop-mode players** (issue #11): tick "Desktop subtitle" in the output row and a
+**borderless, always-on-top, click-through** caption window appears, showing the latest chat lines
+(others on the left, you on the right).
+
+* **Pinning**: by default it sits at the **bottom centre of the VRChat window** and follows it
+  (moves and resolution changes included). If the VRChat window isn't found it falls back to fixed
+  coordinates and logs one line.
+* **Position**: `Fine-tune ▸` → the "Desktop subtitle" row → "Unlock drag" → drag it where you want →
+  "Lock position" (the drop point is converted back to "which anchor + offset against the game
+  window" and written to `config.yaml`, so the caption keeps hugging the same edge when VRChat moves).
+  Click-through is on by default (so it never blocks clicks into VRChat); dragging requires unlocking.
+* **Opacity**: the slider in the same row, 0.20–1.00, applied live and persisted on release.
+* **Config**: the `desktop_overlay:` section of `config.yaml` (`mode: latest` turns it into a
+  lyric-style single line). Visual parameters (font / size / colours / lines / show-source)
+  **inherit from `overlay:`** by default; override any of them in `desktop_overlay:`.
+* **Linux**: on an **X11 session** it matches Windows (window search / follow / click-through /
+  drag persistence / opacity); on a **Wayland session** (niri etc., the GUI runs through XWayland)
+  window placement and opacity are decided by the compositor and following will not work — see the
+  "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for the exact boundaries.
+
+> ⚠️ VRChat must be in **windowed / borderless** mode (Unity `Fullscreen mode = 3`, the VRChat default).
+> In exclusive fullscreen any third-party topmost window gets covered — that's not a bug of this app.
+> Preview the rendering offline: `python -m vlt.output.desktop_overlay --demo --out out/desktop_frames`.
+
+---
+
 ## 7. Troubleshooting
 
 | Symptom | Cause / fix |
