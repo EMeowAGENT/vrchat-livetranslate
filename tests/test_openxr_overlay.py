@@ -537,6 +537,8 @@ class _FakeXr(types.ModuleType):
         self.calls: list[str] = []
         self.attached = False
         self.bad_path = bad_path
+        self.action_names: set[str] = set()
+        self.localized_names: set[str] = set()
         self.ActionType = types.SimpleNamespace(POSE_INPUT="pose")
         self.SpaceLocationFlags = types.SimpleNamespace(POSITION_TRACKED_BIT=2)
         for name in ("ActionSetCreateInfo", "ActionCreateInfo", "Posef", "Quaternionf",
@@ -549,6 +551,17 @@ class _FakeXr(types.ModuleType):
         return _Rec(kind="set")
 
     def create_action(self, aset, info):
+        # 与真 runtime 同款约束：**动作集内** name 与 localizedActionName 都必须唯一
+        # （规范 input.adoc：duplicates … must return XR_ERROR_NAME_DUPLICATED /
+        #  XR_ERROR_LOCALIZED_NAME_DUPLICATED）。实测踩过：10 个动作共用同一个
+        # localized 名字 → 只有第一个建得出来，其余全失败、面板静默回退到 VIEW。
+        if info.action_name in self.action_names:
+            raise RuntimeError(f"NameDuplicatedError: {info.action_name}")
+        if info.localized_action_name in self.localized_names:
+            raise RuntimeError("LocalizedNameDuplicatedError: The localized name provided "
+                               "was a duplicate of an already-existing resource.")
+        self.action_names.add(info.action_name)
+        self.localized_names.add(info.localized_action_name)
         self.calls.append(f"create_action:{info.action_name}")
         return _Rec(kind="action", name=info.action_name)
 
@@ -633,6 +646,9 @@ def test_anchor_actions_are_built_once_and_switchable():
         n_actions = sum(1 for c in fake.calls if c.startswith("create_action:"))
         assert n_actions == 2 + len(TRACKER_ROLES), \
             f"动作应当开局一次建全（左右手 + {len(TRACKER_ROLES)} 个 tracker role）：{n_actions}"
+        assert len(fake.action_names) == n_actions, "动作名要唯一"
+        assert len(fake.localized_names) == n_actions, \
+            "localizedActionName 也必须在动作集内唯一（实测：共用名字会让除第一个外的动作全建不出来）"
         first_attach = fake.calls.index("attach")
         last_action = max(i for i, c in enumerate(fake.calls) if c.startswith("create_action:"))
         assert last_action < first_attach, \
@@ -664,6 +680,8 @@ def test_unsupported_tracker_path_degrades_only_that_anchor():
         assert sess.anchor_space("right_hand", 0) is not sess.view_space, "右手也必须照常可用"
         assert sess.anchor_space("tracker", 0) is sess.view_space, "不认的锚点退回 VIEW 空间"
         assert sess.anchor_tracked("tracker", 0) is None
+        assert not any(c.startswith("create_action:pose_tracker") for c in fake.calls), \
+            f"路径不认时应当整族跳过 tracker，别对着 8 个 role 各撞一次：{fake.calls}"
         assert fake.calls.count("attach") == 1, "一个路径不认也不影响 attach 只做一次"
     finally:
         _restore_xr(saved)

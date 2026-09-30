@@ -604,18 +604,35 @@ class XrOverlaySession:
             self.action_set = xr.create_action_set(self.instance, xr.ActionSetCreateInfo(
                 action_set_name="vlt_wrist", localized_action_set_name="VLT Wrist Panel",
                 priority=0))
+        # tracker 先探一下这个运行时认不认 HTC tracker 的 role 路径（没接 tracker 的
+        # Monado/WiVRn 就是 PathUnsupportedError）。不认就**整族跳过**，别对着 8 个
+        # role 各报一次错 —— 日志会变噪音，真正的故障反而被淹。
+        tracker_ok = True
+        try:
+            xr.string_to_path(self.instance, "/user/vive_tracker_htcx/role/right_wrist")
+        except Exception:  # noqa: BLE001
+            tracker_ok = False
+            log.info("[overlay:xr] 本运行时不支持 HTC tracker 的 role 路径 → 跳过 tracker 动作"
+                     "（左右手锚点不受影响；要用 tracker 锚点得先在运行时里接上 tracker）")
         for anchor, idx in self._anchor_keys():
             # ★ 逐个锚点降级：某个运行时（或某版 Monado）不认 tracker 的 role 路径时，
             #   只该让**那一个锚点**不可用，绝不能把整条手腕屏拖死 —— 现在开局就会建
             #   全部 8 个 tracker role 的动作，一个不认就整条腿没了（老实现只建当前
             #   锚点，所以踩不到，改成「一次建全」之后这层兜底是必须的）。
+            if anchor == "tracker" and not tracker_ok:
+                continue
             try:
                 full, top = anchor_paths(anchor, idx)
                 if full is None:                 # hmd → 用 VIEW 参考空间，不需要动作
                     continue
                 act = xr.create_action(self.action_set, xr.ActionCreateInfo(
                     action_name=f"pose_{anchor}_{idx}", action_type=xr.ActionType.POSE_INPUT,
-                    localized_action_name="Wrist Anchor",
+                    # ⚠️ `localizedActionName` 在**同一个动作集内必须唯一**（规范：
+                    #    duplicates of the corresponding field for any existing action in
+                    #    the specified action set → **must** XR_ERROR_LOCALIZED_NAME_DUPLICATED）。
+                    #    实测踩过：10 个动作共用 "Wrist Anchor" → 只有第一个建得出来，
+                    #    右边/左手那个建不出来 → 查不到 space → 面板静默回退到 VIEW（跟着头）。
+                    localized_action_name=f"Wrist Anchor {anchor} {idx}",
                     subaction_paths=[xr.string_to_path(self.instance, top)]))
                 profiles = ((self.TRACKER_PROFILE,) if anchor == "tracker"
                             else self.HAND_PROFILES)
