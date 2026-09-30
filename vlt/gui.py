@@ -468,6 +468,11 @@ class TranslationGUI:
         # 手腕屏由**界面**持有（不是某个引擎）：手腕上只该有一块屏，内容镜像聊天区，
         # 而聊天区本来就在界面这一层（两个方向的文字都汇到这里）。
         self._overlay_out: Any | None = None
+        # 桌面字幕（PC 桌面模式：贴在 VRChat 窗口上的叠加窗）同样由界面持有，
+        # 理由与手腕屏一致——内容是聊天区的镜像，而聊天区在界面这一层。
+        self._desktop_out: Any | None = None
+        self._desktop_dragging = False
+        self._desktop_save_job: str | None = None
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -919,6 +924,12 @@ class TranslationGUI:
         tk.Checkbutton(out_frame, text=t("译音输出"), variable=self._vmic_var,
                        command=self._save_audio_flag,
                        **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
+        # 桌面字幕（PC 桌面模式，不需要头显）：勾上立刻出一块贴在 VRChat 窗口上的字幕窗
+        self._desktop_var = tk.BooleanVar(
+            value=bool((self._cfg.ui or {}).get("desktop_overlay", False)))
+        tk.Checkbutton(out_frame, text=t("桌面字幕"), variable=self._desktop_var,
+                       command=self._on_desktop_toggle,
+                       **self._indicator_kw()).pack(side=tk.LEFT, padx=(10, 0))
 
         # 微调面板：外层常驻（保证位置固定），只切换内层 body 的显隐——
         # 若整块 pack_forget 再 pack，会被排到窗口最底部去。
@@ -1015,6 +1026,7 @@ class TranslationGUI:
                   foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
 
         grid = ttk.Frame(self._tune_body)
+        self._tune_grid = grid      # 供测试按控件树定位 specs 那批滑块（本面板还挂着桌面字幕的滑块）
         grid.pack(fill=tk.X, pady=(2, 2))
         specs = [
             ("pos_x", t("位置X"), -0.30, 0.30, 0.005, "m"),
@@ -1055,6 +1067,31 @@ class TranslationGUI:
                      highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
                      command=self._make_tune_handler(key, var, val_lbl, unit)).pack(side=tk.LEFT, padx=(4, 6))
             val_lbl.pack(side=tk.LEFT)
+
+        # 桌面字幕（PC 桌面模式）：只需要「透明度 + 拖动解锁」两件，与上面那堆 VR 参数
+        # 无关；放在同一块「微调」里，用户不用记两处入口。
+        _dov = self._cfg.desktop_overlay if isinstance(self._cfg.desktop_overlay, dict) else {}
+        drow = ttk.Frame(self._tune_body)
+        drow.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(drow, text=t("桌面字幕"), font=FONT_UI).pack(side=tk.LEFT)
+        self._desktop_alpha_var = tk.DoubleVar(value=float(_dov.get("alpha", 0.9) or 0.9))
+        self._desktop_alpha_lbl = ttk.Label(drow, text=f"{self._desktop_alpha_var.get():.2f}",
+                                            font=FONT_STATUS, foreground=TEXT_DIM, width=5)
+        tk.Scale(drow, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
+                 variable=self._desktop_alpha_var, showvalue=False, length=104, width=10,
+                 bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+                 command=self._on_desktop_alpha).pack(side=tk.LEFT, padx=(4, 6))
+        self._desktop_alpha_lbl.pack(side=tk.LEFT)
+        # 按钮文案会在「解锁拖动 / 锁定位置」之间切，宽度按两者里更长的算，免得不换语言也裁字
+        self._desktop_drag_btn = ttk.Button(
+            drow, text=t("解锁拖动"),
+            width=max(_char_width_for(t("解锁拖动"), FONT_UI, 6),
+                      _char_width_for(t("锁定位置"), FONT_UI, 6)),
+            command=self._toggle_desktop_drag)
+        self._desktop_drag_btn.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(drow, text=t("（字幕窗默认可穿透，先解锁再拖）"), font=FONT_STATUS,
+                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(8, 0))
 
     def _make_tune_handler(self, key: str, var, lbl, unit: str):  # noqa: ANN001
         def _on_move(_v: str) -> None:
@@ -2813,12 +2850,13 @@ class TranslationGUI:
                 (["ui", "direction"], self._direction_var.get()),
                 (["ui", "chatbox"], _fmt_scalar(bool(self._chatbox_var.get()))),
                 (["ui", "overlay"], _fmt_scalar(bool(self._overlay_var.get()))),
+                (["ui", "desktop_overlay"], _fmt_scalar(bool(self._desktop_var.get()))),
             ]
             for key_path, val in updates:
                 text = _yaml_set_in_text(text, key_path, val)
             _write_config_text(p, text)
             print(f"[gui] 界面选择已保存：direction={updates[0][1]} chatbox={updates[1][1]} "
-                  f"overlay={updates[2][1]}", flush=True)
+                  f"overlay={updates[2][1]} desktop={updates[3][1]}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 保存界面选择失败：{exc}", flush=True)
 
@@ -3225,6 +3263,10 @@ class TranslationGUI:
             sinks.add("chatbox")
         if self._overlay_var.get():
             sinks.add("overlay")
+        if self._desktop_var.get():
+            # "desktop" 只是界面层的标记（字幕窗由界面持有，引擎不认这个 sink），
+            # 放在这里是为了让「只勾桌面字幕」也能通过下面的"至少选一个输出"检查。
+            sinks.add("desktop")
         if not sinks:
             self._set_status("warn", t("请至少选择一个输出"))
             return
@@ -3288,6 +3330,7 @@ class TranslationGUI:
         self._pending_starts = len(specs)
         # 手腕屏由界面持有，内容镜像聊天区（两个方向都进同一块屏）
         self._start_overlay()
+        self._start_desktop()
         self._start_engine(0)
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
@@ -3310,7 +3353,7 @@ class TranslationGUI:
         # 引擎不碰手腕屏：它由界面持有（一块屏显示两个方向的对话）。
         # 若交给两个引擎各自创建，会撞 `OverlayError_KeyInUse`（用户实测）。
         # chatbox 只发「我说的话」的译文——theirs 腿不需要它（与 engine._chatbox_wanted 同义，双保险）。
-        own_sinks = {s for s in self._sinks if s != "overlay"}
+        own_sinks = {s for s in self._sinks if s not in ("overlay", "desktop")}
         if direction == "theirs":
             own_sinks.discard("chatbox")
         events = EngineEvents(
@@ -3413,6 +3456,147 @@ class TranslationGUI:
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 手腕屏刷新失败：{type(exc).__name__}: {exc}", flush=True)
 
+    # ---------------------------------------------------------------- 桌面字幕（界面持有）
+    def _desktop_cfg(self) -> dict:
+        d = self._cfg.desktop_overlay
+        return d if isinstance(d, dict) else {}
+
+    def _start_desktop(self, *, force: bool = False) -> bool:
+        """把桌面字幕窗拉起来（PC 桌面模式：贴在 VRChat 窗口上的叠加窗）。
+
+        与手腕屏同一套约定：由**界面**持有（内容是聊天区的镜像，而聊天区在界面这一层），
+        失败只禁用这一项，绝不影响翻译。force=True 用于「勾上就起」那条路
+        （此时还没点开始翻译，`self._sinks` 里没有 desktop）。
+        """
+        if self._desktop_out is not None:
+            return True
+        if not force and "desktop" not in self._sinks:
+            return False
+        try:
+            from .output.desktop_overlay import DesktopOverlay, DesktopOverlayConfig
+            cfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
+                                                 visual=self._cfg.overlay or {})
+            out = DesktopOverlay(cfg, config_path=DEFAULT_CONFIG, root=self._root)
+            if not out.start():
+                return False                       # start() 内部已打印原因
+            self._desktop_out = out
+            self._push_desktop(force=True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._desktop_out = None
+            print(f"[gui] ⚠️ 桌面字幕初始化异常，已禁用（翻译不受影响）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            return False
+
+    def _on_desktop_toggle(self) -> None:
+        """勾选/取消「桌面字幕」。勾上就立刻出窗（用户多半是想先看位置对不对）。
+
+        起不来就自动退回未勾选 —— 否则界面显示"已开启"、实际什么都没有。
+        """
+        if self._desktop_var.get():
+            if self._start_desktop(force=True):
+                self._set_status("info", t("桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）"))
+            else:
+                self._desktop_var.set(False)
+                self._set_status("error", t("桌面字幕没启动起来，已自动取消勾选"))
+        else:
+            self._stop_desktop()
+            self._sinks.discard("desktop")         # 别让下一次「开始翻译」又把它拉起来
+        self._save_ui_state()
+
+    def _stop_desktop(self) -> None:
+        if self._desktop_out is None:
+            return
+        try:
+            self._desktop_out.close()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 关闭桌面字幕时出错（忽略）：{exc}", flush=True)
+        self._desktop_out = None
+        self._desktop_dragging = False
+
+    def _push_desktop(self, force: bool = False) -> None:
+        """把聊天区最近几条推给桌面字幕（与手腕屏同一份内容）。"""
+        if self._desktop_out is None:
+            return
+        try:
+            entries = [(b.who, b.source, b.text) for b in self._bubbles[-8:]]
+            self._desktop_out.update_entries(entries, force=force)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 桌面字幕刷新失败：{type(exc).__name__}: {exc}", flush=True)
+
+    def _on_desktop_alpha(self, _v: str = "") -> None:
+        """透明度滑块：先改窗口（立刻见效），停手 300ms 再落盘。"""
+        a = float(self._desktop_alpha_var.get())
+        lbl = getattr(self, "_desktop_alpha_lbl", None)
+        if lbl is not None:
+            lbl.configure(text=f"{a:.2f}")
+        if self._desktop_out is not None:
+            self._desktop_out.set_alpha(a)
+        self._schedule_desktop_save()
+
+    def _schedule_desktop_save(self) -> None:
+        if self._desktop_save_job is not None:
+            try:
+                self._root.after_cancel(self._desktop_save_job)
+            except Exception:
+                pass
+        self._desktop_save_job = self._root.after(300, self._save_desktop_cfg)
+
+    def _save_desktop_cfg(self) -> None:
+        """把桌面字幕的参数（透明度 + 拖动折算出的锚点/偏移）写回 config.yaml。
+
+        用 `_yaml_set_or_create` 而不是就地改：用户的 config.yaml 是从**旧模板**生成的，
+        里面根本没有 `desktop_overlay:` 段，就地改会因为找不到父键静默失效
+        （表现就是"拖了、调了，重启全没了"）。
+        """
+        self._desktop_save_job = None
+        p = DEFAULT_CONFIG
+        if not p.exists():
+            return
+        try:
+            text = p.read_text(encoding="utf-8")
+            updates: list[tuple[list[str], str]] = [
+                (["desktop_overlay", "alpha"], _fmt_scalar(float(self._desktop_alpha_var.get()))),
+            ]
+            if self._desktop_out is not None:
+                for key, val in (self._desktop_out.snap_to_config() or {}).items():
+                    if key in ("offset", "pos"):
+                        updates.append((["desktop_overlay", key], f"[{val[0]}, {val[1]}]"))
+                    else:
+                        updates.append((["desktop_overlay", key], str(val)))
+            for key_path, value in updates:
+                text = _yaml_set_or_create(text, key_path, value)
+            _write_config_text(p, text)
+            print("[gui] 桌面字幕参数已写入 config.yaml："
+                  + " ".join(f"{'/'.join(k)}={v}" for k, v in updates), flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[gui] 保存桌面字幕参数失败：{exc}", flush=True)
+
+    def _toggle_desktop_drag(self) -> None:
+        """解锁/锁定拖动。
+
+        字幕窗默认**鼠标穿透**（不挡着点 VRChat），穿透开着时窗口收不到鼠标事件，
+        所以要拖必须先解锁；锁定 = 把落点折算成锚点+偏移写回配置并恢复穿透。
+        """
+        if self._desktop_out is None:
+            self._set_status("warn", t("桌面字幕没启动起来，已自动取消勾选"))
+            return
+        self._desktop_dragging = not self._desktop_dragging
+        try:
+            self._desktop_out.set_draggable(self._desktop_dragging)
+        except Exception as exc:  # noqa: BLE001
+            self._desktop_dragging = False
+            print(f"[gui] 切换桌面字幕拖动失败：{type(exc).__name__}: {exc}", flush=True)
+            return
+        btn = getattr(self, "_desktop_drag_btn", None)
+        if btn is not None:
+            btn.configure(text=t("锁定位置") if self._desktop_dragging else t("解锁拖动"))
+        if self._desktop_dragging:
+            self._set_status("info", t("桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」"))
+        else:
+            self._save_desktop_cfg()
+            self._set_status("info", t("桌面字幕位置已记住"))
+
     def _stop(self) -> None:
         self._pending_starts = 0
         self._specs = []
@@ -3425,6 +3609,7 @@ class TranslationGUI:
         for eng in self._engines:
             eng.stop()
         self._stop_overlay()
+        self._stop_desktop()
         self._engines = []
         self._engine_dirs = []
         self._start_btn.configure(state=tk.NORMAL)
@@ -3843,6 +4028,7 @@ class TranslationGUI:
                 if kind == "text":
                     self._add_text(item[2], item[3], item[4], who=item[1])
                     self._push_overlay()   # 手腕屏镜像聊天区（同一块屏，两个方向都上）
+                    self._push_desktop()   # 桌面字幕同一份内容（PC 桌面模式）
                 elif kind == "status":
                     self._set_status(item[1], item[2])
                 elif kind == "stats":
@@ -3876,6 +4062,8 @@ class TranslationGUI:
             self._engine_dirs = []
         if self._overlay_out is not None:
             self._overlay_out.tick()      # 手腕屏的热重载 / 淡出
+        if self._desktop_out is not None:
+            self._desktop_out.tick()      # 桌面字幕：跟随目标窗口 / 热重载 / 补画
         # 输入门限的实时电平条：每 100ms 刷一次（_poll 本身 50ms 一跳）
         self._gate_level_tick += 1
         if self._gate_level_tick % 2 == 0:

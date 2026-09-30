@@ -358,4 +358,19 @@ STRINGS: dict[str, str] = {
     "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）":
         "The wrist overlay could not start, so the tick was reverted — "
         "start SteamVR first, then tick it again",
+
+    # ---- 桌面字幕（PC 桌面模式叠加窗）----
+    "桌面字幕": "Desktop Subtitles",
+    "桌面字幕已开启（拖到想要的位置，透明度见「微调 ▸」）":
+        "Desktop subtitles are on — drag them where you want; opacity is under \"Tune ▸\"",
+    "桌面字幕没启动起来，已自动取消勾选":
+        "Desktop subtitles could not start, so the tick was reverted",
+    "解锁拖动": "Unlock & Drag",
+    "锁定位置": "Lock Position",
+    "桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」":
+        "Desktop subtitles unlocked — drag the window where you want it, "
+        "then click \"Lock Position\"",
+    "桌面字幕位置已记住": "Desktop subtitle position saved",
+    "（字幕窗默认可穿透，先解锁再拖）":
+        "(the window ignores clicks by default — unlock first, then drag)",
 }

@@ -185,6 +185,33 @@ overlay:
                              #   想让文字更实心就把 source_alpha 拉满 255）
   separator: true            # 原文/译文之间的细分隔线
 
+# 桌面字幕（**PC 桌面模式**用：把译文像歌词一样贴在 VRChat 窗口上）
+#
+# 与上面的 `overlay:` 是两条独立的腿：`overlay:` = 头显里的手腕屏（要 SteamVR / OpenXR），
+# 本段 = 普通显示器上的一块无边框叠加窗（不需要头显，桌面模式玩家用这个）。
+# 视觉参数（字体/字号/配色/行数/是否显示原文）**默认继承 `overlay:` 段** —— 这里只写
+# 桌面专属的摆放与透明度；想单独给桌面字幕一套配色，把对应键抄到本段即可覆盖。
+#
+# 开了之后：勾选界面上的「桌面字幕」，字幕窗会立刻出现；「微调 ▸」里有透明度滑块和
+# 「解锁拖动 / 锁定位置」——鼠标穿透是默认开的（不挡你点 VRChat），要拖动得先解锁。
+desktop_overlay:
+  enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
+  mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
+                             # latest=只显示最新一句（更像歌词）
+  attach_to_game: true       # true=贴在 VRChat 窗口上并**跟随**它的移动/缩放
+                             #      找不到窗口时自动退化成 pos 的绝对屏幕坐标（会留日志）
+  game_title: VRChat         # 目标窗口标题（不区分大小写的子串匹配）
+  anchor: bottom_center      # 贴窗时的锚点：top_left/top_center/top_right
+                             #              middle_left/center/middle_right
+                             #              bottom_left/bottom_center/bottom_right
+                             #              free = 用下面的 pos（窗口内相对坐标）
+  offset: [0, -56]           # 相对锚点的像素偏移（负 y = 往上）（拖动后由界面写回这里）
+  pos: [80, 80]              # attach_to_game=false 时=屏幕绝对坐标；true 且 anchor=free 时=窗口内相对坐标
+  size_px: [1024, 360]       # 面板像素尺寸。⚠️ 本段**没写**这一项时会继承 overlay.size_px
+  alpha: 0.90                # **整窗透明度**（0.2~1.0）—— 界面「微调 ▸」里的滑块改的就是它
+  click_through: true        # 鼠标穿透（点字幕窗会点到 VRChat 上）；拖动的瞬间自动临时关掉
+  follow: true               # VRChat 窗口移动时跟着走
+
 # 第三条腿：译音输出（模型译音 → 虚拟声卡 → VRChat 麦克风 → 对方听到）
 output:
   audio:
@@ -227,3 +254,4 @@ ui:
   direction: mine          # mine=我说的话 | theirs=别人说 | dual=双向同时
   chatbox: true            # 输出勾选：chatbox 气泡
   overlay: false           # 输出勾选：手腕屏（需要 SteamVR 在跑）
+  desktop_overlay: false   # 输出勾选：桌面字幕（PC 桌面模式，贴在 VRChat 窗口上）
