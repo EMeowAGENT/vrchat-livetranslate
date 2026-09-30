@@ -4,7 +4,7 @@
 # 用法：
 #     ./scripts/build_appimage.sh              # 构建
 #     ./scripts/build_appimage.sh --no-verify  # 只构建，不做冒烟检查
-#     ./scripts/build_appimage.sh --no-font    # 不打包中日韩字体（约省 15MB，但运行机必须自带）
+#     ./scripts/build_appimage.sh --no-slim    # 跳过 pyopenxr 瘦身（产物大 ~100MB 未压缩）
 #
 # 产物：dist/VRChatLiveTranslate-x86_64.AppImage
 #
@@ -13,17 +13,15 @@
 # | 内容 | 来源 | 说明 |
 # |---|---|---|
 # | Python 解释器 | uv 的独立 3.11 | **整份拷进去**，不依赖宿主机的 Python（实测可搬运） |
-# | 第三方依赖 | `.venv` 的 site-packages | 剔掉 PyInstaller 之类只在打包时用的 |
+# | 第三方依赖 | `.venv` 的 site-packages | 剔掉 PyInstaller 之类只在打包时用的；pyopenxr 瘦身成只留当前平台 |
 # | 程序源码 | 仓库 | `vlt/` + `run_gui.py` + `assets/` + `config.example.yaml` + `testdata/` |
-# | 中日韩字体 | 构建机的 NotoSansCJK | 默认打包（约 19MB 未压缩 / 15MB 压缩后）。**`--no-font` 可跳过**，
-# |                  |                      | 代价是运行机必须自带中日韩字体，否则 GUI 与手腕屏都会缺字 |
 #
-# ⚠️ **Tk 是例外**：宿主机自带的 Tk 版本不保证认 fontconfig，而 uv 那份 Python 自带的 Tk
-#    更是**完全不认**（族列表里中日韩 0 个 → 界面只剩控件壳）。所以这里会**编一份带 Xft 的
-#    Tk 覆盖进包**（见 build_xft_tk）。注意这与"打不打包字体"是两件事：
-#      * Xft 版 Tk 决定「能**看见** fontconfig 里的字体」；
-#      * 打包 NotoSansCJK 决定「机器上**存在**可用的中日韩字体」。
-#    所以 `--no-font` 不会让没装字体的机器变好，只是让包变小。
+# ⚠️ **不打包任何字体**（2026-10 起）。中日韩字体（NotoSansCJK）一份 ~19MB，而系统本来就
+#    普遍自带；为少数没装字体的机器让所有人多背十几 MB 不划算。
+#    **运行机必须自带一套中日韩字体**，否则 GUI 与手腕屏会缺字（豆腐块）。
+#    注意这与 Xft 版 Tk 是**两件事**：
+#      * Xft 版 Tk —— 决定「能**看见** fontconfig 里的字体」，这个照旧自己编进包；
+#      * 打包字体  —— 决定「机器上**存在**可用的中日韩字体」，这个交给宿主机。
 #
 # **不打进包**：glibc / libGL / libEGL / libwayland / tk / libportaudio ——
 # 这些是系统基础库，AppImage 的惯例是依赖宿主机（各发行版版本差异太大，自带反而更容易崩）。
@@ -48,13 +46,11 @@ step() { echo; echo "=== $* ==="; }
 
 VERIFY=1
 SLIM=1
-FONT=1
 for _arg in "$@"; do
     case "$_arg" in
         --no-verify) VERIFY=0 ;;
         --no-slim)   SLIM=0 ;;
-        --no-font)   FONT=0 ;;
-        *) die "未知参数：$_arg（可用：--no-verify / --no-slim / --no-font）" ;;
+        *) die "未知参数：$_arg（可用：--no-verify / --no-slim）" ;;
     esac
 done
 unset _arg
@@ -165,33 +161,90 @@ done
 find "$APPDIR/usr/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 echo "    已反向排除 Windows 独占实现（vlt/platform/win.py、vlt/output/openvr_overlay.py）"
 
-# 1e. ★ 瘦身：pyopenxr（`xr`）只留 **linux x86_64** 用得到的部分
+# 1e. ★ 瘦身：pyopenxr（`xr`）只留 **当前平台** 用得到的部分
 #
-# 为什么值得做：pyopenxr 的 wheel 里带着给 **7 个平台**预编译的 API layer 与 loader ——
-# 光 `api_layer/android/` 一份就 56MB（core_validation 24MB + api_dump 22MB），
-# 而我们只用 `xr.*` 的接口，从不 enable 调试层。未压缩能省 ~1.3 亿字节。
+# 为什么值得做：pyopenxr 的 wheel 是 `py3-none-any`（55MB），里面把**所有平台**预编译好的
+# OpenXR API layer（校验/调试层）与 loader 全塞进 site-packages —— 光 android arm64 一份就
+# 52MB（core_validation 27MB + api_dump 24MB），而我们只调 `xr.*` 的接口，从不 enable 调试层。
+# 未压缩能省 ~1.3 亿字节。
 #
-# ⚠️ 保留集不是凭感觉定的，是**由 pyopenxr 自己的代码钉死**的：
-#   * `xr/library/__init__.py`   —— linux + x86_64 时 `LoadLibrary(xr.library.x86_64/
-#     libopenxr_loader.so)`，而且 `xr/raw_functions.py` 在 **import 时**就 dlopen 它；
-#   * `xr/api_layer/__init__.py` —— **import 时**就调 `expose_packaged_api_layers()`，
-#     而它要 `xr.api_layer.x86_64` 这个**目录**存在（`importlib.resources.as_file`）。
-#   所以这两个必须留；`api_layer/linux/`、顶层 `library/libopenxr_loader.so` 都没有
-#   任何代码引用（x86_64 那份才是被选中的）。
+# ⚠️⚠️ 保留集**绝不能硬编码目录名**——这是踩过的坑：
+#   pyopenxr 1.1.6302 把平台目录改了名（win32→windows_x86_64、aarch64→linux_aarch64、
+#   x86_64→linux_x86_64、android→android_arm_v8a），而旧脚本写着
+#   `rm -rf api_layer/{android,aarch64,win32,windows,linux}` —— **一个都没匹配上**，
+#   于是瘦身静默变成空操作：AppImage 白胖 ~13MB（v0.4.1 70MB → v0.5.0 84MB），
+#   而 `verify_appimage.py` 用的还是同一批旧名字，CI 全绿（v0.5.0 起的体积回归）。
+#   所以这里改成**让 pyopenxr 自己说**当前平台要哪个目录：
+#     * api_layer —— `py_layer_library_path()` 所在目录（import 期 `expose_packaged_api_layers()`
+#       就要它存在，否则 `importlib.resources.as_file` 直接抛错）；
+#     * library   —— 运行期 `ctypes` dlopen 的 loader 所在目录。
+#   两个都从**包内那份 pyopenxr 实际解析出的路径**反推，版本再改命名也跟得上。
 _XR="$APPDIR/usr/python/lib/python${PYVER}/site-packages/xr"
+APP_PY="$APPDIR/usr/python/bin/python${PYVER}"
 if [ "$SLIM" -eq 1 ]; then
     [ -d "$_XR" ] || die "找不到 $_XR —— pyopenxr 的布局变了？瘦身规则要跟着改"
-    rm -rf "$_XR/api_layer"/{android,aarch64,win32,windows,linux}
-    rm -rf "$_XR/library"/{aarch64,android,win32}
-    rm -f  "$_XR/library/openxr_loader.dll"
+
+    # 让包内 pyopenxr 自报保留集（-P 防读到仓库源码；PYTHONPATH 临时给这一步用）
+    _KEEP_OUT="$(PYTHONPATH="$APPDIR/usr/app:$SITE_DST" "$APP_PY" -P - <<'PY'
+import os
+from pathlib import Path
+import xr.api_layer, xr.library
+from xr.api_layer.layer_path import py_layer_library_path
+
+# api_layer：import 期要暴露的目录（若环境里已有 XR_API_LAYER_PATH 也应一并保留）
+api = {Path(py_layer_library_path()).parent.name}
+for _p in os.environ.get("XR_API_LAYER_PATH", "").split(os.pathsep):
+    if _p.strip():
+        api.add(Path(_p).name)
+# library：运行期 dlopen 的 loader 所在目录
+lib = Path(xr.library.openxr_loader_library._name).parent.name
+for _n in sorted(api):
+    print("API_KEEP=" + _n)
+print("LIB_KEEP=" + lib)
+PY
+)" || die "调 pyopenxr 探针拿平台目录失败（pyopenxr 布局又变了？）"
+
+    mapfile -t XR_API_KEEP < <(printf '%s\n' "$_KEEP_OUT" | sed -n 's/^API_KEEP=//p')
+    mapfile -t XR_LIB_KEEP < <(printf '%s\n' "$_KEEP_OUT" | sed -n 's/^LIB_KEEP=//p')
+    [ "${#XR_API_KEEP[@]}" -gt 0 ] && [ "${#XR_LIB_KEEP[@]}" -gt 0 ] \
+        || die "pyopenxr 探针没给出平台目录：${_KEEP_OUT:-（无输出）}"
+    echo "    pyopenxr 自报当前平台目录：api_layer=${XR_API_KEEP[*]}  library=${XR_LIB_KEEP[*]}"
+
+    # 删掉两个目录下**除保留集以外**的所有子目录（保留 __pycache__）
+    _purge_other_platforms() {
+        local base="$1"; shift
+        local d name keep ok
+        for d in "$base"/*/; do
+            [ -d "$d" ] || continue
+            name="$(basename "$d")"
+            [ "$name" = "__pycache__" ] && continue
+            ok=0
+            for keep in "$@"; do [ "$name" = "$keep" ] && ok=1; done
+            [ "$ok" -eq 1 ] || { rm -rf "$d"; echo "       - 删平台目录 $name"; }
+        done
+    }
+    _purge_other_platforms "$_XR/api_layer" "${XR_API_KEEP[@]}"
+    _purge_other_platforms "$_XR/library"   "${XR_LIB_KEEP[@]}"
+    rm -f "$_XR/library/openxr_loader.dll" 2>/dev/null || true  # 顶层散落的 win loader（若有）
+
     # 断言保留集没被误删：错了就在这里炸，而不是发到用户手里才「启动即崩」
-    [ -f "$_XR/library/x86_64/libopenxr_loader.so" ] \
-        || die "瘦身误删：library/x86_64/libopenxr_loader.so 不见了（import xr 会直接失败）"
-    [ -d "$_XR/api_layer/x86_64" ] \
-        || die "瘦身误删：api_layer/x86_64 目录不见了（import xr 会直接失败）"
-    echo "    ✅ xr 已瘦身：只留 linux x86_64（$(du -sh "$_XR" | cut -f1)）"
+    for _k in "${XR_API_KEEP[@]}"; do
+        [ -d "$_XR/api_layer/$_k" ] \
+            || die "瘦身误删：api_layer/$_k 目录不见了（import xr 会直接失败）"
+    done
+    for _k in "${XR_LIB_KEEP[@]}"; do
+        [ -f "$_XR/library/$_k/libopenxr_loader.so" ] \
+            || die "瘦身误删：library/$_k/libopenxr_loader.so 不见了（import xr 会直接失败）"
+    done
+
+    # ★ 体积门禁：光靠「上面断言还在」挡不住「该删的没删」。留一条硬上限兜底。
+    XR_SLIM_MAX_MB="${XR_SLIM_MAX_MB:-60}"   # 瘦身后实测 ~25MB；未瘦身 ~126MB
+    _xr_mb=$(( $(du -sk "$_XR" | cut -f1) / 1024 ))
+    [ "$_xr_mb" -le "$XR_SLIM_MAX_MB" ] || die \
+        "xr 瘦身后仍为 ${_xr_mb}MB（上限 ${XR_SLIM_MAX_MB}MB）—— 瘦身没生效？大概率是 pyopenxr 又改了平台目录名"
+    echo "    ✅ xr 已瘦身：只留 ${XR_API_KEEP[*]}（$(du -sh "$_XR" | cut -f1)）"
 else
-    echo "    （已按 --no-slim 跳过 xr 瘦身：产物会大 ~30MB）"
+    echo "    （已按 --no-slim 跳过 xr 瘦身：产物会大 ~100MB 未压缩）"
 fi
 
 
@@ -287,46 +340,12 @@ build_xft_tk() {
     echo "    ✅ 已换成带 Xft 的 Tk（字体走 fontconfig）"
 }
 
-# ---------------------------------------------------------------- 中日韩字体
-
-# Tk 会读 fontconfig 之后，**打包字体才有意义**（否则它根本看不见）。
-# 打包的收益：机器上一套中日韩字体都没装时，界面也不会是豆腐块。
-# NotoSansCJK-Regular.ttc 一份就覆盖中日韩（正好够我们五种界面语言），OFL 许可可再分发。
-bundle_cjk_font() {
-    local dest="$APPDIR/usr/share/fonts"
-    local cand=""
-    for f in /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc \
-             /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.otf \
-             /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc; do
-        [ -f "$f" ] && { cand="$f"; break; }
-    done
-    if [ -z "$cand" ]; then
-        # 构建机没装中日韩字体 → 不阻断构建，但要说清楚（运行机得自己有）
-        echo "    ⚠️ 构建机上找不到 NotoSansCJK，**不打包字体**（运行机需自带中日韩字体）"
-        return 0
-    fi
-    mkdir -p "$dest"
-    cp "$cand" "$dest/"
-    # 许可一起带上（OFL 要求随附）
-    for lic in /usr/share/licenses/noto-fonts-cjk/*; do
-        [ -f "$lic" ] && { cp "$lic" "$dest/NotoSansCJK-LICENSE.txt"; break; }
-    done
-    echo "    ✅ 已打包中日韩字体：$(basename "$cand")（$(du -h "$dest" | cut -f1)）"
-}
-
 # ---------------------------------------------------------------- 2. 入口 / 桌面项 / 图标
-step "2/6 修 Tk 字体 + 打包中日韩字体"
+step "2/6 修 Tk 字体可见性（换 Xft 版 Tk；**不打包任何字体**）"
 build_xft_tk
-if [ "$FONT" -eq 1 ]; then
-    bundle_cjk_font
-else
-    # 刻意留成显式开关（而不是"构建机上没装字体就悄悄不打"）：体积与可搬运性是个取舍，
-    # 谁选的谁得知道代价。
-    echo "    ⚠️ 已按 --no-font 跳过打包中日韩字体（约省 15MB）："
-    echo "       **运行机必须自带一套中日韩字体**，否则图形界面会显示成豆腐块、"
-    echo "       手腕屏文字会退化成画不出中日韩的位图字体。"
-    echo "       Tk 侧（fontconfig 可见性）不受影响 —— Xft 版 Tk 照旧会被换进去。"
-fi
+echo "    ℹ️ 不打包任何字体：**运行机必须自带一套中日韩字体**，否则图形界面会显示成豆腐块、"
+echo "       手腕屏文字会退化成画不出中日韩的位图字体（见脚本头部说明）。"
+echo "       Xft 版 Tk 照旧会被换进去 —— 它只负责「能看见 fontconfig 里的字体」，与带不带字体无关。"
 
 step "2.5/6 写 AppRun / .desktop / 图标"
 
@@ -341,22 +360,8 @@ APP="$HERE/usr/app"
 export PYTHONPATH="$APP:$HERE/usr/python/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUTF8=1
 
-# 让 fontconfig 认识**包内**打包的中日韩字体。
-# 配置在运行时生成：AppImage 的挂载路径是随机的，写死在文件里没法用。
-# 系统配置用 <include> 拉进来，这样宿主机自己的字体也照常可用。
-if [ -d "$HERE/usr/share/fonts" ]; then
-    FCCONF="${XDG_CACHE_HOME:-$HOME/.cache}/vrchat-livetranslate/fonts.conf"
-    mkdir -p "$(dirname "$FCCONF")" 2>/dev/null || FCCONF="$HERE/usr/share/fonts.conf"
-    cat > "$FCCONF" <<EOF
-<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-<fontconfig>
-  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
-  <dir>$HERE/usr/share/fonts</dir>
-</fontconfig>
-EOF
-    export FONTCONFIG_FILE="$FCCONF"
-fi
+# 字体：AppImage **不自带任何字体**，直接用宿主机的 fontconfig（系统里已装的字体照常可用）。
+# 所以这里不再注入 FONTCONFIG_FILE —— 运行机需要自带中日韩字体，详见脚本头部说明。
 # 界面用 Tk：某些发行版把 tcl/tk 装在别处，这里不覆盖，交给系统
 exec "$PY" "$APP/run_gui.py" "$@"
 RUN
@@ -379,7 +384,7 @@ cp "$REPO/assets/app.png" "$APPDIR/${APP_ID}.png"
 
 # ---------------------------------------------------------------- 3. 构建前自检
 step "3/6 构建前自检（在 AppDir 里直接跑）"
-APP_PY="$APPDIR/usr/python/bin/python${PYVER}"
+# （APP_PY 在 1e 定义，这里直接用）
 export PYTHONPATH="$APPDIR/usr/app:$SITE_DST"
 # ⚠️ `-P` 不能省：`python -c` 会把当前目录放在 sys.path 最前，PYTHONPATH 排在后面，
 #    于是从仓库根跑构建时，下面的导入检查读的是**仓库源码**而不是刚组装好的 AppDir。
