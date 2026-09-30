@@ -276,3 +276,18 @@ def _fmt_scalar(x) -> str:  # noqa: ANN001, ANN202
     if isinstance(x, (list, tuple)):
         return "[" + ", ".join(_fmt_scalar(i) for i in x) + "]"
     return str(x)
+
+
+def _yaml_scalar(value) -> str:  # noqa: ANN001
+    """把一个**字符串**渲染成安全的 YAML 标量（该不该加引号交给 PyYAML 决定）。
+
+    为什么需要它：就地写配置时，值是直接拼进那一行的（`key: <value>`），
+    而值里有几个来源是**外部数据** —— 设备名、音色 id 之类可能含 `#`（会把整行
+    截成注释）、`: `、`[`、`&`、`*`、`%` 等 YAML 有意义的字符。整份 `yaml.dump`
+    时代这件事是自动的，改成就地写之后必须自己保证不写出坏 YAML。
+    `yaml.safe_dump` 只序列化这一个标量，返回 `CABLE Input` / `'a#b'` / `''`
+    这样的安全写法（allow_unicode 保住中文设备名，不转成 \\uXXXX）。
+    """
+    text = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True)
+    # safe_dump 会附一个文档结束标记（第二行的 `...`），只取第一行
+    return text.split("\n", 1)[0].strip()

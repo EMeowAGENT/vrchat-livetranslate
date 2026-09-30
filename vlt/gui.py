@@ -31,6 +31,7 @@ from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_c
 from .config_io import (
     _fmt_scalar,
     _write_config_text,
+    _yaml_scalar,
     _yaml_set_in_text,
     _yaml_set_mapping,
     _yaml_set_or_create,
@@ -3549,29 +3550,38 @@ class TranslationGUI:
             self._set_status("info", t("设备：全部自动检测"))
 
     def _save_device_config(self, mic_name: str, loop_name: str, out_name: str) -> None:
-        # Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
-        # （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """把设备选择写回 config.yaml —— **就地改那几行**，不整份重写。
+
+        ⚠️ 这里以前用 `yaml.safe_load` + `yaml.dump` 整文件重写：用户每改一次设备下拉，
+        `config.yaml` 的**注释、空行、键顺序就全没了** —— 实测一份 154 行、53 行注释的
+        配置被拍成 116 行、键按字母重排的转储（注释是配置里唯一的说明书，丢了只能重看模板）。
+        其它保存路径（语言 / 译音开关 / 手腕屏微调 / 音色 / 输入门限）早就改成就地写了，
+        只有这条漏了 —— 而设备下拉恰恰是用户最常动的控件之一。
+
+        Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
+        （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """
         write_fixed = not self._linux_fixed_audio
         p = DEFAULT_CONFIG
         if not p.exists():
             return
         try:
-            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            capture = dict(raw.get("capture") or {})
-            capture["mic_device"] = mic_name
+            text = p.read_text(encoding="utf-8")
+            # 值用 _yaml_scalar 渲染：设备名是外部枚举来的，含 `#`/`: `/`[` 时
+            # 手拼会写出坏 YAML（旧整份 dump 自动处理了这件事，这里要自己保证）。
+            updates: list[tuple[list[str], str]] = [
+                (["capture", "mic_device"], _yaml_scalar(mic_name)),
+            ]
             if write_fixed:
-                capture["loopback_device"] = loop_name
-            raw["capture"] = capture
-            if write_fixed:
-                output = dict(raw.get("output") or {})
-                audio = dict(output.get("audio") or {})
-                audio["device_name"] = out_name
-                output["audio"] = audio
-                raw["output"] = output
-            with p.open("w", encoding="utf-8") as f:
-                yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
+                updates.append((["capture", "loopback_device"], _yaml_scalar(loop_name)))
+                updates.append((["output", "audio", "device_name"], _yaml_scalar(out_name)))
+            for key_path, val in updates:
+                # 用 _yaml_set_or_create：老配置可能整段没有 `capture` / `output.audio`，
+                # 那个「只在已存在路径上替换」的函数会静默 no-op（设置就永远存不下去）。
+                text = _yaml_set_or_create(text, key_path, val)
+            _write_config_text(p, text)     # 写前校验 YAML：宁可这次不生效，也不写坏配置
         except Exception as exc:
-            print(f"[gui] 保存设备配置失败：{exc}")
+            print(f"[gui] 保存设备配置失败：{exc}", flush=True)
             return
         # 同步内存里的配置，引擎启动时会读
         self._cfg.output.setdefault("capture", {})["mic_device"] = mic_name
