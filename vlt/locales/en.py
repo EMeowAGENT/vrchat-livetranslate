@@ -53,6 +53,8 @@ STRINGS: dict[str, str] = {
     "译文字号": "Font Size",
     "原文字号": "Source Size",
     "面板高": "Panel H",
+    "底板不透明度": "Plate Opacity",
+    "原文不透明度": "Source Opacity",
 
     # ---- 打字输入行 ----
     "打字:": "Type:",

@@ -975,13 +975,23 @@ class TranslationGUI:
         self._tune_values: dict[str, float] = {
             "pos_x": float(pos[0]), "pos_y": float(pos[1]), "pos_z": float(pos[2]),
             "rot_x": float(rot[0]), "rot_y": float(rot[1]), "rot_z": float(rot[2]),
-            "width_m": float(off.get("width_m", 0.24)),
+            # ⚠️ 下面这些 **`ov.get(键, 兜底)` 的兜底值必须等于 `OverlayConfig` 的默认值**
+            #    （由 tests/test_tune_rot_range.py 的 test_tune_fallbacks_match_config_defaults
+            #    钉住）。兜底只在 config.yaml **缺键**时才生效，真机上很难发现 —— 之前这里
+            #    是 width_m=0.24 / font_size=42 / source_font_size=30，而默认值是
+            #    0.23 / 36 / 29：用户手写配置少写两行，滑块就显示 42/30，
+            #    **碰一下还会把 42/30 写回配置**，字号悄悄变了。
+            "width_m": float(off.get("width_m", 0.23)),
             "curvature": float(off.get("curvature", 0.0)),
             "alpha": float(off.get("alpha", 0.9)),
             # 字号 / 面板高度决定「一块屏能显示多少字」——用户明确要能自己调
-            "font_size": float(ov.get("font_size", 42)),
-            "source_font_size": float(ov.get("source_font_size", 30)),
+            "font_size": float(ov.get("font_size", 36)),
+            "source_font_size": float(ov.get("source_font_size", 29)),
             "panel_h": float(_sz[1]),
+            # 半透明程度（0-255）：底板与原文分开调 —— 底板要透、文字要实心，
+            # 是两件事（实测用户就是这么要求的：界面半透明、文字不透明）
+            "bg_alpha": float(ov.get("bg_alpha", 205)),
+            "source_alpha": float(ov.get("source_alpha", 205)),
         }
         self._ov_save_job: str | None = None
         self._anchor_label_to_key = {t("右手"): "right_hand", t("左手"): "left_hand",
@@ -1021,6 +1031,9 @@ class TranslationGUI:
             ("font_size", t("译文字号"), 20, 64, 1, ""),
             ("source_font_size", t("原文字号"), 14, 48, 1, ""),
             ("panel_h", t("面板高"), 240, 560, 10, "px"),
+            # 0-255 的 8 位 alpha：底板（界面）/ 原文分开 —— 想让文字更实就拉满 255
+            ("bg_alpha", t("底板不透明度"), 0, 255, 5, ""),
+            ("source_alpha", t("原文不透明度"), 0, 255, 5, ""),
         ]
         # 标签宽度按**当前语言**最长的那条算：中文是 3-4 字（width=6 够），
         # 但英语 "Curvature"、俄语 "Размер оригинала" 会被 6 字宽截断 ——
@@ -1094,6 +1107,9 @@ class TranslationGUI:
                 (["overlay", "font_size"], _fmt_scalar(v["font_size"])),
                 (["overlay", "source_font_size"], _fmt_scalar(v["source_font_size"])),
                 (["overlay", "size_px"], f"[{self._tune_panel_w}, {_fmt_scalar(v['panel_h'])}]"),
+                # 底板 / 原文的 8 位 alpha（同样会触发重渲一帧）
+                (["overlay", "bg_alpha"], str(int(v["bg_alpha"]))),
+                (["overlay", "source_alpha"], str(int(v["source_alpha"]))),
             ]
             for key_path, val in updates:
                 text = _yaml_set_in_text(text, key_path, val)
@@ -1101,7 +1117,8 @@ class TranslationGUI:
             print(f"[gui] 手腕屏参数已写入 config.yaml：anchor={updates[0][1]} "
                   f"pos={updates[2][1]} rot={updates[3][1]} width={updates[4][1]}m "
                   f"curvature={updates[5][1]} alpha={updates[6][1]} "
-                  f"字号={updates[7][1]}/{updates[8][1]} 面板={updates[9][1]}"
+                  f"字号={updates[7][1]}/{updates[8][1]} 面板={updates[9][1]} "
+                  f"底板/原文 alpha={updates[10][1]}/{updates[11][1]}"
                   f"（overlay 会热重载，无需重启）",
                   flush=True)
         except Exception as exc:  # noqa: BLE001

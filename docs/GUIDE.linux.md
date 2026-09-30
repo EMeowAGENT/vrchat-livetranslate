@@ -33,7 +33,8 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
 3. **OpenXR 运行时**（只有「手腕屏」需要）：**Monado** 或 **WiVRn**，且**头显已连接**。
    - 用 WiVRn：先起服务端（`wivrn-dashboard` 或 `wivrn-server`），再在头显里连上
    - 用 Monado：起 `monado-service`（或经 Envision）
-   - 判断是否就绪：`ls ~/.config/openxr/1/active_runtime.json` 存在即可
+   - 判断是否就绪：`XR_RUNTIME_JSON` 指向一个运行时清单，**或** `~/.config/openxr/1/active_runtime.json`
+     存在（系统级路径也可能生效）。`./setup.sh` 只检查「装了哪些运行时」，**装了 ≠ 被选中**
 4. **Python 3.11** —— 只用 `setup.sh` 的话这条它会自己处理（有 `uv` 就自动拉一份 3.11）
 5. **`libportaudio`**（麦克风采集）：`pacman -S portaudio` / `apt install libportaudio2`
 6. **VRChat**：设置里打开 OSC（`OSC enabled: True`），chat bubble visibility 设为 **Everyone**
@@ -111,6 +112,15 @@ uv pip install --python .venv/bin/python -r requirements-linux.txt
 四步：模块导入 → 读 key（打码打印）→ **离线渲染一帧手腕屏贴图**（不连 VR）→
 用自带测试音频跑完整链路（中文 → 英文，打进 chatbox）。
 
+手腕屏的**通透性**（蓝框外是否透明、半透明底板对不对、文字是否实心）只有真机能看，
+自检脚本盖不到，单独跑一条：
+
+```bash
+python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test   # 戴着看 20 秒判定图
+```
+
+它会读你自己的 `config.yaml`（位置/角度/透明度），所以看到的就是平时的面板参数。
+
 VRChat 开着的话，气泡里应该出现：
 
 ```
@@ -153,7 +163,9 @@ Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」�
 
 **两种办法，都会写回 `config.yaml` 并立刻热重载（不用重启）**：
 
-1. **界面上的「手腕屏微调 ▸」**：位置 / 角度 / 宽度 / 曲率的滑块，戴着看效果边调最快
+1. **界面上的「微调 ▸」**（在「输出」那一行的右端）：锚点 + **14 个滑块**
+   （位置 X/Y/Z、俯仰/偏航/翻滚、大小、弯曲、透明度、译文字号、原文字号、面板高、
+   底板不透明度、原文不透明度）—— 戴着看效果边调最快。完整表格见 GUIDE.md 的「手腕屏微调面板」。
 2. 直接改 `config.yaml` 的 `overlay.anchor` + `overlay.offset`，存盘即生效
 
 ```yaml
@@ -162,8 +174,9 @@ overlay:
   offset:
     pos: [0.0, 0.06, 0.02]   # 相对锚点的偏移（米）
     rot: [-47, -16, 0]       # 欧拉角（度），约定 Rz·Ry·Rx
-    width_m: 0.23
-    curvature: 0.0           # >0 则弯曲贴合（0.1~0.3 可试）
+    width_m: 0.23            # 面板宽度（米）—— 弯曲时按**弧长**算，与 Windows 一致
+    curvature: 0.0           # 弯曲：占整圆的比例（0.5 = 半圈 180°；0.1~0.3 好看）。
+                             # 改它只弯曲，面板中心不动（两边朝你卷）
 ```
 
 > ⚠️ **默认的 `rot` 是为「右手腕」调的**（作者实测值）。改到 `left_hand` 时要镜像：
@@ -217,11 +230,13 @@ overlay:
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| `RuntimeUnavailableError` / `The loader was unable to find or load a runtime` | 没有活跃的 OpenXR 运行时 | 起 Monado 或 WiVRn，并把头显连上；确认 `~/.config/openxr/1/active_runtime.json` 存在 |
+| `RuntimeUnavailableError` / `The loader was unable to find or load a runtime` | 没有活跃的 OpenXR 运行时 | 起 Monado 或 WiVRn，并把头显连上；确认 `XR_RUNTIME_JSON` 指向的清单可用，或 `~/.config/openxr/1/active_runtime.json` 存在（只装了运行时、没被选中也会报这个） |
 | 会话建立成功，但**手腕上什么都没有** | 会话没到 `FOCUSED`，或锚点没被追踪 | 看日志里的 `会话状态=…` 与 `锚点追踪=…`。**开着 VRChat（或任意 OpenXR 应用）再试** —— overlay 会话的 visible/focused 依赖合成器上报 |
 | `锚点 right_hand 追踪=False` | 手柄没被追踪（头显待机 / 手柄没拿起） | 拿起手柄动一下；手柄休眠时 pose 会失效 |
 | `无法建立 GL/Wayland context` | 不在 Wayland 会话里 | 确认 `WAYLAND_DISPLAY` 有值；**X11 下走不通** |
-| 面板位置不对 | 锚点/角度不合适 | 用界面上的「手腕屏微调」滑块；注意左右手镜像规则 |
+| 面板位置不对 | 锚点/角度不合适 | 用界面上的「微调 ▸」滑块；注意左右手镜像规则 |
+| 面板外面多出一圈**不透明黑边** / 底板看着不透明 | 图层的 alpha 没生效（漏了 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`）；旧版本有此问题 | 用带修复的版本；想确认就 `python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test`，那张判定图应当「蓝框外全透明、四块灰由淡到实、白字实心」 |
+| 面板半透明的地方整体发白 / 白字发光 | 未预乘 alpha 被当成预乘（漏了 `UNPREMULTIPLIED_ALPHA_BIT`） | 同上，用 `--alpha-test` 一眼看出来；两个 flag 在 `layer_alpha_flags()` 里一起给 |
 | 面板过一会儿消失 | 见日志 `[overlay:xr][diag]` 心跳行 | 心跳会打出「已上传多少帧 / 上次成功多久前 / 会话状态 / 锚点追踪」，按它判断 |
 
 **开日志**：界面 →「导出日志压缩包」，或看 `logs/` 目录。
@@ -283,5 +298,7 @@ overlay:
 - 为什么手腕屏走自建 OpenXR 而不是 WayVR
 - OpenXR 那条路上踩过的 5 个坑（事件强转偏移、`sync_actions` 的 FOCUSED 要求、
   `create_reference_space` 的句柄、X11/GLX 走不通、ctypes 签名）
+- 手腕屏另外两个「改回去就出怪现象」的坑：图层 alpha 的两个 flag（漏了 = 蓝框外一圈黑边）、
+  柱面层的 `pose` 是圆柱的轴而不是面板中心（弄错 = 圆心跑位、面板飘走）
 - 构建期平台隔离怎么保证的
 - 测试纪律（测试进程不许碰用户的运行时）

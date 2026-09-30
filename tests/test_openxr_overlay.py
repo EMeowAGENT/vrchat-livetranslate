@@ -28,12 +28,16 @@ sys.path.insert(0, str(ROOT))
 from vlt.output.openxr_overlay import (  # noqa: E402
     TRACKER_ROLES,
     anchor_paths,
+    apply_overlay_alpha,
     euler_to_quaternion,
+    layer_alpha_flags,
     layer_geometry,
     pick_swapchain_format,
+    render_alpha_test,
+    rotate_vector,
     should_rebuild,
 )
-from vlt.output.overlay import OverlayConfig  # noqa: E402
+from vlt.output.overlay import OverlayConfig, render_panel  # noqa: E402
 
 # ---------------------------------------------------------------- 独立的参照实现
 
@@ -148,28 +152,76 @@ def test_swapchain_format_prefers_rgba8():
     print("  格式选择优先 RGBA8 OK")
 
 
-def test_layer_geometry_quad_and_cylinder():
-    """curvature=0 → 平面层；>0 → 柱面层，且**弦长仍是 width_m**。"""
-    q = layer_geometry(0.23, 1024 / 440, 0.0)
-    assert q["kind"] == "quad"
-    w, h = q["size"]
-    assert abs(w - 0.23) < 1e-9 and abs(h - 0.23 / (1024 / 440)) < 1e-9
+def test_layer_geometry_matches_windows_curvature():
+    """★ 弯曲度的定义必须与 Windows（`SetOverlayCurvature`）**同一个口径**。
 
-    c = layer_geometry(0.23, 1024 / 440, 0.15)
-    assert c["kind"] == "cylinder"
-    # 弧长 = 半径 × 圆心角，且弦长应等于 width_m（这里用弧长关系校验半径定义）
-    assert abs(c["radius"] * c["central_angle"] - 0.23) < 1e-9, "半径/圆心角与宽度关系不对"
-    assert 0.2 <= c["central_angle"] <= 1.5, "圆心角没夹在合理范围"
+    openvr.h 原文：「curvature 是占整圆的比例，1 = 完全闭合的圆柱；给定半径时
+    curvature = overlay.width / (2π·r)」⇒ 我们这边就必须是
+    `central_angle = 2π·curvature`、`radius = width/central_angle`，
+    而且 **width_m 是弧长**（不是弦长 —— 旧实现按弦长算，还带 5× 系数与 1.5 rad 上限，
+    结果 0.3 以上滑到底没区别，和 Windows 也对不上）。
+    """
+    aspect, w = 1024 / 440, 0.23
 
-    # 极端 curvature 要夹住，不能出 NaN / 除零
-    for cur in (1.0, 5.0):
-        g = layer_geometry(0.23, 0.0, cur)      # aspect=0 也要能算
+    flat = layer_geometry(w, aspect, 0.0)
+    assert flat["kind"] == "quad" and flat["size"][0] == w
+    assert abs(flat["size"][1] - w / aspect) < 1e-9
+    assert layer_geometry(w, aspect, 0.005)["kind"] == "quad", "小到看不出弯就该走平面"
+    assert layer_geometry(w, aspect, -1.0)["kind"] == "quad", "负值也该走平面"
+
+    for c in (0.05, 0.15, 0.2, 0.3, 0.5):
+        g = layer_geometry(w, aspect, c)
+        assert g["kind"] == "cylinder"
+        assert abs(g["central_angle"] - 2 * math.pi * c) < 1e-9, f"c={c} 的圆心角不是 2π·c"
+        assert abs(g["radius"] * g["central_angle"] - w) < 1e-9, "弧长必须等于 width_m"
+        assert abs(g["aspect_ratio"] - aspect) < 1e-9
+        # ★ 半径不能当位置用：柱面层要把「轴」沿面板局部 +Z 挪 radius（在 submit 里做）
+        assert g["pose_offset"] == (0.0, 0.0, g["radius"])
+
+    # 弯曲 0.5 = 半圈（180°）：弦长只有弧长的 2/π ≈ 64%，这是 Windows 口径的必然结果
+    half = layer_geometry(w, aspect, 0.5)
+    assert abs(half["central_angle"] - math.pi) < 1e-3
+    chord = 2 * half["radius"] * math.sin(half["central_angle"] / 2)
+    assert abs(chord / w - 2 / math.pi) < 1e-3
+
+    # 极端值要夹住，不能出 NaN / 除零（aspect=0 也要能算）
+    for c in (1.0, 5.0):
+        g = layer_geometry(w, 0.0, c)
         assert g["kind"] == "cylinder" and g["radius"] > 0
-    print("  层几何换算 OK（平面/柱面 + 夹取）")
+        assert g["central_angle"] < 2 * math.pi, "圆心角越界（规范要求 < 2π）"
+    print("  层几何换算 OK（2π 口径 · 弧长=宽度 · 带 pose_offset）")
+
+
+def test_cylinder_pose_offset_rotates_with_panel():
+    """★ 柱面层的「轴」偏移必须跟着**面板的 rot** 转，不能拿世界 Z。
+
+    双路验证（与四元数那条同一风格）：实现用四元数转局部 (0,0,r)，测试用
+    Rz·Ry·Rx 矩阵转。最后再钉住真正的目的：**弧面中点要落回原位置**
+    （`pose + R·(0,0,−radius) == cfg.pos`）—— 不成立就是用户看到的「面板飘走」。
+    """
+    for rot in ((0.0, 0.0, 0.0), (-47.0, -16.0, 0.0), (30.0, -60.0, 120.0)):
+        g = layer_geometry(0.23, 1024 / 440, 0.2)
+        r = g["radius"]
+        got = rotate_vector(rot, g["pose_offset"])
+        want = _mat_vec(_ref_matrix(rot), (0.0, 0.0, r))
+        assert max(abs(got[i] - want[i]) for i in range(3)) < 1e-9, \
+            f"rot={rot}：偏移方向与 Rz·Ry·Rx 不一致"
+
+        # 弧面中点（局部 (0,0,-r)）加上 pose 偏移后必须回到原点 = 面板位置不动
+        back = rotate_vector(rot, (0.0, 0.0, -r))
+        total = [got[i] + back[i] for i in range(3)]
+        assert max(abs(v) for v in total) < 1e-9, f"rot={rot}：弧面中点没回到面板位置"
+
+    # 不转的时候就是纯 +Z，长度正好是半径（对齐 Monado layer_cylinder.vert 的 z = -cos(a)*r）
+    r0 = layer_geometry(0.23, 1024 / 440, 0.2)
+    off = rotate_vector((0.0, 0.0, 0.0), r0["pose_offset"])
+    assert abs(off[0]) < 1e-12 and abs(off[1]) < 1e-12
+    assert abs(off[2] - r0["radius"]) < 1e-12
+    print("  柱面 pose 偏移 OK（随面板 rot 旋转 · 弧面中点回到原位）")
 
 
 def test_should_rebuild_detects_changes():
-    """热重载判定：几何/锚点 → 重应用变换；字号/尺寸 → 必须重渲贴图。"""
+    """热重载判定：几何/锚点 → 重应用变换；字号/尺寸/**透明度/配色** → 必须重渲贴图。"""
     base = OverlayConfig()
     assert should_rebuild(base, OverlayConfig()) == (False, False), "没改却说改了"
 
@@ -183,9 +235,87 @@ def test_should_rebuild_detects_changes():
     render = dataclasses.replace(base, font_size=44)
     assert should_rebuild(base, render) == (False, True), "改字号没被识别成需要重渲"
 
+    # ★ 界面上新加的「底板/原文不透明度」滑块走的就是这条路：不重渲 = 拖着没反应
+    for field, val in (("bg_alpha", 120), ("source_alpha", 255), ("border_alpha", 200),
+                       ("separator", False), ("color_bg", (30, 30, 30)),
+                       ("color_theirs", (1, 2, 3))):
+        assert should_rebuild(base, dataclasses.replace(base, **{field: val})) == (False, True), \
+            f"改 {field} 没被识别成需要重渲"
+
     both = dataclasses.replace(base, font_size=44, pos=(1.0, 0.0, 0.0))
     assert should_rebuild(base, both) == (True, True)
-    print("  热重载判定 OK")
+    print("  热重载判定 OK（含底板/原文不透明度、配色）")
+
+
+def test_layer_alpha_flags_value():
+    """★ 图层 alpha 的两个 flag 值必须是「贴图 alpha 生效 + 未预乘」。
+
+    这是「蓝框外一圈黑」的那个开关：不设 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`，
+    整个图层会按不透明合成（贴图里 alpha=0 的边距被当成实心黑）。
+    """
+    try:
+        import xr
+    except ImportError:
+        print("  ⏭ 没装 pyopenxr（非 Linux 环境），跳过")
+        return
+    f = int(layer_alpha_flags())
+    want = int(xr.CompositionLayerFlags.BLEND_TEXTURE_SOURCE_ALPHA_BIT) \
+        | int(xr.CompositionLayerFlags.UNPREMULTIPLIED_ALPHA_BIT)
+    assert f == want, f"flag 不对：0x{f:x}，应该是 0x{want:x}（BLEND | UNPREMULTIPLIED）"
+    assert f & 0x2, "少了 BLEND_TEXTURE_SOURCE_ALPHA_BIT → 图层不透明 → 一圈黑边"
+    assert f & 0x4, "少了 UNPREMULTIPLIED_ALPHA_BIT → 未预乘的贴图会被当预乘 → 偏亮"
+    print(f"  图层 alpha flag OK（0x{f:x}）")
+
+
+def test_apply_overlay_alpha_scales_only_alpha():
+    """整层 alpha 乘子 = Linux 侧的 `setOverlayAlpha()`：**只动 alpha，RGB 不碰**。
+
+    只动 alpha 才能做到「底板变淡、文字仍实心」；连 RGB 一起乘（预乘空间的做法）
+    会让白字先变灰再变暗 —— 那就不是用户要的东西了。
+    """
+    from PIL import Image
+
+    img = Image.new("RGBA", (4, 1))
+    img.putdata([(255, 255, 255, 255), (12, 14, 20, 205), (0, 0, 0, 0), (10, 20, 30, 128)])
+
+    def _px(im):  # 不用 getdata()：Pillow 14 起弃用，getpixel 一直稳定
+        return [im.getpixel((x, 0)) for x in range(4)]
+
+    before = _px(img)
+    assert apply_overlay_alpha(img, 1.0) is img, "alpha=1 时不该白拷一份"
+
+    for k, want_alpha in ((0.0, [0, 0, 0, 0]), (0.5, [128, 102, 0, 64]),
+                          (0.9, [230, 184, 0, 115])):
+        out = _px(apply_overlay_alpha(img, k))
+        assert [p[3] for p in out] == want_alpha, \
+            f"k={k}：alpha 应为 {want_alpha}，实得 {[p[3] for p in out]}"
+        assert [p[:3] for p in out] == [p[:3] for p in before], \
+            f"k={k}：RGB 被改了（文字会跟着变暗）"
+
+    # 越界值要夹住，不能崩、也不能溢出（alpha=0 的像素乘完还得是 0）
+    assert [p[3] for p in _px(apply_overlay_alpha(img, 5.0))] == [255, 205, 0, 128]
+    assert [p[3] for p in _px(apply_overlay_alpha(img, -1.0))] == [0, 0, 0, 0]
+    print("  整层 alpha 乘子 OK（只乘 alpha、端点/越界都对）")
+
+
+def test_panels_have_transparent_margin_and_translucent_plate():
+    """贴图侧的独立判据：**边距全透明 + 底板半透明**。
+
+    与上面的 flag 是两条互不相干的失效路径 —— 任何一条坏了，用户看到的一样是
+    「蓝框外一圈黑」。这条不需要头显就能跑。
+    """
+    cfg = OverlayConfig()
+    w, h = cfg.size_px
+    for name, img in (("面板", render_panel("你好，测试。", "hello", cfg)),
+                      ("alpha 判定图", render_alpha_test(cfg))):
+        px = img.convert("RGBA").load()
+        for xy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+                   (w // 2, 0), (0, h // 2), (w - 1, h // 2)):
+            assert px[xy][3] == 0, f"{name} 的 {xy} 不是全透明（{px[xy]}）→ 屏上就是黑边"
+        # 四角必须真的透明（圆角）；中间靠底那一块是底板 → 必须是配置的半透明值
+        assert px[(w // 2, h - 20)][3] == cfg.bg_alpha, \
+            f"{name} 的底板不是半透明（得到 {px[(w // 2, h - 20)]}）"
+    print("  贴图边距全透明 + 底板半透明 OK")
 
 
 def test_backend_config_field():
@@ -195,6 +325,41 @@ def test_backend_config_field():
     assert OverlayConfig.from_dict({"backend": "null"}).backend == "null"
     assert OverlayConfig.from_dict({"backend": None}).backend == "auto"
     print("  backend 配置字段 OK")
+
+
+def test_composition_layers_declare_alpha_flags():
+    """★ 回归锁：合成层**必须**声明 alpha flag（少了就是一整层不透明 → 一圈黑边）。
+
+    flag 值本身的正确性由 `test_layer_alpha_flags_value()` 管；这条只管
+    「**每一处**合成层构造都真的把 flag 传下去了」—— Quad 与 Cylinder 两条分支
+    都得传，漏一处就是「换个曲率又冒出黑边」这种半好半坏的状态。
+    """
+    import ast
+    backend = ROOT / "vlt" / "output" / "openxr_overlay.py"
+    tree = ast.parse(backend.read_text(encoding="utf-8"))
+
+    layers = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "xr"):
+            continue
+        if node.func.attr not in ("CompositionLayerQuad", "CompositionLayerCylinderKHR"):
+            continue
+        layers.append((node.lineno, node.func.attr,
+                       {kw.arg: ast.unparse(kw.value) for kw in node.keywords if kw.arg}))
+
+    assert layers, "一处合成层构造都没扫到 —— 源码结构变了？"
+    names = {name for _, name, _ in layers}
+    assert "CompositionLayerQuad" in names and "CompositionLayerCylinderKHR" in names, \
+        f"应有 Quad 与 Cylinder 两条分支，实际只有 {names}"
+    for lineno, name, kw in layers:
+        assert "layer_flags" in kw, (
+            f"L{lineno} xr.{name}(…) 没传 layer_flags —— 图层会按不透明合成，"
+            f"贴图里的透明边距会变成一圈黑边")
+        assert "layer_alpha_flags" in kw["layer_flags"], (
+            f"L{lineno} layer_flags={kw['layer_flags']}，应当是 layer_alpha_flags() "
+            f"（BLEND_TEXTURE_SOURCE_ALPHA | UNPREMULTIPLIED_ALPHA）")
+    print(f"  合成层都带 alpha flag OK（{len(layers)} 处：Quad + Cylinder）")
 
 
 def test_backend_xr_calls_are_wellformed():
@@ -277,8 +442,13 @@ if __name__ == "__main__":
     test_quaternion_is_normalized()
     test_anchor_paths_mapping()
     test_swapchain_format_prefers_rgba8()
-    test_layer_geometry_quad_and_cylinder()
+    test_layer_geometry_matches_windows_curvature()
+    test_cylinder_pose_offset_rotates_with_panel()
     test_should_rebuild_detects_changes()
+    test_layer_alpha_flags_value()
+    test_apply_overlay_alpha_scales_only_alpha()
+    test_panels_have_transparent_margin_and_translucent_plate()
     test_backend_config_field()
+    test_composition_layers_declare_alpha_flags()
     test_backend_xr_calls_are_wellformed()
     print("ALL PASSED")
