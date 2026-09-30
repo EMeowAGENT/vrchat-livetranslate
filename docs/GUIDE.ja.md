@@ -387,7 +387,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.5.0 "LevelProbe"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.5.1 "LevelProbe"
   ```
 
 ---

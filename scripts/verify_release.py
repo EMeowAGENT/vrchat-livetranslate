@@ -1,10 +1,15 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.5.0 "LevelProbe"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.5.1 "LevelProbe"
 
-第二个参数 = 本版新增功能里必定出现的字符串（v0.5.0 用「LevelProbe」—— 实时电平那一路
-新加的类名；修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠）。判据是「在解包出来的
-字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
+不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+
+⚠️ **纯打包型发布（v0.5.1）**：本版只动 Linux 打包链路，Windows 侧代码与 v0.5.0 同源，
+所以 needle 沿用 `LevelProbe`（新功能类名，仍在 `gui.pyc` / `level_probe.pyc` 里）。
+这类版本真正要验的是 **AppImage 附件**（体积 + 包内 `xr/{api_layer,library}` 只剩当前平台目录），
+用 `scripts/verify_appimage.py <下载下来的 .AppImage>` 单独跑一遍 —— 本脚本只覆盖 exe。
+修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
 
 复核项：
   1. 附件下载（只认 exe）

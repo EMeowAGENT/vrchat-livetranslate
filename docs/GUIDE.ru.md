@@ -387,7 +387,7 @@ build_exe.bat                                              :: сборка + п�
   (SHA256, реальный запуск `--self-test`, строка версии, поиск строк новых функций в байткоде, попиксельное сравнение иконки):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.5.0 "LevelProbe"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.5.1 "LevelProbe"
   ```
 
 ---
