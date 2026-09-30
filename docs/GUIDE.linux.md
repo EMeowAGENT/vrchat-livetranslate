@@ -25,8 +25,12 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
 
 ## 一、前置条件
 
-1. **Wayland 会话**（niri / KDE / GNOME 都行）。
-   手腕屏走 **Wayland + EGL**；X11 下走不通（精简 XWayland 的 GLX 建不出 context，实测过）。
+1. **Wayland 或 X11 会话都行**（niri / KDE / GNOME / Xorg 均可）。
+   - **Wayland**：手腕屏走 **EGL（`XR_MNDX_egl_enable`）** —— niri 的精简 XWayland
+     没有可用的 GLX，必须走这条；
+   - **X11 / Xorg**：手腕屏走 **GLX（XLIB 图形绑定）**。
+     ⚠️ 这条路径**离线已验证、真机待验证**（开发机没有 X11+运行时环境），详见
+     [平台约束记录](平台约束记录.md)。
    （界面本身走 Tk/**X11**，Wayland 会话下由 XWayland 提供 —— 桌面发行版默认都有这套基础库。）
 2. **PipeWire**（大多数现代发行版默认就是）—— 需要 `pw-dump` / `pw-record` / `pw-cat`。
    > ⚠️ 我们不依赖 PulseAudio 兼容层。实测某些环境下 `pactl` 连不上，而 `pw-dump` 正常，
@@ -64,7 +68,8 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
 - 仍然要自备一个**阿里云百炼 API key**（见下一节）
-- 运行时需要 **Wayland 会话**；手腕屏还要 OpenXR 运行时（Monado / WiVRn）+ 头显已连
+- 运行时需要 **Wayland 或 X11 会话**（手腕屏：Wayland 走 EGL、X11 走 GLX）；
+  手腕屏还要 OpenXR 运行时（Monado / WiVRn）+ 头显已连
 
 ### 或者：源码安装（`./setup.sh`）
 
@@ -240,7 +245,7 @@ overlay:
 | `RuntimeUnavailableError` / `The loader was unable to find or load a runtime` | 没有活跃的 OpenXR 运行时 | 起 Monado 或 WiVRn，并把头显连上；确认 `XR_RUNTIME_JSON` 指向的清单可用，或 `~/.config/openxr/1/active_runtime.json` 存在（只装了运行时、没被选中也会报这个） |
 | 会话建立成功，但**手腕上什么都没有** | 会话没到 `FOCUSED`，或锚点没被追踪 | 看日志里的 `会话状态=…` 与 `锚点追踪=…`。**开着 VRChat（或任意 OpenXR 应用）再试** —— overlay 会话的 visible/focused 依赖合成器上报 |
 | `锚点 right_hand 追踪=False` | 手柄没被追踪（头显待机 / 手柄没拿起） | 拿起手柄动一下；手柄休眠时 pose 会失效 |
-| `无法建立 GL/Wayland context` | 不在 Wayland 会话里 | 确认 `WAYLAND_DISPLAY` 有值；**X11 下走不通** |
+| `无法建立 GL context` / `GL 后端都建不起来` | 会话里没有可用的 GL 后端 | Wayland：确认 `WAYLAND_DISPLAY` 有值；X11：确认 `DISPLAY` 有值且 X server 提供 GLX（`glxinfo` 能跑）。niri 的精简 XWayland 没有 GLX → 走 Wayland 路径即可 |
 | 面板位置不对 | 锚点/角度不合适 | 用界面上的「微调 ▸」滑块；注意左右手镜像规则 |
 | 面板外面多出一圈**不透明黑边** / 底板看着不透明 | 图层的 alpha 没生效（漏了 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`）；旧版本有此问题 | 用带修复的版本；想确认就 `python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test`，那张判定图应当「蓝框外全透明、四块灰由淡到实、白字实心」 |
 | 面板半透明的地方整体发白 / 白字发光 | 未预乘 alpha 被当成预乘（漏了 `UNPREMULTIPLIED_ALPHA_BIT`） | 同上，用 `--alpha-test` 一眼看出来；两个 flag 在 `layer_alpha_flags()` 里一起给 |
@@ -273,7 +278,9 @@ overlay:
 
 ## 八、已知限制
 
-1. **需要 Wayland**。X11 会话下手腕屏不可用（GLX 建不出 context）。
+1. **手腕屏的 X11 路径真机待验证**。Wayland（EGL_MNDX）是实测通过的常规路径；
+   X11/GLX 离线已验证（Xvfb+GLX 下真实建上下文、binding 结构体、后端选择），
+   但还没有「X11 显示 + 同一环境跑运行时」的真机验证记录（见平台约束记录的验证状态）。
 2. **`anchor: tracker` 未实测**。OpenXR 里 tracker 是**按 role 寻址**的
    （`/user/vive_tracker_htcx/role/...`），和 Windows 侧「第 N 个 GenericTracker」的语义
    不完全一样；`tracker_index` 是这张 role 表的序号。代码写了，但没有硬件验证过。
@@ -303,8 +310,9 @@ overlay:
 
 - 虚拟声卡为什么不能用 `Audio/Sink`（含那次「用户系统声音突然没了」的实测事故）
 - 为什么手腕屏走自建 OpenXR 而不是 WayVR
-- OpenXR 那条路上踩过的 5 个坑（事件强转偏移、`sync_actions` 的 FOCUSED 要求、
-  `create_reference_space` 的句柄、X11/GLX 走不通、ctypes 签名）
+- OpenXR 那条路上踩过的 6 个坑（事件强转偏移、`sync_actions` 的 FOCUSED 要求、
+  `create_reference_space` 的句柄、GLX 失败会**杀进程**（Xlib 默认错误处理器）、
+  niri 的 XWayland 没有 GLX、ctypes 签名）
 - 手腕屏另外两个「改回去就出怪现象」的坑：图层 alpha 的两个 flag（漏了 = 蓝框外一圈黑边）、
   柱面层的 `pose` 是圆柱的轴而不是面板中心（弄错 = 圆心跑位、面板飘走）
 - 构建期平台隔离怎么保证的
