@@ -4,6 +4,7 @@
 # 用法：
 #     ./scripts/build_appimage.sh              # 构建
 #     ./scripts/build_appimage.sh --no-verify  # 只构建，不做冒烟检查
+#     ./scripts/build_appimage.sh --no-font    # 不打包中日韩字体（约省 15MB，但运行机必须自带）
 #
 # 产物：dist/VRChatLiveTranslate-x86_64.AppImage
 #
@@ -14,6 +15,15 @@
 # | Python 解释器 | uv 的独立 3.11 | **整份拷进去**，不依赖宿主机的 Python（实测可搬运） |
 # | 第三方依赖 | `.venv` 的 site-packages | 剔掉 PyInstaller 之类只在打包时用的 |
 # | 程序源码 | 仓库 | `vlt/` + `run_gui.py` + `assets/` + `config.example.yaml` + `testdata/` |
+# | 中日韩字体 | 构建机的 NotoSansCJK | 默认打包（约 19MB 未压缩 / 15MB 压缩后）。**`--no-font` 可跳过**，
+# |                  |                      | 代价是运行机必须自带中日韩字体，否则 GUI 与手腕屏都会缺字 |
+#
+# ⚠️ **Tk 是例外**：宿主机自带的 Tk 版本不保证认 fontconfig，而 uv 那份 Python 自带的 Tk
+#    更是**完全不认**（族列表里中日韩 0 个 → 界面只剩控件壳）。所以这里会**编一份带 Xft 的
+#    Tk 覆盖进包**（见 build_xft_tk）。注意这与"打不打包字体"是两件事：
+#      * Xft 版 Tk 决定「能**看见** fontconfig 里的字体」；
+#      * 打包 NotoSansCJK 决定「机器上**存在**可用的中日韩字体」。
+#    所以 `--no-font` 不会让没装字体的机器变好，只是让包变小。
 #
 # **不打进包**：glibc / libGL / libEGL / libwayland / tk / libportaudio ——
 # 这些是系统基础库，AppImage 的惯例是依赖宿主机（各发行版版本差异太大，自带反而更容易崩）。
@@ -38,11 +48,13 @@ step() { echo; echo "=== $* ==="; }
 
 VERIFY=1
 SLIM=1
+FONT=1
 for _arg in "$@"; do
     case "$_arg" in
         --no-verify) VERIFY=0 ;;
         --no-slim)   SLIM=0 ;;
-        *) die "未知参数：$_arg（可用：--no-verify / --no-slim）" ;;
+        --no-font)   FONT=0 ;;
+        *) die "未知参数：$_arg（可用：--no-verify / --no-slim / --no-font）" ;;
     esac
 done
 unset _arg
@@ -305,7 +317,16 @@ bundle_cjk_font() {
 # ---------------------------------------------------------------- 2. 入口 / 桌面项 / 图标
 step "2/6 修 Tk 字体 + 打包中日韩字体"
 build_xft_tk
-bundle_cjk_font
+if [ "$FONT" -eq 1 ]; then
+    bundle_cjk_font
+else
+    # 刻意留成显式开关（而不是"构建机上没装字体就悄悄不打"）：体积与可搬运性是个取舍，
+    # 谁选的谁得知道代价。
+    echo "    ⚠️ 已按 --no-font 跳过打包中日韩字体（约省 15MB）："
+    echo "       **运行机必须自带一套中日韩字体**，否则图形界面会显示成豆腐块、"
+    echo "       手腕屏文字会退化成画不出中日韩的位图字体。"
+    echo "       Tk 侧（fontconfig 可见性）不受影响 —— Xft 版 Tk 照旧会被换进去。"
+fi
 
 step "2.5/6 写 AppRun / .desktop / 图标"
 
