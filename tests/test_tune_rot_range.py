@@ -44,7 +44,8 @@ SANDBOX = SANDBOX_DIR / "config.yaml"
 WANT_ROT = [180, -135, 95]
 
 SPEC_KEYS = ["pos_x", "pos_y", "pos_z", "rot_x", "rot_y", "rot_z", "width_m",
-             "curvature", "alpha", "font_size", "source_font_size", "panel_h"]
+             "curvature", "alpha", "font_size", "source_font_size", "panel_h",
+             "bg_alpha", "source_alpha"]
 ROT_IDX = (3, 4, 5)                                 # rot_x / rot_y / rot_z 在 specs 里的位置
 
 
@@ -155,6 +156,62 @@ def check_round_trip_keeps_rot(gui, scales: list) -> None:
           f"（旧范围下三个轴都会被夹到端点，变成 [90, 90, -90]）")
 
 
+def check_tune_fallbacks_match_config_defaults() -> None:
+    """④ 微调面板里 `ov.get(键, 兜底)` 的兜底值必须等于 `OverlayConfig` 的默认值。
+
+    兜底只在 config.yaml **缺键**时才生效，真机上极难发现。实测踩到的漂移：
+    `font_size` / `source_font_size` 兜底是 42/30 而默认值是 36/29，`width_m` 兜底
+    0.24 而默认 0.23 —— 用户手写配置少写两行，界面就显示 42/30，**碰一下还会把
+    42/30 写回配置**（字号无声变大）。这里用 AST 静态比对，不依赖控件树。
+    """
+    import ast
+
+    from vlt.output.overlay import OverlayConfig
+
+    field_of = {"width_m": "width_m", "curvature": "curvature", "alpha": "alpha",
+                "font_size": "font_size", "source_font_size": "source_font_size",
+                "bg_alpha": "bg_alpha", "source_alpha": "source_alpha"}
+    tree = ast.parse((ROOT / "vlt" / "gui.py").read_text(encoding="utf-8"))
+    found: dict[str, float] = {}
+    for node in ast.walk(tree):
+        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
+        # 目标形态：self._tune_values: dict[str, float] = { ..., "键": float(x.get("键", 兜底)), ... }
+        # ⚠️ 带类型标注时是 AnnAssign 而不是 Assign —— 只认 Assign 会「一条都扫不到」
+        if isinstance(node, ast.AnnAssign):
+            tgt, value = node.target, node.value
+        elif isinstance(node, ast.Assign):
+            tgt, value = (node.targets[0] if node.targets else None), node.value
+        else:
+            continue
+        if not (isinstance(tgt, ast.Attribute) and tgt.attr == "_tune_values"
+                and isinstance(value, ast.Dict)):
+            continue
+        for val in value.values:
+            # 形态是 float(<x>.get("<键>", 兜底))：先把外面的 float(...) 剥掉
+            inner = val.args[0] if (isinstance(val, ast.Call)
+                                    and isinstance(val.func, ast.Name)
+                                    and val.func.id == "float" and val.args) else val
+            if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "get" and len(inner.args) == 2
+                    and isinstance(inner.args[0], ast.Constant)
+                    and isinstance(inner.args[1], ast.Constant)):
+                continue
+            if inner.args[0].value in field_of:
+                found[inner.args[0].value] = inner.args[1].value
+
+    missing = sorted(set(field_of) - set(found))
+    assert not missing, f"没扫到这些键的兜底值（键名改了就同步改这条用例）：{missing}"
+
+    cfg = OverlayConfig()
+    bad = [f"{k}：兜底 {found[k]:g} ≠ 默认值 {getattr(cfg, field_of[k]):g}"
+           for k in sorted(field_of)
+           if float(found[k]) != float(getattr(cfg, field_of[k]))]
+    assert not bad, ("微调面板的兜底值与配置默认值漂移了（config.yaml 缺键时界面会显示"
+                     "错值，还会写回配置）：\n  " + "\n  ".join(bad))
+    print(f"  ✓ 微调面板 {len(found)} 个兜底值都等于 OverlayConfig 默认值"
+          f"（width_m / font_size / source_font_size 这类漂移会被拦住）")
+
+
 # ---------------------------------------------------------------- 入口
 
 
@@ -183,7 +240,8 @@ def main() -> int:
         print("test_tune_rot_range:")
         for fn in (lambda: check_rot_slider_range(scales),
                    lambda: check_out_of_range_not_clamped(scales),
-                   lambda: check_round_trip_keeps_rot(gui, scales)):
+                   lambda: check_round_trip_keeps_rot(gui, scales),
+                   check_tune_fallbacks_match_config_defaults):
             try:
                 fn()
             except AssertionError as exc:

@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .overlay import OverlayConfig, render_conversation, render_panel
+from .overlay import OverlayConfig, render_conversation, render_panel, resolve_font_path
 
 log = logging.getLogger(__name__)
 
@@ -112,18 +112,88 @@ def pick_swapchain_format(formats: list[int]) -> int:
     return formats[0] if formats else 0x8058
 
 
+def layer_alpha_flags() -> Any:
+    """合成层的 alpha flag —— **必须设**，否则整层被当成不透明。
+
+    规范里图层默认按「alpha = 1.0」合成，只有设了 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`
+    才会去读贴图的 alpha。少了它的**实测现象**正是「面板蓝框外面多出一圈不透明黑边」：
+    贴图里 alpha=0 的 12px 边条 + 圆角外的三角区（占 7.5% 像素）被当成实心黑画出来，
+    底板自己的半透明（`bg_alpha`）也一起失效。
+
+    还要带 `UNPREMULTIPLIED_ALPHA_BIT`：PIL 出来的是**未预乘**（straight）alpha，
+    而运行时的默认假设是**预乘**。少了它，半透明像素会被当成预乘值 → 观感偏亮、
+    白字顶到 255（Khronos 官方 `hello_xr` 就是这两条一起用；Windows 侧同理，
+    我们不设 `VROverlayFlags_IsPremultiplied`，SteamVR 就按未预乘合成）。
+    """
+    import xr
+    f = xr.CompositionLayerFlags
+    return f.BLEND_TEXTURE_SOURCE_ALPHA_BIT | f.UNPREMULTIPLIED_ALPHA_BIT
+
+
+def apply_overlay_alpha(img: Any, alpha: float) -> Any:
+    """整层 alpha 乘子 —— Linux 侧的 `setOverlayAlpha()`（Windows 能力的对等物）。
+
+    ⚠️ **只乘 alpha 通道，RGB 一动不动**。SteamVR 的 `SetOverlayAlpha` 就是这么做的
+    （它只作用于「图层 alpha」），所以效果是「底板变淡、文字该多亮还多亮」。
+    要是连 RGB 一起乘（那是**预乘空间**的算法），白字会先变灰再变暗 ——
+    而用户要的恰恰是「界面半透明、文字不透明」。
+
+    用 256 项 LUT 一趟算完（纯 C 速度）；调用方（帧循环）还会记忆化，
+    正常情况下一帧渲染只过这一次。
+    """
+    k = max(0.0, min(1.0, float(alpha)))
+    if k >= 1.0:
+        return img
+    lut = [round(i * k) for i in range(256)]
+    out = img.copy()
+    out.putalpha(img.getchannel("A").point(lut))
+    return out
+
+
+def rotate_vector(rot_deg: tuple[float, float, float],
+                  v: tuple[float, float, float]) -> tuple[float, float, float]:
+    """把**面板局部**的向量 `v` 按面板的 `rot` 转到父空间。
+
+    ⚠️ 柱面层的 pose 偏移必须在**面板自己的坐标系**里做：直接拿世界系的 Z 会在面板
+    转过去之后指到完全不同的方向（手腕屏默认 `rot=[-47,-16,0]`，世界 Z 与面板法线
+    差了几十度，面板会整块歪出去）。用的是与 `euler_to_quaternion` 同一套 Rz·Ry·Rx 约定。
+    """
+    x, y, z, w = euler_to_quaternion(rot_deg)
+    vx, vy, vz = v
+    # v' = v + 2w(q×v) + 2q×(q×v)
+    cx, cy, cz = y * vz - z * vy, z * vx - x * vz, x * vy - y * vx
+    c2x, c2y, c2z = y * cz - z * cy, z * cx - x * cz, x * cy - y * cx
+    return (vx + 2.0 * (w * cx + c2x),
+            vy + 2.0 * (w * cy + c2y),
+            vz + 2.0 * (w * cz + c2z))
+
+
 def layer_geometry(width_m: float, aspect: float, curvature: float) -> dict:
     """把「面板宽 + 宽高比 + 弯曲度」换算成合成层参数。
 
-    `curvature` 沿用 Windows 侧 `setOverlayCurvature` 的 0~1 语义：
-    0 = 平面（Quad），>0 = 柱面（Cylinder）。半径由弧长关系反推，保证**弦长仍是 width_m**。
+    `curvature` 沿用 Windows 侧 `SetOverlayCurvature` 的语义（openvr.h 原文：
+    「curvature 是占整圆的比例，1 = 完全闭合的圆柱；给定半径时
+    curvature = overlay.width / (2π·r)」）：
+
+        central_angle = 2π · curvature        radius = width_m / central_angle
+
+    即 **width_m 是弧长**（弯曲 0.5 = 180° 时，看到的弦长只有弧长的 64% —— 与 Windows 一致）。
+
+    ⚠️ 半径**不能**直接当层的位置用：OpenXR 柱面层里 `pose` 是**圆柱的轴（圆心）**，
+    可见弧面在 pose 局部 −Z 方向、距原点 `radius` 处（Monado `layer_cylinder.vert`：
+    `x = sin(a)·r`、`z = −cos(a)·r` ⇒ 表面点满足 x²+z²=r²，轴过 pose 原点）。
+    所以这里一并给出 **pose_offset**（面板局部 +Z 上挪 radius），
+    由调用方用面板的 rot 转过去加到位置上 —— 见 `submit()` 与 `rotate_vector()`。
     """
     aspect = aspect if aspect > 0 else 1.0
-    if curvature <= 0.0:
+    # 小到这个程度就按平面处理：半径已经是宽度的 1/(2πc) 倍（c=0.005 → r≈32×宽），
+    # 肉眼与平面无异，再小只会让半径往几百米上飙（数值上没必要，规范里 inf 也是「无限柱」）。
+    if curvature <= 0.005:
         return {"kind": "quad", "size": (width_m, width_m / aspect)}
-    angle = max(0.2, min(1.5, curvature * 5.0))
+    angle = min(2.0 * math.pi - 1e-3, 2.0 * math.pi * curvature)
     return {"kind": "cylinder", "radius": width_m / angle,
-            "central_angle": angle, "aspect_ratio": aspect}
+            "central_angle": angle, "aspect_ratio": aspect,
+            "pose_offset": (0.0, 0.0, width_m / angle)}
 
 
 def should_rebuild(old: OverlayConfig, new: OverlayConfig) -> tuple[bool, bool]:
@@ -142,7 +212,19 @@ def should_rebuild(old: OverlayConfig, new: OverlayConfig) -> tuple[bool, bool]:
               or new.source_font_size != old.source_font_size
               or new.size_px != old.size_px
               or new.max_lines != old.max_lines
-              or new.show_source != old.show_source)
+              or new.show_source != old.show_source
+              # ↓ 这些**只影响贴图像素**（底板/原文/边框/分隔线/两端色条）：
+              #   不重渲的话，界面上拖「底板不透明度/原文不透明度」就只是看着生效。
+              or new.bg_alpha != old.bg_alpha
+              or new.source_alpha != old.source_alpha
+              or new.border_alpha != old.border_alpha
+              or new.separator != old.separator
+              or new.color_bg != old.color_bg
+              or new.color_border != old.color_border
+              or new.color_source != old.color_source
+              or new.color_translation != old.color_translation
+              or new.color_mine != old.color_mine
+              or new.color_theirs != old.color_theirs)
     return (geo or anchor), render
 
 
@@ -340,6 +422,9 @@ class XrOverlaySession:
         self._action_map: dict[str, Any] = {}     # anchor_key → (action, space)
         self._anchor_key: tuple[str, int] | None = None
         self._frame_state: Any = None
+        # 「整层 alpha + 转字节」的记忆化缓存：(帧, alpha, bytes)。
+        # 帧循环每帧重提同一张图，没有它就要每帧白跑一次 LUT。
+        self._prep: tuple[Any, float, bytes] | None = None
         # 会话状态（IDLE→READY→SYNCHRONIZED→VISIBLE→FOCUSED）。**很关键**：
         # `xrSyncActions` 在非 FOCUSED 时会直接抛 `XR_ERROR_SESSION_NOT_FOCUSED`
         # （Monado 源码 oxr_input.c 明写 "Can only call this function if the session
@@ -567,8 +652,14 @@ class XrOverlaySession:
                     pass
         return state
 
-    def submit(self, image: Any, cfg: OverlayConfig) -> None:
-        """把一张 PIL 图作为一层提交上去。失败抛异常（由上层决定自愈）。"""
+    def submit(self, image: Any, cfg: OverlayConfig,
+               alpha: float | None = None) -> None:
+        """把一张 PIL 图作为一层提交上去。失败抛异常（由上层决定自愈）。
+
+        `alpha` 是整层 alpha 乘子（缺省取 `cfg.alpha`）。OpenXR 没有
+        `setOverlayAlpha` 那种 API，只能自己乘进贴图的 alpha 通道；而且淡出要
+        **逐帧**变（静默超时就归零），所以由调用方每帧算、这里只负责记忆化。
+        """
         import xr
         w, h = image.size
         self.pump_events()
@@ -592,26 +683,39 @@ class XrOverlaySession:
             except Exception as exc:  # noqa: BLE001
                 log.debug("[overlay:xr] sync_actions 失败（本帧不同步）：%s: %s",
                           type(exc).__name__, exc)
-        self._gl.upload(self.textures[idx], w, h, image.tobytes())
+        self._gl.upload(self.textures[idx], w, h,
+                        self._prepared(image, cfg.alpha if alpha is None else alpha))
         xr.release_swapchain_image(self.swapchain)
 
         sub = xr.SwapchainSubImage(
             swapchain=self.swapchain,
             image_rect=xr.Rect2Di(offset=xr.Offset2Di(0, 0),
                                   extent=xr.Extent2Di(w, h)))
+        geo = layer_geometry(cfg.width_m, w / h if h else 1.0, cfg.curvature)
+        # ★ 柱面层的 pose 是**圆柱的轴（圆心）**，不是面板位置：不补偿的话圆心会落在
+        #   用户设的位置、而可见弧面整体沿局部 −Z 漂出 radius 远（实测现象就是
+        #   「圆点跑到我设的位置、面板飘走了」）。把轴沿面板局部 +Z 挪 radius，
+        #   弧面中点就回到与平面层相同的位置 —— 也就是 Windows/SteamVR 的观感
+        #   （中心不动，两侧朝你卷）。
+        pos = cfg.pos
+        if geo["kind"] == "cylinder":
+            ox, oy, oz = rotate_vector(cfg.rot, geo["pose_offset"])
+            pos = (pos[0] + ox, pos[1] + oy, pos[2] + oz)
         pose = xr.Posef(
             orientation=xr.Quaternionf(*euler_to_quaternion(cfg.rot)),
-            position=xr.Vector3f(*cfg.pos))
-        geo = layer_geometry(cfg.width_m, w / h if h else 1.0, cfg.curvature)
+            position=xr.Vector3f(*pos))
         space = self.anchor_space(cfg.anchor)
+        # ★ 两个 flag 缺一不可：BLEND 让贴图的 alpha 真的生效（否则整层不透明 →
+        #   蓝框外一圈黑边），UNPREMULTIPLIED 声明我们给的是未预乘 alpha
+        #   （PIL 的语义，与 Windows 侧给 SteamVR 的一致）。见 layer_alpha_flags()。
         if geo["kind"] == "cylinder":
             layer = xr.CompositionLayerCylinderKHR(
-                sub_image=sub, pose=pose, space=space,
+                layer_flags=layer_alpha_flags(), sub_image=sub, pose=pose, space=space,
                 radius=geo["radius"], central_angle=geo["central_angle"],
                 aspect_ratio=geo["aspect_ratio"])
         else:
             layer = xr.CompositionLayerQuad(
-                sub_image=sub, pose=pose, space=space,
+                layer_flags=layer_alpha_flags(), sub_image=sub, pose=pose, space=space,
                 size=xr.Extent2Df(*geo["size"]),
                 eye_visibility=xr.EyeVisibility.BOTH)
         base_t = ctypes.POINTER(xr.CompositionLayerBaseHeader)
@@ -620,6 +724,21 @@ class XrOverlaySession:
             display_time=frame.predicted_display_time,
             environment_blend_mode=xr.EnvironmentBlendMode.OPAQUE,
             layer_count=1, layers=arr))
+
+    def _prepared(self, image: Any, alpha: float) -> bytes:
+        """按 `(帧, 整层 alpha)` 记忆化「乘 alpha + 转字节」的结果。
+
+        帧循环**每帧都要重提同一张图**（OpenXR 的 composition layer 不是持久对象），
+        所以这里必须缓存，否则每帧白过一次 1024x440 的 LUT。缓存里**持有这帧的
+        引用**，`id()` 就不可能被回收复用，键也就不会撞车。
+        """
+        k = max(0.0, min(1.0, float(alpha)))
+        cached = self._prep
+        if cached is not None and cached[0] is image and cached[1] == k:
+            return cached[2]
+        data = apply_overlay_alpha(image, k).tobytes()
+        self._prep = (image, k, data)
+        return data
 
     def destroy(self) -> None:
         """幂等销毁（顺序：swapchain → session → instance）。"""
@@ -691,6 +810,9 @@ class OpenXrOverlay:
         self._img_lock = threading.Lock()
         self._pending_img: Any | None = None     # 新渲染的一帧（待上传）
         self._shown_img: Any | None = None       # 当前该显示的一帧（每帧重提用）
+        # 「最后一次**有新内容**的时刻」——`fade_after_s` 超时后整层 alpha 归零
+        # （Windows 侧是 `setOverlayAlpha(0)`，语义刻意保持一致）
+        self._last_content_at = 0.0
 
     # ---------- 生命周期 ----------
     def start(self) -> bool:
@@ -741,6 +863,18 @@ class OpenXrOverlay:
             self.available = False
             self._teardown(keep_gl=False)     # 同线程清理（GL context 线程绑定）
 
+    def _layer_alpha(self) -> float:
+        """当前该用的**整层** alpha（Linux 侧的 `setOverlayAlpha()`）。
+
+        `fade_after_s > 0` 且静默超过它 → 直接归零（与 Windows 侧一致：是**消失**，
+        不是渐变 —— 那边就是 `setOverlayAlpha(0.0)`）。
+        """
+        cfg = self.cfg
+        if cfg.fade_after_s > 0 and self._last_content_at:
+            if time.monotonic() - self._last_content_at > cfg.fade_after_s:
+                return 0.0
+        return max(0.0, min(1.0, float(cfg.alpha)))
+
     def _frame_loop(self) -> None:
         """后台帧循环：泵事件 → 每帧同步动作 → 每帧重提「当前该显示的那一帧」。
 
@@ -777,7 +911,7 @@ class OpenXrOverlay:
                 time.sleep(0.05)        # 未 running 时绝不进 wait_frame（会吊死）
                 continue
             try:
-                sess.submit(img, self.cfg)
+                sess.submit(img, self.cfg, self._layer_alpha())
             except Exception as exc:  # noqa: BLE001
                 self._fails += 1
                 self._fails_in_stage += 1
@@ -866,6 +1000,7 @@ class OpenXrOverlay:
             return
         self._last_render = (text, source)
         self._last_entries = None
+        self._last_content_at = time.monotonic()      # 有新内容 → 重置淡出计时
         self._queue_frame(render_panel(text, source, self.cfg))
 
     def update_entries(self, entries: list, force: bool = False) -> None:
@@ -880,6 +1015,7 @@ class OpenXrOverlay:
             return
         self._last_entries = key
         self._last_render = None
+        self._last_content_at = time.monotonic()      # 有新内容 → 重置淡出计时
         self._queue_frame(render_conversation(entries, self.cfg))
 
     def _queue_frame(self, img) -> None:  # noqa: ANN001
@@ -965,7 +1101,10 @@ class OpenXrOverlay:
             log.warning("[overlay:xr] 读配置失败（本次不重载）：%s", exc)
             return
         geo, render = should_rebuild(self.cfg, new_cfg)
-        if not (geo or render):
+        # 淡出阈值既不改几何也不改贴图 —— 它只影响帧循环里逐帧算的整层 alpha。
+        # 但配置对象**必须**换掉，否则界面上改了 fade_after_s 存盘后不生效。
+        fade_only = new_cfg.fade_after_s != self.cfg.fade_after_s
+        if not (geo or render or fade_only):
             return
         cached_entries = self._last_entries_cached
         cached_render = self._last_render_cached
@@ -993,34 +1132,106 @@ class OpenXrOverlay:
 
 # ================================================================ 冒烟自检
 
-def _smoke(seconds: float = 15.0) -> int:
-    """建会话 → 反复提交一帧示例面板 → 到点退出。不需要 API key、不连网。
+def render_alpha_test(cfg: OverlayConfig | None = None) -> Any:
+    """画一张「一眼就能看出 alpha 对不对」的判定图（`--smoke --alpha-test` 用）。
+
+    底板/边框沿用真实面板的配色与留白，所以看它 ≈ 看真面板：
+
+      * **12px 透明边距 + 圆角**：外面一旦出现黑边，就是图层的 alpha 没生效
+        （缺 `BLEND_TEXTURE_SOURCE_ALPHA_BIT`）—— 正是「蓝框外一圈黑」的病根；
+      * **四块 25/50/75/100% 不透明度的灰块**：应当由淡到实。整体偏亮、半透明的块
+        发白，就说明未预乘 alpha 被当成预乘了（缺 `UNPREMULTIPLIED_ALPHA_BIT`）；
+      * **一行 100% 不透明的白字**：底板半透明不该把文字一起变淡
+        （整层乘子只乘 alpha 通道，RGB 不动）。
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    cfg = cfg or OverlayConfig()
+    w, h = cfg.size_px
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = 12                              # 与 render_panel 一致的留白：这一圈必须全透明
+    d.rounded_rectangle([pad, pad, w - pad, h - pad], radius=28,
+                        fill=(*cfg.color_bg, cfg.bg_alpha),
+                        outline=(*cfg.color_border, cfg.border_alpha), width=3)
+
+    def _font(size: int) -> ImageFont.FreeTypeFont:
+        path = resolve_font_path(cfg.font)
+        if path:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:  # noqa: BLE001 — 字体坏了也别让判定图画不出来
+                pass
+        return ImageFont.load_default()
+
+    f_title = _font(max(18, cfg.font_size - 4))
+    f_label = _font(max(14, cfg.source_font_size))
+    x0 = pad * 2 + 6
+    d.text((x0, pad * 2), "ALPHA TEST", font=f_title, fill=(*cfg.color_translation, 255))
+
+    levels = (64, 128, 191, 255)          # 25% / 50% / 75% / 100%
+    gap = 20
+    bar = max(24, (w - 2 * x0 - gap * (len(levels) - 1)) // len(levels))
+    top = pad * 3 + cfg.font_size
+    bottom = top + max(60, h // 4)
+    for i, a in enumerate(levels):
+        x = x0 + i * (bar + gap)
+        d.rectangle([x, top, x + bar, bottom], fill=(235, 235, 235, a))
+        d.text((x, bottom + 10), f"{round(a / 255 * 100)}%",
+               font=f_label, fill=(*cfg.color_translation, 255))
+    d.text((x0, bottom + 22 + cfg.source_font_size), "文字必须实心 / text stays solid",
+           font=f_label, fill=(*cfg.color_translation, 255))
+    return img
+
+
+def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
+    """建会话 → 持续提交一帧面板 → 到点退出。不需要 API key、不连网。
 
     这是「真后端能不能用」的端到端验证入口（等价于 Windows 侧的 `--demo`，
-    但会**真的把面板贴到你眼前**，因为要验的正是 XR 那一段）。
+    但会**真的把面板贴到你眼前**，因为要验的正是 XR 那一段）：
 
         python3 -m vlt.output.openxr_overlay --smoke 15
+        python3 -m vlt.output.openxr_overlay --smoke 20 --alpha-test
+
+    ⚠️ 会读**你自己的 config.yaml**（存在的话）：透明度和贴手腕的位置/角度都是
+    真机要看的参数，用默认值测等于没测。想边看边调：改 config.yaml 存盘即热重载。
     """
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from ..paths import APP_DIR
+    cfg_path = Path(APP_DIR) / "config.yaml"
     cfg = OverlayConfig()
-    ov = OpenXrOverlay(cfg)
+    if cfg_path.exists():
+        try:
+            import yaml
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            cfg = OverlayConfig.from_dict(raw.get("overlay") or {})
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ 读 {cfg_path} 失败，这次用默认参数：{exc}", flush=True)
+    ov = OpenXrOverlay(cfg, config_path=cfg_path if cfg_path.exists() else None)
     if not ov.start():
         print("❌ 启动失败（上面有原因）。手腕屏需要：Wayland 会话 + 已连接的 OpenXR 运行时"
               "（WiVRn/Monado 且头显已连）", flush=True)
         return 1
-    img = render_panel(
-        "你好，我是逆袭。这句话正在被实时翻译，看看贴在你手腕上是什么效果。",
-        "Hello! I'm Nixi. This sentence is being translated in real time.")
-    print(f"✅ 会话已建立，接下来 {seconds:.0f}s 内每 100ms 重提交一帧（你会看到这块面板）。"
-          f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offset，存盘即热重载。",
-          flush=True)
+    if alpha_test:
+        ov._queue_frame(render_alpha_test(cfg))
+        print("✅ 会话已建立，正在提交 **alpha 判定图**。要看三点：\n"
+              "   ① 蓝色边框外面是否**全透明**（有黑边 = 图层 alpha 没生效）\n"
+              "   ② 四块灰是否由淡到实（发白/发光 = 未预乘 alpha 被当成预乘）\n"
+              "   ③ 白字是否实心（跟着底板一起变淡 = 乘子乘到了 RGB）", flush=True)
+    else:
+        ov.update("你好，我是逆袭。这句话正在被实时翻译，看看贴在你手腕上是什么效果。",
+                  "Hello! I'm Nixi. This sentence is being translated in real time.")
+        print(f"✅ 会话已建立，接下来 {seconds:.0f}s 内会持续重提交这一帧（你会看到这块面板）。"
+              f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offset，存盘即热重载。",
+              flush=True)
     t0 = time.monotonic()
     seen_states: list[str] = []
     next_report = t0 + 1.0
     try:
         while time.monotonic() - t0 < seconds:
-            ov._submit(img)          # 覆盖提交（面板要持续重提交才会一直显示）
+            # 面板由后台帧循环每帧重提 —— 这里只报状态（原来那句 ov._submit()
+            # 早就不存在了：提交已搬进帧循环线程，见 _frame_loop）
             ov.tick()
             st = str(getattr(ov._sess, "state", None)).rsplit(".", 1)[-1]
             if not seen_states or seen_states[-1] != st:
@@ -1029,6 +1240,7 @@ def _smoke(seconds: float = 15.0) -> int:
                 next_report = time.monotonic() + 3.0
                 print(f"    [{time.monotonic()-t0:4.1f}s] 会话状态={st} "
                       f"已提交={ov.frames_updated} 帧 "
+                      f"整层 alpha={ov._layer_alpha():.2f} "
                       f"锚点追踪={ov._sess.anchor_tracked(cfg.anchor)}", flush=True)
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -1050,5 +1262,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="OpenXR 手腕屏后端（冒烟自检）")
     ap.add_argument("--smoke", type=float, default=15.0, metavar="秒",
                     help="建会话并持续提交示例面板，默认 15 秒")
+    ap.add_argument("--alpha-test", action="store_true",
+                    help="改提交「透明边距 + 25/50/75/100%% 半透明块 + 实心白字」判定图，"
+                         "用来肉眼验收通透性")
     args = ap.parse_args()
-    raise SystemExit(_smoke(args.smoke))
+    raise SystemExit(_smoke(args.smoke, args.alpha_test))

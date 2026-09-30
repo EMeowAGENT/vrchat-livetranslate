@@ -21,7 +21,8 @@
 2. **包内导入 + 反向排除** —— 用**包内那份解释器**（不是宿主的）导入核心模块，
    并断言 Windows 独占模块**不在**包里（`vlt.platform.win` / `vlt.output.openvr_overlay`）。
 3. **离线渲染一帧** —— `python -m vlt.output.overlay --out <png>`：验证 Pillow + 字体
-   链路真的能出图。不需要显示器。
+   链路真的能出图，并断言「边距全透明 + 底板半透明」（这两条坏了，手腕屏上就是
+   蓝框外面一圈黑边）。不需要显示器。第 ② 步还会断言图层 alpha 的 flag 在包里。
 4. **Tk 中日韩字体可见** —— 只有**有显示器**时才跑（无显示器 → 明确提示「跳过 = 未验证」）。
    CI 里用 xvfb-run 让它真的跑起来；本地不想开显示就不跑。构建脚本换的那份 Xft 版 Tk
    对不对，只有这一步能验。
@@ -108,6 +109,11 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
             "import importlib.util as u, sysconfig\n"
             "from pathlib import Path\n"
             "import vlt.gui, vlt.engine, vlt.output.openxr_overlay, vlt.platform\n"
+            "from vlt.output.openxr_overlay import layer_alpha_flags\n"
+            # ★ 图层 alpha 的开关必须在**打进包里的那份代码**里：少了它，面板会整层
+            #   按不透明合成 = 蓝框外面一圈黑边（贴图侧的透明边距被当实心黑画出来）
+            "flags = int(layer_alpha_flags())\n"
+            "assert flags & 0x2 and flags & 0x4, f'图层 alpha flag 不对：0x{flags:x}'\n"
             "for bad in ('vlt.platform.win', 'vlt.output.openvr_overlay'):\n"
             "    assert u.find_spec(bad) is None, f'Linux 产物里不该有 {bad}'\n"
             + slim_expect + slim_gone +
@@ -127,6 +133,20 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
             res = _run(["-m", "vlt.output.overlay", "--out", str(out)])
             if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
                 _ok(f"渲染成功（{out.stat().st_size} 字节）")
+                # 顺带钉住「边距全透明 + 底板半透明」：这一条坏了，手腕屏上就是
+                # 「蓝框外面一圈黑」（图层 alpha 那条判据在 ② 里，两条独立失效路径）
+                from PIL import Image
+                with Image.open(out) as im:
+                    w, h = im.size
+                    px = im.convert("RGBA").load()
+                    corners = [px[xy][3] for xy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))]
+                    plate = px[(w // 2, h - 20)][3]
+                if any(corners):
+                    _fail(f"渲染图四角不透明（{corners}）→ 面板边距在屏上会是黑边")
+                elif not 0 < plate < 255:
+                    _fail(f"底板不透明（alpha={plate}）→ 半透明没有生效")
+                else:
+                    _ok(f"边距全透明 + 底板半透明（底板 alpha={plate}）")
             else:
                 _fail(f"离线渲染失败：{(res.stderr or res.stdout).strip()[:400]}")
         else:
