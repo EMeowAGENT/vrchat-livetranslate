@@ -44,6 +44,7 @@ import math
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -363,6 +364,84 @@ def test_recheck_to_empty_keeps_waiting_then_recovers() -> None:
     assert "[level] ✅" in out, f"恢复要有留痕：{out!r}"
     print(f"  ✓ F1+F2：目标消失 → 关采集（close {made[0].close_calls} 次）且 has_data=False；"
           f"目标回来 → 自动接上（第 {len(made)} 路）")
+
+
+def test_recheck_empty_baseline_never_shows_stale_stream() -> None:
+    """★ #26-1 残余窗口：open 成功、但当次复查签名已空（VRChat 恰在这几毫秒退出，
+    或这次枚举抛错被 `pick_vrchat_targets` 吞成空）→ 立刻关掉那一路、按「目标不在」处理。
+
+    旧实现把这次空签名**当基线**记下：`pw-record` 其实已按 `node.autoconnect` 回落到
+    麦克风，而此后每次 recheck 也返回空、与基线相等 → **永不重开**，界面照样跳数字。
+    """
+    sig = [""]                                   # 复查口径一开始就看不到目标
+    opens: list[int] = []
+    made: list[FakeSource] = []
+
+    def opener():
+        opens.append(1)
+        # 第一次：目标还在（open 成功）—— 模拟「open 与复查之间 VRChat 退出」；
+        # 之后按 sig 走真实现的口径（没目标就抛），这才轮到低频重试。
+        if len(opens) == 1 or sig[0]:
+            s = FakeSource([_pcm(3277)], repeat=True)
+            made.append(s)
+            return s
+        raise RuntimeError(level_probe_mod._NO_TARGET_MSG)
+
+    p = _probe(opener, recheck=lambda: sig[0], recheck_s=0.05, retry_s=0.05)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p.start()
+        _wait_for(lambda: made and made[0].close_calls >= 1,
+                  what="空基线：刚开出来的那一路被立刻关掉")
+        assert p.has_data is False, "★ 空基线期间不许把麦克风的电平当 VRChat 显示"
+        assert p.level_db == LEVEL_FLOOR_DB
+        assert p.running is True, "仍要留在等待里（低频自愈），不是永久死掉"
+        sig[0] = "4273"                          # VRChat 回来
+        _wait_for(lambda: len(made) >= 2 and p.has_data, what="目标回来后自动接上")
+        assert abs(p.level_db - _db_of(3277)) < 0.05, f"接上后读数不对：{p.level_db:.2f}"
+    p.stop()
+    out = buf.getvalue()
+    assert out.count("[level] ❌") == 1, f"同一理由只留一行、不刷屏：{out!r}"
+    assert "[level] ✅" in out, f"恢复要有留痕：{out!r}"
+    print(f"  ✓ #26-1：空基线 → 立刻关掉第 1 路（close {made[0].close_calls} 次）、"
+          f"has_data=False、等待后自动接上（第 {len(made)} 路）；失败日志 1 行")
+
+
+def test_has_data_cleared_before_reopen_finishes() -> None:
+    """★ #26-2：关旧源那一刻 `has_data` 就要归 False。
+
+    重开一路在 Linux 上是拉起 `pw-record` 的数百毫秒，这段窗口里界面判据是
+    `probe.running and probe.has_data` —— 旧实现要等下一轮 `opener()` 返回才置 False，
+    于是这段窗口画的是**冻结的旧 dB**，而不是「—」。
+    """
+    sig = ["3684"]
+    made: list[FakeSource] = []
+    gate = threading.Event()                     # 卡住第二路 opener，模拟「设备正在拉起」
+
+    def opener():
+        if not made:
+            s = FakeSource([_pcm(3277)], repeat=True)
+            made.append(s)
+            return s
+        gate.wait(timeout=3.0)
+        s = FakeSource([_pcm(3277)], repeat=True)
+        made.append(s)
+        return s
+
+    p = _probe(opener, recheck=lambda: sig[0], recheck_s=0.05, retry_s=0.05)
+    with contextlib.redirect_stdout(io.StringIO()):   # 收掉探针自己的「采集目标变化」日志
+        p.start()
+        try:
+            _wait_for(lambda: p.has_data and made and made[0].read_calls >= 1, what="第一路出数")
+            sig[0] = "3684|3833"                 # 目标变化 → 关旧源、准备重开
+            _wait_for(lambda: made[0].close_calls >= 1, what="旧源被关")
+            # 此刻第二次 opener 还卡在 gate 里（重开尚未完成）
+            assert p.has_data is False, "★ 关源后 has_data 必须已经归 False（不许画冻结旧 dB）"
+            assert p.running is True, "重开期间线程仍活着"
+        finally:
+            gate.set()
+            p.stop()
+    print("  ✓ #26-2：旧源关闭即 has_data=False（重开未完成期间界面显示「—」而非旧读数）")
 
 
 def test_no_fake_level_before_first_chunk() -> None:
@@ -855,6 +934,8 @@ def main() -> int:
         test_open_failure_recovers_when_target_appears,
         test_recheck_reopens_when_targets_change,
         test_recheck_to_empty_keeps_waiting_then_recovers,
+        test_recheck_empty_baseline_never_shows_stale_stream,
+        test_has_data_cleared_before_reopen_finishes,
         test_no_fake_level_before_first_chunk,
         test_open_level_source_linux_branch,
         test_read_error_leaves_trace_and_closes_device,

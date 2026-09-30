@@ -70,6 +70,11 @@ from .platform.audio import MixedAudioSource
 
 LOG = "[level]"
 
+# Linux：枚举不到 VRChat 播放流时的统一文案。「开不出设备」与「开出来之后复查发现目标
+# 已消失」在用户看来是同一件事（VRChat 没在出声），故意用**同一句话** —— 低频重试路径靠
+# 「同一理由只留一行」节流，两种入口文案一致才不会交替刷屏（#26-1）。
+_NO_TARGET_MSG = "没找到 VRChat 的音频输出流（VRChat 在跑并且出声了吗？）"
+
 # 单次 read 的超时。它同时决定两件事：①「静音」多久把电平归到地板值；
 # ② `stop()` 的最大延迟（线程要等这一次 read 返回才看得到停止位）。
 # 取 0.2s：远小于引擎的 1.0s，关设置窗时不会有可感的卡顿。
@@ -115,7 +120,7 @@ def open_level_source(device_name: str | None = None) -> Any:
     if platform.IS_LINUX:
         targets = pick_vrchat_targets()
         if not targets:
-            raise RuntimeError("没找到 VRChat 的音频输出流（VRChat 在跑并且出声了吗？）")
+            raise RuntimeError(_NO_TARGET_MSG)
         opened = [backend.open_loopback(t, blocksize=CHUNK_BYTES) for t in targets]
         print(f"{LOG} 探针采集 {len(opened)} 路 VRChat 输出："
               f"{'、'.join(t.name for t in targets)}", flush=True)
@@ -246,6 +251,18 @@ class LevelProbe:
             self.has_data = False          # 刚开的一路：读到第一块之前不许假装有电平
             self._note_open()
             sig = self._recheck() if self._recheck is not None else None
+            if self._recheck is not None and not sig:
+                # ★ 开成功、但当次复查已经看不到任何目标：VRChat 恰在这几毫秒里退出，
+                #   或者这次枚举抛错（`engine.pick_vrchat_targets` 把异常吞成 `[]`）。
+                #   这时 `pw-record` 已按 `node.autoconnect` 回落到麦克风 —— 若把空签名
+                #   就势记成基线，之后每次 recheck 也返回空、与基线相等，就会**永不重开**，
+                #   读数一直是麦克风的电平（#26-1）。所以直接关源、按「目标不在」处理，
+                #   与引擎腿「want = 真正被 open 的那一批」的口径对齐。
+                self._close_source()
+                self._enter_waiting(RuntimeError(_NO_TARGET_MSG))
+                if not await self._sleep(self._retry_s):
+                    break
+                continue
             try:
                 again = await self._read_until_change(source, sig)
             finally:
@@ -325,6 +342,11 @@ class LevelProbe:
         if src is None:
             return
         self._source = None
+        # ★ 「关源」与「读数打回 —」要同时发生：重开一路在 Linux 上是拉起 `pw-record`
+        #   的数百毫秒，这段窗口里若 `has_data` 仍为 True，界面（判据是
+        #   `probe.running and probe.has_data`）会画**冻结的旧 dB**、而不是「—」（#26-2）。
+        #   以前要等下一轮 `opener()` 返回才置 False，正好漏掉这段窗口。
+        self.has_data = False
         try:
             src.close()
         except Exception as exc:  # noqa: BLE001 — 关不上也不该把停止流程带崩
