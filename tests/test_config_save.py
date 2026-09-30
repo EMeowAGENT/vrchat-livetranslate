@@ -92,9 +92,10 @@ def main() -> int:
     data = yaml.safe_load(after)
     ov = data.get("overlay") or {}
     offsets = ov.get("offsets") or {}
-    # 别的锚点必须原封不动（「各存各的」）：把本次动过的 tracker 摘掉再跟保存前比对
+    # 别的锚点必须原封不动（「各存各的」）：两边都摘掉本次动过的 tracker 再比对
     off_before = ((yaml.safe_load(before) or {}).get("overlay") or {}).get("offsets") or {}
     other_after = {k: v for k, v in offsets.items() if k != "tracker"}
+    other_before = {k: v for k, v in off_before.items() if k != "tracker"}
     for name, got, want in [
         ("overlay.anchor", ov.get("anchor"), "tracker"),
         ("overlay.tracker_index", ov.get("tracker_index"), 1),
@@ -106,7 +107,7 @@ def main() -> int:
         ("overlay.offset.curvature", (ov.get("offset") or {}).get("curvature"), 0.15),
         ("overlay.enabled", ov.get("enabled"), True),
         # 别的锚点那一份必须原封不动（这就是「各存各的」）
-        ("overlay.offsets 里别的锚点", other_after, off_before),
+        ("overlay.offsets 里别的锚点", other_after, other_before),
         ("overlay.offset.pos（兜底不该被写）", (ov.get("offset") or {}).get("pos"),
          ((yaml.safe_load(before) or {}).get("overlay") or {}).get("offset", {}).get("pos")),
     ]:

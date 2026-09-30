@@ -20,6 +20,7 @@ from __future__ import annotations
 import inspect
 import math
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -516,6 +517,159 @@ def test_backend_xr_calls_are_wellformed():
     print(f"  后端 {calls} 处 xr.* 调用：句柄/个数/字段 全部正确 OK")
 
 
+class _Rec:
+    """一条假记录（够 pyopenxr 那种「构造器只装字段」的用法）。"""
+
+    def __init__(self, *args, **kw):
+        self.args = args
+        self.__dict__.update(kw)
+
+
+class _FakeXr(types.ModuleType):
+    """够用的 pyopenxr 假模块：记调用，并模拟「attach 只能一次」这条规范。
+
+    `bad_path` 里给的子串视为运行时**不认**的路径（`string_to_path` 抛），
+    用来验证「某个锚点降级、别的锚点照常」。
+    """
+
+    def __init__(self, bad_path: str = ""):
+        super().__init__("xr")
+        self.calls: list[str] = []
+        self.attached = False
+        self.bad_path = bad_path
+        self.ActionType = types.SimpleNamespace(POSE_INPUT="pose")
+        self.SpaceLocationFlags = types.SimpleNamespace(POSITION_TRACKED_BIT=2)
+        for name in ("ActionSetCreateInfo", "ActionCreateInfo", "Posef", "Quaternionf",
+                     "Vector3f", "InteractionProfileSuggestedBinding", "ActionSuggestedBinding",
+                     "SessionActionSetsAttachInfo", "ActionSpaceCreateInfo", "Time"):
+            setattr(self, name, _Rec)
+
+    def create_action_set(self, inst, info):
+        self.calls.append("create_action_set")
+        return _Rec(kind="set")
+
+    def create_action(self, aset, info):
+        self.calls.append(f"create_action:{info.action_name}")
+        return _Rec(kind="action", name=info.action_name)
+
+    def create_action_space(self, sess, info):
+        self.calls.append("create_action_space")
+        return _Rec(kind="space")
+
+    def suggest_interaction_profile_bindings(self, inst, info):
+        self.calls.append("suggest")
+
+    def attach_session_action_sets(self, sess, info):
+        if self.attached:          # ← 规范要求：第二次必须报错（老实现就死在这）
+            raise RuntimeError("ActionsetsAlreadyAttachedError: "
+                               "The session already has attached action sets.")
+        self.attached = True
+        self.calls.append("attach")
+
+    def string_to_path(self, inst, s):
+        if self.bad_path and self.bad_path in s:
+            raise RuntimeError(f"XR_ERROR_PATH_UNSUPPORTED: {s}")
+        return s
+
+    @staticmethod
+    def wait_frame(sess):
+        return _Rec(predicted_display_time=1234)
+
+    @staticmethod
+    def locate_space(space, ref, t):
+        return _Rec(location_flags=2)          # 一律当作「已追踪」，好验 space 的选择
+
+
+def _sess_in_fake_xr(fake: _FakeXr):
+    """起一个不碰真 XR 的会话对象（动作相关的方法只用 instance/session 句柄）。"""
+    from vlt.output.openxr_overlay import XrOverlaySession
+
+    saved = sys.modules.get("xr")
+    sys.modules["xr"] = fake
+    sess = XrOverlaySession(None, (64, 32))    # type: ignore[arg-type]
+    sess.instance, sess.session, sess.ref_space = object(), object(), object()
+    sess.view_space = object()
+    return sess, saved
+
+
+def _restore_xr(saved) -> None:
+    if saved is None:
+        sys.modules.pop("xr", None)
+    else:
+        sys.modules["xr"] = saved
+
+
+def test_anchor_actions_are_built_once_and_switchable():
+    """★ 回归：**动作集只能 attach 一次**，切锚点不许再建动作/再 attach。
+
+    真机故障（用户日志 `ActionsetsAlreadyAttachedError`）：老实现每换一次锚点就
+    `create_action` + `attach_session_action_sets` 一遍，而 OpenXR 规范明写——
+
+      * `xrAttachSessionActionSets`：called more than once → **must** return
+        `XR_ERROR_ACTIONSETS_ALREADY_ATTACHED`；
+      * `xrCreateAction` / `xrSuggestInteractionProfileBindings`：动作集 attach 之后就
+        **immutable**，再调同样返回该错。
+
+    于是「切左手」在真机上静默失败（异常被热重载的 except 吃掉），面板纹丝不动 ——
+    表现为「没法把面板绑到左手上」。修法是**开局一次建全**（左右手 + 8 个 tracker role），
+    attach 一次，之后切锚点只换用哪个 space。
+    """
+    fake = _FakeXr()
+    sess, saved = _sess_in_fake_xr(fake)
+    try:
+        sess.ensure_anchor("right_hand", 0)
+        right = sess.anchor_space("right_hand", 0)
+        assert right is not sess.view_space, "已追踪的右手锚点应当用动作空间"
+        assert sess.anchor_tracked("right_hand", 0) is True
+        assert fake.calls.count("attach") == 1, "首次应当 attach"
+
+        # 切锚点：绝不能抛（真机上这里就是 ActionsetsAlreadyAttachedError 的位置）
+        sess.ensure_anchor("left_hand", 0)
+        sess.ensure_anchor("tracker", 3)
+        sess.ensure_anchor("hmd", 0)
+        sess.ensure_anchor("right_hand", 0)
+
+        assert fake.calls.count("attach") == 1, f"attach 只能调用一次（规范）：{fake.calls}"
+        n_actions = sum(1 for c in fake.calls if c.startswith("create_action:"))
+        assert n_actions == 2 + len(TRACKER_ROLES), \
+            f"动作应当开局一次建全（左右手 + {len(TRACKER_ROLES)} 个 tracker role）：{n_actions}"
+        first_attach = fake.calls.index("attach")
+        last_action = max(i for i, c in enumerate(fake.calls) if c.startswith("create_action:"))
+        assert last_action < first_attach, \
+            f"attach 之后动作集就 immutable 了，建动作必须在 attach 之前：{fake.calls}"
+
+        left = sess.anchor_space("left_hand", 0)
+        assert left is not right and left is not sess.view_space, "左手要用自己的 space"
+        assert sess.anchor_space("right_hand", 0) is right, "切回来要拿回原来那个 space"
+        assert sess.anchor_space("hmd", 0) is sess.view_space, "hmd 用 VIEW 空间"
+        assert sess.anchor_tracked("hmd", 0) is None, "hmd 不该有锚点动作"
+    finally:
+        _restore_xr(saved)
+    print(f"  锚点动作只建一次（{2 + len(TRACKER_ROLES)} 个）+ attach 一次；"
+          f"切锚点/切回都取各自的 space OK")
+
+
+def test_unsupported_tracker_path_degrades_only_that_anchor():
+    """运行时**不认** tracker 的 role 路径时：只有那一个锚点降级，别的照常。
+
+    「动作一次建全」把风险也一起放大了：老实现只建当前锚点，所以运行时认不认
+    `/user/vive_tracker_htcx/role/...` 都不影响用左右手；改成开局全建之后，
+    一个不认的路径若直接抛出去，整条手腕屏都会起不来。所以每个锚点单独 try。
+    """
+    fake = _FakeXr(bad_path="vive_tracker_htcx")
+    sess, saved = _sess_in_fake_xr(fake)
+    try:
+        sess.ensure_anchor("left_hand", 0)          # 不该抛
+        assert sess.anchor_space("left_hand", 0) is not sess.view_space, "左右手必须照常可用"
+        assert sess.anchor_space("right_hand", 0) is not sess.view_space, "右手也必须照常可用"
+        assert sess.anchor_space("tracker", 0) is sess.view_space, "不认的锚点退回 VIEW 空间"
+        assert sess.anchor_tracked("tracker", 0) is None
+        assert fake.calls.count("attach") == 1, "一个路径不认也不影响 attach 只做一次"
+    finally:
+        _restore_xr(saved)
+    print("  tracker 路径不被运行时支持时：只该锚点降级到 VIEW，左右手不受影响 OK")
+
+
 if __name__ == "__main__":
     print("test_openxr_overlay:")
     test_quaternion_matches_matrix_convention()
@@ -534,4 +688,6 @@ if __name__ == "__main__":
     test_backend_config_field()
     test_composition_layers_declare_alpha_flags()
     test_backend_xr_calls_are_wellformed()
+    test_anchor_actions_are_built_once_and_switchable()
+    test_unsupported_tracker_path_degrades_only_that_anchor()
     print("ALL PASSED")

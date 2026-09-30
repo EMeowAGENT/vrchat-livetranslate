@@ -435,7 +435,13 @@ class XrOverlaySession:
         self.ref_space: Any = None          # LOCAL
         self.view_space: Any = None         # VIEW（anchor=hmd 用）
         self.action_set: Any = None
-        self._action_map: dict[str, Any] = {}     # anchor_key → (action, space)
+        # 锚点 → 动作/空间。**一次建全**：动作集一旦 attach 就变成 immutable，
+        # 之后 `xrCreateAction` / `xrSuggestInteractionProfileBindings` /
+        # `xrAttachSessionActionSets` 一律返回 XR_ERROR_ACTIONSETS_ALREADY_ATTACHED
+        # （规范原文见 `_ensure_actions`）。所以切锚点**不能**再建动作，只能换用哪个 space。
+        self._actions: dict[tuple[str, int], Any] = {}
+        self._spaces: dict[tuple[str, int], Any] = {}
+        self._actions_ready = False
         self._anchor_key: tuple[str, int] | None = None
         self._frame_state: Any = None
         # 「整层 alpha + 转字节」的记忆化缓存：(帧, alpha, bytes)。
@@ -556,50 +562,105 @@ class XrOverlaySession:
         self._create_swapchain()
 
     # ---------- 锚点 ----------
-    def ensure_anchor(self, anchor: str, tracker_index: int) -> None:
-        """确保配置要求的锚点空间已建立（改锚点时重建）。"""
-        key = (anchor, int(tracker_index))
-        if key == self._anchor_key:
+
+    # 手部锚点建议绑定的交互 profile。只给一个的话，控制器型号对不上就完全没有 pose。
+    HAND_PROFILES = (
+        "/interaction_profiles/khr/simple_controller",
+        "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/valve/index_controller",
+        "/interaction_profiles/microsoft/motion_controller",
+        "/interaction_profiles/htc/vive_controller",
+    )
+    # tracker 走 **HTC Vive Tracker 专用 profile**（`/user/vive_tracker_htcx/role/...`
+    # 是它的子动作路径）。拿控制器 profile 去绑 tracker 路径会被运行时判成无效绑定。
+    TRACKER_PROFILE = "/interaction_profiles/htc/vive_tracker_htcx"
+
+    @staticmethod
+    def _anchor_keys() -> list[tuple[str, int]]:
+        """开局就把这些锚点的动作全建出来（attach 之后就再也不能建了）。"""
+        return ([("left_hand", 0), ("right_hand", 0)]
+                + [("tracker", i) for i in range(len(TRACKER_ROLES))])
+
+    def _ensure_actions(self) -> None:
+        """建好全部锚点动作 + 建议绑定 + attach —— **整个会话只做一次**。
+
+        规范（OpenXR `input.adoc`）写得没有余地：
+          * `xrAttachSessionActionSets`「**must** return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED
+            if called more than once for a given session」；
+          * `xrCreateAction` / `xrSuggestInteractionProfileBindings`：「If `actionSet` has been
+            included in a call to `xrAttachSessionActionSets`, the implementation **must**
+            return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED」——「When an action set is attached
+            to a session, that action set becomes **immutable**」。
+
+        老代码是「按需建动作」：每换一次锚点就 `create_action` + `attach` 一次，于是从
+        第二次起必然抛 `ActionsetsAlreadyAttachedError`，被热重载的 `except` 吃掉 ——
+        **面板压根没换过挂点**（用户实测日志：切左手/切 tracker 各报一次这条错）。
+        所以这里改成「一次建全、之后只换 space」。
+        """
+        if self._actions_ready:
             return
         import xr
-        full, top = anchor_paths(anchor, tracker_index)
-        if full is None:
-            self._anchor_key = key          # hmd → 直接用 view_space
-            return
         if self.action_set is None:
             self.action_set = xr.create_action_set(self.instance, xr.ActionSetCreateInfo(
                 action_set_name="vlt_wrist", localized_action_set_name="VLT Wrist Panel",
                 priority=0))
-        name = f"pose_{anchor}_{tracker_index}"
-        act = xr.create_action(self.action_set, xr.ActionCreateInfo(
-            action_name=name, action_type=xr.ActionType.POSE_INPUT,
-            localized_action_name="Wrist Anchor",
-            subaction_paths=[xr.string_to_path(self.instance, top)]))
-        # 建议多个 profile —— 只给一个的话，控制器型号对不上就完全没有 pose
-        for profile in ("/interaction_profiles/khr/simple_controller",
-                        "/interaction_profiles/oculus/touch_controller",
-                        "/interaction_profiles/valve/index_controller",
-                        "/interaction_profiles/microsoft/motion_controller",
-                        "/interaction_profiles/htc/vive_controller"):
+        for anchor, idx in self._anchor_keys():
+            # ★ 逐个锚点降级：某个运行时（或某版 Monado）不认 tracker 的 role 路径时，
+            #   只该让**那一个锚点**不可用，绝不能把整条手腕屏拖死 —— 现在开局就会建
+            #   全部 8 个 tracker role 的动作，一个不认就整条腿没了（老实现只建当前
+            #   锚点，所以踩不到，改成「一次建全」之后这层兜底是必须的）。
             try:
-                xr.suggest_interaction_profile_bindings(
-                    self.instance, xr.InteractionProfileSuggestedBinding(
-                        interaction_profile=xr.string_to_path(self.instance, profile),
-                        suggested_bindings=[xr.ActionSuggestedBinding(
-                            action=act, binding=xr.string_to_path(self.instance, full))]))
-            except Exception:  # noqa: BLE001 — 运行时不认的 profile 跳过
-                pass
+                full, top = anchor_paths(anchor, idx)
+                if full is None:                 # hmd → 用 VIEW 参考空间，不需要动作
+                    continue
+                act = xr.create_action(self.action_set, xr.ActionCreateInfo(
+                    action_name=f"pose_{anchor}_{idx}", action_type=xr.ActionType.POSE_INPUT,
+                    localized_action_name="Wrist Anchor",
+                    subaction_paths=[xr.string_to_path(self.instance, top)]))
+                profiles = ((self.TRACKER_PROFILE,) if anchor == "tracker"
+                            else self.HAND_PROFILES)
+                for profile in profiles:
+                    try:
+                        xr.suggest_interaction_profile_bindings(
+                            self.instance, xr.InteractionProfileSuggestedBinding(
+                                interaction_profile=xr.string_to_path(self.instance, profile),
+                                suggested_bindings=[xr.ActionSuggestedBinding(
+                                    action=act, binding=xr.string_to_path(self.instance, full))]))
+                    except Exception:  # noqa: BLE001 — 运行时不认的 profile/绑定跳过
+                        pass
+                self._actions[(anchor, idx)] = act
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的动作建不出来，该锚点退回 VIEW 空间"
+                            "（其它锚点不受影响）：%s: %s", anchor, idx, type(exc).__name__, exc)
+        # ★ 唯一的 attach 机会
         xr.attach_session_action_sets(self.session, xr.SessionActionSetsAttachInfo(
             action_sets=[self.action_set]))
-        space = xr.create_action_space(self.session, xr.ActionSpaceCreateInfo(
-            action=act, subaction_path=xr.string_to_path(self.instance, top),
-            pose_in_action_space=xr.Posef(
-                orientation=xr.Quaternionf(0.0, 0.0, 0.0, 1.0),
-                position=xr.Vector3f(0.0, 0.0, 0.0))))
-        self._action_map = {name: (act, space)}
-        self._anchor_key = key
+        # 空间可以在 attach 之后再建（它不改动作集）。全部建好，切锚点就只是查表。
+        for (anchor, idx), act in self._actions.items():
+            try:
+                _, top = anchor_paths(anchor, idx)
+                self._spaces[(anchor, idx)] = xr.create_action_space(
+                    self.session, xr.ActionSpaceCreateInfo(
+                        action=act, subaction_path=xr.string_to_path(self.instance, top),
+                        pose_in_action_space=xr.Posef(
+                            orientation=xr.Quaternionf(0.0, 0.0, 0.0, 1.0),
+                            position=xr.Vector3f(0.0, 0.0, 0.0))))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的空间建不出来，退回 VIEW 空间：%s: %s",
+                            anchor, idx, type(exc).__name__, exc)
+        self._actions_ready = True
 
-    def anchor_space(self, anchor: str) -> Any:
+    def ensure_anchor(self, anchor: str, tracker_index: int) -> None:
+        """切到某个锚点：确保动作都已建好（只建一次），然后记下当前用哪一个 space。
+
+        ⚠️ 这里**不做任何会改动动作集的 XR 调用** —— 换了锚点只是换 `anchor_space()`
+        返回哪个 space（以及 `sync_actions` 照旧每帧跑）。重建动作集/重新 attach 在
+        OpenXR 里是被规范明确禁止的（见 `_ensure_actions`）。
+        """
+        self._ensure_actions()
+        self._anchor_key = (anchor, int(tracker_index))
+
+    def anchor_space(self, anchor: str, tracker_index: int = 0) -> Any:
         """层要挂到哪个 space。
 
         ⚠️ action space 在动作同步生效前是**未追踪**的，层会落到 LOCAL 原点 ——
@@ -608,11 +669,9 @@ class XrOverlaySession:
         """
         if anchor == "hmd":
             return self.view_space
-        if self._action_map:
-            space = next(iter(self._action_map.values()))[1]
-            if self._space_tracked(space):
-                return space
-            return self.view_space
+        space = self._spaces.get((anchor, int(tracker_index)))
+        if space is not None and self._space_tracked(space):
+            return space
         return self.view_space
 
     def _space_tracked(self, space: Any) -> bool:
@@ -627,12 +686,14 @@ class XrOverlaySession:
         except Exception:  # noqa: BLE001
             return False
 
-    def anchor_tracked(self, anchor: str) -> bool | None:
+    def anchor_tracked(self, anchor: str, tracker_index: int = 0) -> bool | None:
         """锚点是否被追踪（诊断用；拿不到返回 None）。"""
         import xr
-        if anchor == "hmd" or not self._action_map:
+        if anchor == "hmd":
             return None
-        space = next(iter(self._action_map.values()))[1]
+        space = self._spaces.get((anchor, int(tracker_index)))
+        if space is None:
+            return None
         try:
             self._frame_state = self._frame_state or xr.wait_frame(self.session)
             loc = xr.locate_space(space, self.ref_space,
@@ -731,7 +792,7 @@ class XrOverlaySession:
         pose = xr.Posef(
             orientation=xr.Quaternionf(*euler_to_quaternion(cfg.rot)),
             position=xr.Vector3f(*pos))
-        space = self.anchor_space(cfg.anchor)
+        space = self.anchor_space(cfg.anchor, cfg.tracker_index)
         # ★ 两个 flag 缺一不可：BLEND 让贴图的 alpha 真的生效（否则整层不透明 →
         #   蓝框外一圈黑边），UNPREMULTIPLIED 声明我们给的是未预乘 alpha
         #   （PIL 的语义，与 Windows 侧给 SteamVR 的一致）。见 layer_alpha_flags()。
@@ -1275,12 +1336,13 @@ def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
                 print(f"    [{time.monotonic()-t0:4.1f}s] 会话状态={st} "
                       f"已提交={ov.frames_updated} 帧 "
                       f"整层 alpha={ov._layer_alpha():.2f} "
-                      f"锚点追踪={ov._sess.anchor_tracked(cfg.anchor)}", flush=True)
+                      f"锚点追踪={ov._sess.anchor_tracked(cfg.anchor, cfg.tracker_index)}", flush=True)
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     print(f"共提交 {ov.frames_updated} 帧；会话状态序列 {'→'.join(seen_states)}；"
-          f"锚点 {cfg.anchor} 追踪={ov._sess.anchor_tracked(cfg.anchor) if ov._sess else None}",
+          f"锚点 {cfg.anchor} 追踪="
+          f"{ov._sess.anchor_tracked(cfg.anchor, cfg.tracker_index) if ov._sess else None}",
           flush=True)
     if ov.frames_updated == 0:
         print("⚠️ 一帧都没提交成功。看上面的失败原因；若是会话一直没到 FOCUSED，"
