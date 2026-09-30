@@ -1,9 +1,9 @@
 # VRChat 实时同传 · 使用指南
 
-> **中文** | [English](docs/GUIDE.en.md) | [日本語](docs/GUIDE.ja.md) | [한국어](docs/GUIDE.ko.md) | [Русский](docs/GUIDE.ru.md)
+> **中文** | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 
 > 🪟 **这份是 Windows 指南。**
-> 用 **Linux** 的话看 **[GUIDE.linux.md](docs/GUIDE.linux.md)** —— 安装（`./setup.sh`）、虚拟声卡、
+> 用 **Linux** 的话看 **[GUIDE.linux.md](GUIDE.linux.md)** —— 安装（`./setup.sh`）、虚拟声卡、
 > 手腕屏、排障都是 Linux 专用的；下面这些 Windows 细节（exe / `.bat` / VB-Cable / WASAPI）不适用。
 > 两边共用同一份 `config.yaml`，配置语义一致。
 
@@ -51,7 +51,7 @@
 
 ## 一、前置条件（Windows）
 
-1. **Windows 10 / 11**（用到 WASAPI 与 SteamVR；**Linux 见 [GUIDE.linux.md](docs/GUIDE.linux.md)**）
+1. **Windows 10 / 11**（用到 WASAPI 与 SteamVR；**Linux 见 [GUIDE.linux.md](GUIDE.linux.md)**）
 2. **Python 3.11**（3.12 未测；安装时务必勾选 *Add python.exe to PATH*）—— *只用 exe 的话这条不用管*
    <https://www.python.org/downloads/release/python-3119/>
 3. **VRChat**：设置里打开 OSC（`OSC enabled: True`），chat bubble visibility 设为 **Everyone**
@@ -501,7 +501,7 @@ build_exe.bat                                              :: 打包 + 打完自
 ## 十、已知限制
 
 > 以下均为 **Windows** 侧的限制。Linux 侧的限制请看
-> [GUIDE.linux.md](docs/GUIDE.linux.md) 的「八、已知限制」。
+> [GUIDE.linux.md](GUIDE.linux.md) 的「八、已知限制」。
 
 - 手腕屏需要 **SteamVR 作为活动合成器**；走厂商原生 OpenXR runtime 时 PC 侧第三方 overlay 不显示
 - 输入端**只能拿到游戏混音后的一路立体声**：拿不到逐说话人通道，混音里多人叠话时说话人归属天然不可靠

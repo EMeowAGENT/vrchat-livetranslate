@@ -5,7 +5,7 @@
 [![CI](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml/badge.svg)](https://github.com/nixi-agent/vrchat-livetranslate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nixi-agent/vrchat-livetranslate?label=release)](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%7C%20Linux-blue)](docs/GUIDE.linux.md)
-[![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件)
+[![Python](https://img.shields.io/badge/python-3.11-blue)](docs/GUIDE.md#一前置条件windows)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 在 VRChat 里做**实时同声传译**：采集麦克风 / 游戏音频 → 千问云实时同传模型 →

@@ -1,8 +1,8 @@
 # VRChat 实时同传 · Linux 使用指南
 
-> 中文 | [English](../README.en.md) | [日本語](../README.ja.md) | [한국어](../README.ko.md) | [Русский](../README.ru.md)
+> **中文** | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 >
-> 这份是 **Linux 专用**。Windows 请看 [GUIDE.md](../GUIDE.md)。
+> 这份是 **Linux 专用**。Windows 请看 [GUIDE.md](GUIDE.md)。
 > 两边**共用同一份 `config.yaml`**，配置语义一致（同一组 `anchor` / `offset` 换平台不会失效）。
 
 ---

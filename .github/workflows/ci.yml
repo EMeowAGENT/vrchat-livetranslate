@@ -155,6 +155,9 @@ jobs:
       - name: 凭据扫描
         run: python scripts/check_no_secrets.py --once
 
+      - name: 检查文档链接
+        run: python scripts/check_doc_links.py
+
       - name: 检查 tkinter 可用性
         id: tk
         run: |
