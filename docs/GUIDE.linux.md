@@ -27,6 +27,7 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
 
 1. **Wayland 会话**（niri / KDE / GNOME 都行）。
    手腕屏走 **Wayland + EGL**；X11 下走不通（精简 XWayland 的 GLX 建不出 context，实测过）。
+   （界面本身走 Tk/**X11**，Wayland 会话下由 XWayland 提供 —— 桌面发行版默认都有这套基础库。）
 2. **PipeWire**（大多数现代发行版默认就是）—— 需要 `pw-dump` / `pw-record` / `pw-cat`。
    > ⚠️ 我们不依赖 PulseAudio 兼容层。实测某些环境下 `pactl` 连不上，而 `pw-dump` 正常，
    > 所以全程用 PipeWire **原生**工具。
@@ -57,7 +58,9 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ./VRChatLiveTranslate-x86_64.AppImage
 ```
 
-- 解释器与全部依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`
+- Python 解释器与全部 Python 依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`。
+  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行）、**portaudio**（麦克风）、
+  X11 基础库（XWayland）与一套中日韩字体
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
 - 仍然要自备一个**阿里云百炼 API key**（见下一节）
