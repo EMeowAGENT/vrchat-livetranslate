@@ -288,6 +288,17 @@ def _yaml_scalar(value) -> str:  # noqa: ANN001
     `yaml.safe_dump` 只序列化这一个标量，返回 `CABLE Input` / `'a#b'` / `''`
     这样的安全写法（allow_unicode 保住中文设备名，不转成 \\uXXXX）。
     """
-    text = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True)
-    # safe_dump 会附一个文档结束标记（第二行的 `...`），只取第一行
-    return text.split("\n", 1)[0].strip()
+    # ⚠️ `width` 必须给到无穷大：PyYAML 默认 `width=80` 会把**超宽标量折行**，
+    #    而这里只取第一行 —— 长设备名（Realtek/VB-Audio 那类很容易过 80 字符）会被
+    #    静默截断，而且截断后仍是**合法 YAML**：值照写、没有任何报错，只有下次启动
+    #    时设备选择悄悄回落到「自动检测」。需要加引号的长值更糟：首行是未闭合引号，
+    #    整份配置被 `_write_config_text` 拒写（保存静默失效）。
+    #    实测：86 字符设备名曾被截成 81 字符（见 tests/test_device_save.py 的长名用例）。
+    text = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True,
+                          width=10 ** 9)
+    first, _, rest = text.partition("\n")
+    if rest.strip() not in ("", "..."):
+        # 除文档结束标记外还有第二行 = 值里带换行这类 PyYAML 必须折行的写法：
+        # 退回「始终单行」的双引号风格（YAML 双引号是 JSON 的超集）。
+        return _yaml_quote(value)
+    return first.strip()

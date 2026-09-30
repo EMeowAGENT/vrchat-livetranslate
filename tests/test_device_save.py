@@ -240,7 +240,55 @@ def test_yaml_scalar_quotes_when_needed() -> None:
         rendered = _yaml_scalar(weird)
         assert yaml.safe_load("k: " + rendered)["k"] == weird, \
             f"{weird!r} → {rendered!r} 读回不一致（会写出坏 YAML）"
-    print("  _yaml_scalar：特殊字符加引号、中文不转义 OK")
+    # ★ 长值不许被 PyYAML 折行截断（默认 width=80）：截断后仍是**合法 YAML**，
+    #   于是静默写进一个错的设备名；需要加引号的那种会因首行引号未闭合让整份拒写。
+    long_cases = (
+        "Speakers (Realtek(R) Audio) 2- USB Audio Device with an extremely long descriptor name",
+        "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO) #2 [Loopback] 24bit 48000Hz Stereo Mix",
+        "x" * 120,
+        "长设备名" * 30,
+    )
+    for name in long_cases:
+        rendered = _yaml_scalar(name)
+        assert "\n" not in rendered, f"长值（{len(name)} 字符）被折行了：{rendered!r}"
+        assert yaml.safe_load("k: " + rendered)["k"] == name, \
+            f"长值（{len(name)} 字符）读回不一致：{rendered!r}"
+    print("  _yaml_scalar：特殊字符加引号、中文不转义、长值不折行 OK")
+
+
+def test_long_device_name_round_trips() -> None:
+    """★ 长设备名（>80 字符）走完整保存路径后必须**一字不少**。
+
+    PyYAML 默认 `width=80` 会给超宽标量折行，而 `_yaml_scalar` 只取第一行 ——
+    截断结果是合法 YAML，配置照写、无任何报错，只有下次启动时设备选择悄悄回落
+    「自动检测」（用户上次的选择凭空消失）。这条用例就是钉住它。
+    """
+    long_mic = ("Speakers (Realtek(R) Audio) 2- USB Audio Device with an extremely "
+                "long descriptor name")
+    long_loop = ("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO) #2 [Loopback] "
+                 "24bit 48000Hz Stereo Mix")
+    assert len(long_mic) > 80 and len(long_loop) > 80, "样本本身要超过 80 字符才有意义"
+    before = _prepare()
+    base = yaml.safe_load(before)
+    n_before = _n_comments(before)
+    gui = None
+    try:
+        gui = _make_gui()
+        _set_device_combos(gui, mic=long_mic, loop=long_loop, out=long_loop)
+        gui._on_device_change()
+        after = CONFIG.read_text(encoding="utf-8")
+        data = yaml.safe_load(after)
+        _assert_devices(data, base, gui, long_mic, long_loop, long_loop)
+        assert _n_comments(after) == n_before, "注释被破坏"
+        # 再把文件读回内存一次，模拟「重启程序后还记得上次选的设备」
+        assert (yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+                .get("capture", {}).get("mic_device")) == long_mic, \
+            "重启读回时设备名被截断了"
+    finally:
+        CONFIG.write_text(before, encoding="utf-8")
+        if gui is not None:
+            _destroy(gui)
+    print(f"  {len(long_mic)} 字符设备名走完整保存路径后一字不少 OK")
 
 
 def test_simulated_linux_env_writes_mic_only() -> None:
@@ -276,6 +324,7 @@ if __name__ == "__main__":
     test_yaml_scalar_quotes_when_needed()
     test_device_change_keeps_comments_and_key_order()
     test_unsafe_device_name_is_quoted_not_broken()
+    test_long_device_name_round_trips()
     test_linux_branch_writes_mic_only()
     test_simulated_linux_env_writes_mic_only()
     test_missing_sections_are_created()
