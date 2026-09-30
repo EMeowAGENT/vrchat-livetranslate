@@ -1443,6 +1443,33 @@ def pick_default_loopback(loops: list[dict], default_out_index: int | None,
     return None
 
 
+# 「同一失败理由只留一行」的节流状态（见 `_note_loopback_enum_error`）。
+_last_enum_err: str | None = None
+
+
+def _note_loopback_enum_error(exc: Exception) -> None:
+    """枚举设备失败留痕：**同一理由只留一行**，理由变了立刻再打一行。
+
+    为什么需要节流：这个函数被两个重试循环调用 —— 电平探针的低频自愈
+    （`level_probe.RETRY_S = 5.0`）与引擎 loopback 腿的重开。不节流就是
+    **十几行/分钟**，把真正的信息淹掉。与 `level_probe._enter_waiting` 同一取舍：
+    降级**不静默**（第一行一定在），只是不刷屏。
+    """
+    global _last_enum_err
+    msg = f"[loopback] ❌ 枚举设备失败：{type(exc).__name__}: {exc}"
+    if msg != _last_enum_err:
+        _last_enum_err = msg
+        print(msg, flush=True)
+
+
+def _note_loopback_enum_ok() -> None:
+    """枚举恢复正常：从失败里恢复时补一行 ✅（与 `level_probe._note_open` 同一取舍）。"""
+    global _last_enum_err
+    if _last_enum_err is not None:
+        _last_enum_err = None
+        print("[loopback] ✅ 设备枚举已恢复", flush=True)
+
+
 def pick_loopback_target(patterns: list[str] | None = None,
                          device_name: str | None = None) -> LoopbackTarget | None:
     """挑一个「系统声采集」目标（纯逻辑 + 后端数据，两个平台共用）。
@@ -1460,8 +1487,9 @@ def pick_loopback_target(patterns: list[str] | None = None,
     try:
         loops = backend.query_loopback_devices()
     except Exception as exc:  # noqa: BLE001
-        print(f"[loopback] ❌ 枚举设备失败：{type(exc).__name__}: {exc}", flush=True)
+        _note_loopback_enum_error(exc)      # 同一理由只留一行（重试循环里不会刷屏）
         return None
+    _note_loopback_enum_ok()                # 从失败里恢复：补一行 ✅
     if not loops:
         return None
 
