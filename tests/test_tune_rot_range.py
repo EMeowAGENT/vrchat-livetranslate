@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -53,26 +52,29 @@ ROT_IDX = (3, 4, 5)                                 # rot_x / rot_y / rot_z 在 
 
 
 def make_sandbox() -> None:
-    """把模板复制成沙箱配置，并把 `rot: [...]` 改成一组越界值。
+    """把模板复制成沙箱配置，并把**当前锚点（right_hand）那一份** `rot` 改成越界值。
 
-    用行级替换而不是整文件重写：沙箱要跟用户手写配置一样**保留注释**，
-    这样后面「回写不丢值」那条才验的是真实场景。
+    用行级就地改（`_yaml_set_or_create`）而不是整文件重写：沙箱要跟用户手写配置一样
+    **保留注释**，这样后面「回写不丢值」那条才验的是真实场景。
     """
+    from vlt.config_io import _yaml_set_or_create
+
     text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
     want = "[" + ", ".join(str(v) for v in WANT_ROT) + "]"
-    new, n = re.subn(r"(?m)^(\s*rot:\s*)\[[^\]]*\]", rf"\g<1>{want}", text)
-    assert n == 1, f"模板里应有且只有 1 行 `rot: [...]`，实际命中 {n} 处"
+    # 位姿是按锚点分开存的：改右手的 `overlay.offsets.right_hand.rot`
+    new = _yaml_set_or_create(text, ["overlay", "offsets", "right_hand", "rot"], want)
+    assert new != text, "模板里应该有 `overlay.offsets.right_hand.rot` 这一行"
     SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
     # .gitattributes 规定源码 LF：显式传 newline，别让 Windows 把整份配置写成 CRLF
     SANDBOX.write_text(new, encoding="utf-8", newline="\n")
-    got = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offset"]["rot"]
+    got = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offsets"]["right_hand"]["rot"]
     assert got == WANT_ROT, f"沙箱配置里的 rot 没写对：{got!r}（期望 {WANT_ROT}）"
     print(f"沙箱配置 → {SANDBOX}（rot: {got}）")
 
 
 def read_sandbox_rot() -> list:
     data = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))
-    return list(data["overlay"]["offset"]["rot"])
+    return list(data["overlay"]["offsets"]["right_hand"]["rot"])
 
 
 def collect_scales(win) -> list:
@@ -139,7 +141,7 @@ def check_round_trip_keeps_rot(gui, scales: list) -> None:
     gui._save_overlay_cfg()
     rot = read_sandbox_rot()
     assert rot == WANT_ROT, f"改 pos_x 落盘把 rot 改了：{rot}（期望 {WANT_ROT}）"
-    pos = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offset"]["pos"]
+    pos = yaml.safe_load(SANDBOX.read_text(encoding="utf-8"))["overlay"]["offsets"]["right_hand"]["pos"]
     assert pos[0] == -0.075, f"pos_x 没写进去：{pos!r}（回写这条路径本身失效了？）"
     print(f"  ✓ 拖位置滑块落盘后 rot 仍是 {rot}")
 

@@ -37,7 +37,7 @@ from .config_io import (
     _yaml_set_or_create,
 )
 from .i18n import t
-from .output.overlay import OverlayConfig
+from .output.overlay import OverlayConfig, resolve_offset
 from .devices import (
     DeviceInfo,
     enumerate_audio_out_devices,
@@ -968,10 +968,14 @@ class TranslationGUI:
         """
         ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
         off = ov.get("offset") or {}
-        pos = list(off.get("pos") or [0.0, 0.06, 0.02])
-        rot = list(off.get("rot") or [-47, -16, 0])
         _sz = list(ov.get("size_px") or [1024, 440])
         self._tune_panel_w = int(_sz[0])
+        # 位姿按**当前锚点**取（每个锚点各存一套；口径与两端后端共用 resolve_offset）
+        self._anchor_label_to_key = {t("右手"): "right_hand", t("左手"): "left_hand",
+                                     t("外部 tracker"): "tracker", t("头显前固定"): "hmd"}
+        _key_to_label = {v: k for k, v in self._anchor_label_to_key.items()}
+        pos, rot = resolve_offset(ov, str(ov.get("anchor", "right_hand")))
+        pos, rot = list(pos), list(rot)
         self._tune_values: dict[str, float] = {
             "pos_x": float(pos[0]), "pos_y": float(pos[1]), "pos_z": float(pos[2]),
             "rot_x": float(rot[0]), "rot_y": float(rot[1]), "rot_z": float(rot[2]),
@@ -994,9 +998,6 @@ class TranslationGUI:
             "source_alpha": float(ov.get("source_alpha", 205)),
         }
         self._ov_save_job: str | None = None
-        self._anchor_label_to_key = {t("右手"): "right_hand", t("左手"): "left_hand",
-                                     t("前臂 tracker"): "tracker", t("头显前固定"): "hmd"}
-        _key_to_label = {v: k for k, v in self._anchor_label_to_key.items()}
 
         row = ttk.Frame(self._tune_body)
         row.pack(fill=tk.X, pady=(2, 2))
@@ -1009,10 +1010,16 @@ class TranslationGUI:
         self._anchor_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_anchor_change())
         ttk.Label(row, text=t("tracker 序号:"), font=FONT_UI).pack(side=tk.LEFT)
         self._tracker_var = tk.StringVar(value=str(ov.get("tracker_index", 0)))
-        ttk.Spinbox(row, from_=0, to=3, width=3, font=FONT_UI, textvariable=self._tracker_var,
+        # 上限 7 = Linux role 表有 8 项（0=右腕 … 7=左脚）；Windows 侧按「第 N 个已配对的
+        # GenericTracker」，序号大一点也无妨。原来卡在 0–3，Linux 上胸/腰/脚那几项
+        # 从界面根本够不到。
+        ttk.Spinbox(row, from_=0, to=7, width=3, font=FONT_UI, textvariable=self._tracker_var,
                     command=self._save_overlay_cfg).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(row, text=t("（仅锚点=前臂 tracker 时有效）"), font=FONT_STATUS,
-                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
+        # 「外部 tracker」= 挂到第 N 个通用 tracker（绑前臂/手腕只是为了让挂点离手腕近），
+        # 跟「前臂」没有绑定关系 —— 老文案写「前臂 tracker」会让人以为得是专用设备。
+        # 提示文案保持短：这一行左边还有锚点下拉和序号框，拉太长会把整行撑出窗口。
+        ttk.Label(row, text=t("（仅锚点=外部 tracker 时有效）"),
+                  font=FONT_STATUS, foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(10, 0))
 
         grid = ttk.Frame(self._tune_body)
         grid.pack(fill=tk.X, pady=(2, 2))
@@ -1041,6 +1048,11 @@ class TranslationGUI:
         # 标签长到放不下三列时自动降成两列，宁可面板高一点，也不裁字。
         label_w = max(6, max(_char_width_for(spec[1], FONT_UI) for spec in specs))
         cols = 3 if label_w <= 9 else 2
+        # 切锚点要把该锚点那一份位姿**回填到滑块**上（见 _load_anchor_offset），
+        # 所以 var / 值标签都得留个引用。
+        self._tune_vars: dict[str, tk.DoubleVar] = {}
+        self._tune_lbls: dict[str, ttk.Label] = {}
+        self._tune_units: dict[str, str] = {}
         for i, (key, label, lo, hi, res, unit) in enumerate(specs):
             row_i, col_i = divmod(i, cols)
             cell = ttk.Frame(grid)
@@ -1055,6 +1067,30 @@ class TranslationGUI:
                      highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
                      command=self._make_tune_handler(key, var, val_lbl, unit)).pack(side=tk.LEFT, padx=(4, 6))
             val_lbl.pack(side=tk.LEFT)
+            self._tune_vars[key] = var
+            self._tune_lbls[key] = val_lbl
+            self._tune_units[key] = unit
+
+    def _current_anchor(self) -> str:
+        """下拉当前选中的锚点键（right_hand / left_hand / tracker / hmd）。"""
+        return self._anchor_label_to_key.get(self._anchor_combo.get(), "right_hand")
+
+    def _load_anchor_offset(self, anchor: str) -> None:
+        """把**该锚点那一份**位姿回填到滑块上（切锚点时必须做，否则滑块显示的
+        是上一个锚点的值，随手拖一下就把那份值写到新锚点头上了）。
+
+        取不到就按 `resolve_offset` 的兜底链（`offset` → 内置默认）走 —— 与后端
+        真正用的那份值完全同源，界面显示的和面板的位置不会对不上。
+        """
+        ov = self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
+        pos, rot = resolve_offset(ov, anchor)
+        pairs = list(zip(("pos_x", "pos_y", "pos_z"), pos)) + \
+            list(zip(("rot_x", "rot_y", "rot_z"), rot))
+        for key, val in pairs:
+            v = float(val)
+            self._tune_values[key] = v
+            self._tune_vars[key].set(v)
+            self._tune_lbls[key].configure(text=f"{v:g}{self._tune_units[key]}")
 
     def _make_tune_handler(self, key: str, var, lbl, unit: str):  # noqa: ANN001
         def _on_move(_v: str) -> None:
@@ -1064,6 +1100,12 @@ class TranslationGUI:
         return _on_move
 
     def _on_anchor_change(self) -> None:
+        """换锚点：先把**新锚点自己那一份**位姿回填到滑块，再落盘。
+
+        ⚠️ 顺序不能反：先落盘的话，写进去的是**上一个锚点**的位姿（滑块还没换过来），
+        等于换一次锚点就毁一份配置。
+        """
+        self._load_anchor_offset(self._current_anchor())
         self._save_overlay_cfg()
 
     def _schedule_overlay_save(self) -> None:
@@ -1078,8 +1120,12 @@ class TranslationGUI:
     def _save_overlay_cfg(self) -> None:
         """把微调面板的值写回 config.yaml；overlay 侧有热重载，改完立刻生效。
 
-        用就地改文本的方式（`_yaml_set_in_text`），**不整文件重写**，
+        用就地改文本的方式（`_yaml_set_in_text` / `_yaml_set_or_create`），**不整文件重写**，
         否则拖动一次滑块就会把配置里的注释和键顺序全抹掉。
+
+        ⚠️ 位姿写到 `overlay.offsets.<当前锚点>`（每个锚点各存一套），**不是**
+        `overlay.offset` —— 后者退化为「没单独存过的锚点」的兜底。写错地方就等于
+        切一次锚点覆盖一份位姿（用户实测的「没法设置成左手」）。
         """
         self._ov_save_job = None
         p = DEFAULT_CONFIG
@@ -1088,18 +1134,16 @@ class TranslationGUI:
         try:
             text = p.read_text(encoding="utf-8")
             v = self._tune_values
+            anchor = self._current_anchor()
             try:
                 tracker = int(self._tracker_var.get())
             except (TypeError, ValueError):
                 tracker = 0
+            pos_s = f"[{_fmt_scalar(v['pos_x'])}, {_fmt_scalar(v['pos_y'])}, {_fmt_scalar(v['pos_z'])}]"
+            rot_s = f"[{_fmt_scalar(v['rot_x'])}, {_fmt_scalar(v['rot_y'])}, {_fmt_scalar(v['rot_z'])}]"
             updates: list[tuple[list[str], str]] = [
-                (["overlay", "anchor"],
-                 self._anchor_label_to_key.get(self._anchor_combo.get(), "right_hand")),
+                (["overlay", "anchor"], anchor),
                 (["overlay", "tracker_index"], str(tracker)),
-                (["overlay", "offset", "pos"],
-                 f"[{_fmt_scalar(v['pos_x'])}, {_fmt_scalar(v['pos_y'])}, {_fmt_scalar(v['pos_z'])}]"),
-                (["overlay", "offset", "rot"],
-                 f"[{_fmt_scalar(v['rot_x'])}, {_fmt_scalar(v['rot_y'])}, {_fmt_scalar(v['rot_z'])}]"),
                 (["overlay", "offset", "width_m"], _fmt_scalar(v["width_m"])),
                 (["overlay", "offset", "curvature"], _fmt_scalar(v["curvature"])),
                 (["overlay", "offset", "alpha"], _fmt_scalar(v["alpha"])),
@@ -1113,12 +1157,28 @@ class TranslationGUI:
             ]
             for key_path, val in updates:
                 text = _yaml_set_in_text(text, key_path, val)
+            # 位姿按锚点分开存；老配置里整段没有 `offsets:` → 用 or_create 补建整条链
+            # （`_yaml_set_in_text` 找不到父键时会静默不改，设置就永远存不下去）
+            for key_path, val in ((["overlay", "offsets", anchor, "pos"], pos_s),
+                                  (["overlay", "offsets", anchor, "rot"], rot_s)):
+                text = _yaml_set_or_create(text, key_path, val)
             _write_config_text(p, text)
-            print(f"[gui] 手腕屏参数已写入 config.yaml：anchor={updates[0][1]} "
-                  f"pos={updates[2][1]} rot={updates[3][1]} width={updates[4][1]}m "
-                  f"curvature={updates[5][1]} alpha={updates[6][1]} "
-                  f"字号={updates[7][1]}/{updates[8][1]} 面板={updates[9][1]} "
-                  f"底板/原文 alpha={updates[10][1]}/{updates[11][1]}"
+            # ⚠️ 内存里的 cfg 必须同步：不同步的话，切到别的锚点再切回来时
+            #    `_load_anchor_offset` 读到的还是**启动时**那份配置 —— 刚调好的值会被
+            #    旧值覆盖，界面上表现为「调了半天，切一下就白调」。
+            ov = self._cfg.overlay
+            if isinstance(ov, dict):
+                ov["anchor"] = anchor
+                ov["offsets"] = {**(ov.get("offsets") or {}),
+                                 anchor: {"pos": [v["pos_x"], v["pos_y"], v["pos_z"]],
+                                          "rot": [v["rot_x"], v["rot_y"], v["rot_z"]]}}
+            print(f"[gui] 手腕屏参数已写入 config.yaml：anchor={anchor} "
+                  f"offsets.{anchor} pos={pos_s} rot={rot_s} "
+                  f"width={_fmt_scalar(v['width_m'])}m "
+                  f"curvature={_fmt_scalar(v['curvature'])} alpha={_fmt_scalar(v['alpha'])} "
+                  f"字号={_fmt_scalar(v['font_size'])}/{_fmt_scalar(v['source_font_size'])} "
+                  f"面板=[{self._tune_panel_w}, {_fmt_scalar(v['panel_h'])}] "
+                  f"底板/原文 alpha={int(v['bg_alpha'])}/{int(v['source_alpha'])}"
                   f"（overlay 会热重载，无需重启）",
                   flush=True)
         except Exception as exc:  # noqa: BLE001

@@ -258,6 +258,11 @@ merger:
 overlay:
   interval_s: 0               # 0 = 有更新立刻上屏（本地显示不受 chatbox 限流约束）
   anchor: right_hand          # left_hand | right_hand | tracker | hmd
+  offsets:                    # ★ 每个锚点各存一套位姿（切锚点自动载入，互不覆盖）
+    right_hand: {pos: [0.0, 0.06, 0.02], rot: [-47, -16, 0]}
+    left_hand:  {pos: [0.0, 0.06, 0.02], rot: [-47, 16, 0]}   # 左手 = 右手镜像
+  offset:                     # 兜底：某锚点没单独存过时用这一份（面板属性也在这里）
+    width_m: 0.23
   size_px: [1024, 320]
   font_size: 42               # 译文字号
   source_font_size: 30        # 原文字号
@@ -279,7 +284,11 @@ output:
 | Source font size | 14 ~ 48, 1 | Panel height | 240 ~ 560 px, 10 |
 | Plate opacity | 0 ~ 255, 5 | Source opacity | 0 ~ 255, 5 |
 
-Plus an **anchor** dropdown (right hand / left hand / forearm tracker / fixed in front of the HMD) and a **tracker index** (0–3).
+Plus an **anchor** dropdown (right hand / left hand / external tracker / fixed in front of the HMD) and a **tracker index** (0–7).
+**Each anchor keeps its own offset** (`overlay.offsets.<anchor>`): switching the dropdown loads that anchor's
+pose, so tuning one never overwrites another. `overlay.offset` is only the fallback for anchors you haven't
+stored yet. Left and right hand grip frames are mirrored along X, so the left-hand pose is *not* a copy of
+the right-hand one (`rx` unchanged, `ry`/`rz` negated, and the same for the position's `x`).
 Changes are written to disk with 200 ms debounce; **translation font size / source font size / panel height /
 plate opacity / source opacity** trigger a one-frame texture re-render, the rest only re-apply the transform.
 **Plate opacity** is the translucent backdrop (lower = you see more of the scene; 255 = fully opaque);

@@ -1256,7 +1256,8 @@ def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
         ov.update("你好，我是逆袭。这句话正在被实时翻译，看看贴在你手腕上是什么效果。",
                   "Hello! I'm Nixi. This sentence is being translated in real time.")
         print(f"✅ 会话已建立，接下来 {seconds:.0f}s 内会持续重提交这一帧（你会看到这块面板）。"
-              f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offset，存盘即热重载。",
+              f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offsets（每个锚点各一份），"
+              f"存盘即热重载。",
               flush=True)
     t0 = time.monotonic()
     seen_states: list[str] = []
