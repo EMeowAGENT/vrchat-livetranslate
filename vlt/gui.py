@@ -31,6 +31,7 @@ from .config import Direction, _as_str_map, DEFAULT_CONFIG, load_api_key, load_c
 from .config_io import (
     _fmt_scalar,
     _write_config_text,
+    _yaml_scalar,
     _yaml_set_in_text,
     _yaml_set_mapping,
     _yaml_set_or_create,
@@ -52,6 +53,7 @@ from .engine import (
     EngineEvents,
     input_gate_settings,
 )
+from .level_probe import LevelProbe
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 from .paths import APP_DIR, BUNDLE_DIR
@@ -514,11 +516,14 @@ class TranslationGUI:
         self._update_pending_info: update_check.ReleaseInfo | None = None
         # 【重载】已安排带拉起的替换：_on_close 别再重复安排退出时替换
         self._reload_started = False
+        # 正在退出：_on_close 里置位，之后一律不许再把电平探针拉起来（见 _gate_probe_wanted）
+        self._closing = False
         # 「已更新到最新版本」一次性提示（版本变化那一次才弹；版本号只进日志）
         self._updated_hint_win: tk.Toplevel | None = None
         self._updated_hint_job: str | None = None
 
         # 设置弹窗（分页）：headless 模式下不建 UI，这几个保持空/默认值
+        self._settings_win: tk.Toplevel | None = None
         self._settings_nb: ttk.Notebook | None = None
         # 每页一份 (滚动画布, 内容 frame, 滚动条)，顺序 = tab 顺序（滚轮按当前页取用）
         self._settings_pages: list[tuple[tk.Canvas, ttk.Frame, ttk.Scrollbar]] = []
@@ -535,6 +540,9 @@ class TranslationGUI:
         self._gate_level_lbl: ttk.Label | None = None
         self._gate_level_hold = LEVEL_FLOOR_DB     # 峰值保持：读数跳动时靠它平滑
         self._gate_level_tick = 0                  # _poll 节流（50ms → 100ms 刷一次）
+        # 独立电平探针：**没在翻译**时的电平来源（有引擎时用引擎的，绝不两路并存）。
+        # 只在「设置窗可见 + 勾了启用 + 没有引擎」时活着，见 _sync_gate_level_probe。
+        self._gate_probe: LevelProbe | None = None
         self._gate_save_job: str | None = None
         self._gate_hold_ms = 500.0                 # 只从配置读（界面不暴露，避免旋钮过多）
         self._gate_preroll_ms = 250
@@ -1393,7 +1401,8 @@ class TranslationGUI:
         ggrid.pack(fill=tk.X)
         ggrid.columnconfigure(1, weight=1)
         # 实时电平条：横轴 -70 ~ 0 dBFS；蓝 = 当前已超过门限（这段会被翻译），
-        # 白竖线 = 门限位置。数据来自 loopback 采集腿 —— 没在翻译时显示「—」。
+        # 白竖线 = 门限位置。数据来自 loopback 采集：正在翻译时用引擎那条腿，
+        # 没翻译时用独立探针（设置窗可见 + 勾了「启用」才采）；两路都没有才显示「—」。
         self._gate_level_canvas = tk.Canvas(ggrid, width=320, height=15,
                                             bg=SURFACE, highlightthickness=1,
                                             highlightbackground=BORDER, bd=0)
@@ -1416,7 +1425,7 @@ class TranslationGUI:
         self._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
                                        style="Dim.TLabel", width=9)
         self._gate_val_lbl.grid(row=1, column=2, sticky="w")
-        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）"),
+        ttk.Label(body, text=t("只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）"),
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
@@ -1690,9 +1699,15 @@ class TranslationGUI:
         self._apply_dark_titlebar(win)
         # 也是同理：withdraw 时量不到可视高度，滚动条的显隐得等显示出来再判一次
         self._sync_settings_pages()
+        # 实时电平：窗口一打开（且勾了「启用」）就自己采一路，不必先点「开始翻译」。
+        # 此刻窗口可能还没被 WM 映射完（winfo_viewable 尚为假）—— 没关系，
+        # _poll 每 100ms 会再同步一次，最迟一跳就起来。
+        self._sync_gate_level_probe()
 
     def _close_settings(self) -> None:
         self._settings_win.withdraw()
+        # 窗口一关就**立刻**停采集、join 线程、关掉设备：窗口关着还占着声卡是不可接受的
+        self._sync_gate_level_probe()
 
     # ---------------------------------------------------------------- 界面语言
     def _on_ui_lang_change(self, _event=None) -> None:
@@ -3315,6 +3330,9 @@ class TranslationGUI:
         self._engine_dirs.append(direction)
         self._pending_starts -= 1
         eng.start()
+        # 引擎起来了 → 电平改由引擎那条腿提供，探针必须让位
+        # （同一时刻只允许一路 loopback，否则两路抢同一个采集端点）
+        self._sync_gate_level_probe()
         if self._pending_starts > 0:
             # 两个引擎错开 300ms 启动，避免同时抢占音频设备
             self._start_job = self._root.after(300, self._start_engine, index + 1)
@@ -3413,6 +3431,8 @@ class TranslationGUI:
         self._stop_btn.configure(state=tk.DISABLED)
         self._set_text_input_enabled(False)
         self._set_status("info", t("已停止"))
+        # 引擎没了 → 设置窗若还开着且勾了「启用」，电平交回独立探针
+        self._sync_gate_level_probe()
 
     def _on_close(self) -> None:
         """关窗口：先停引擎（会在超时内等采集线程真正退出），再销毁窗口。
@@ -3420,6 +3440,9 @@ class TranslationGUI:
         顺序很重要——如果先销毁窗口再去等引擎，主线程会阻塞在一个已经失效的
         Tk 事件循环上，界面看起来就是"卡死后闪退"。
         """
+        self._closing = True
+        # 先放掉电平探针占着的采集设备；_stop() 里那次同步看到 _closing 也不会再拉起来
+        self._stop_gate_probe()
         try:
             self._stop()
         except Exception as exc:
@@ -3566,29 +3589,38 @@ class TranslationGUI:
             self._set_status("info", t("设备：全部自动检测"))
 
     def _save_device_config(self, mic_name: str, loop_name: str, out_name: str) -> None:
-        # Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
-        # （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """把设备选择写回 config.yaml —— **就地改那几行**，不整份重写。
+
+        ⚠️ 这里以前用 `yaml.safe_load` + `yaml.dump` 整文件重写：用户每改一次设备下拉，
+        `config.yaml` 的**注释、空行、键顺序就全没了** —— 实测一份 154 行、53 行注释的
+        配置被拍成 116 行、键按字母重排的转储（注释是配置里唯一的说明书，丢了只能重看模板）。
+        其它保存路径（语言 / 译音开关 / 手腕屏微调 / 音色 / 输入门限）早就改成就地写了，
+        只有这条漏了 —— 而设备下拉恰恰是用户最常动的控件之一。
+
+        Linux：只写麦克风。`loopback_device` / `output.audio.device_name` **原样保留**
+        （界面不给选、引擎也忽略它们），别把用户旧配置清成空串。
+        """
         write_fixed = not self._linux_fixed_audio
         p = DEFAULT_CONFIG
         if not p.exists():
             return
         try:
-            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            capture = dict(raw.get("capture") or {})
-            capture["mic_device"] = mic_name
+            text = p.read_text(encoding="utf-8")
+            # 值用 _yaml_scalar 渲染：设备名是外部枚举来的，含 `#`/`: `/`[` 时
+            # 手拼会写出坏 YAML（旧整份 dump 自动处理了这件事，这里要自己保证）。
+            updates: list[tuple[list[str], str]] = [
+                (["capture", "mic_device"], _yaml_scalar(mic_name)),
+            ]
             if write_fixed:
-                capture["loopback_device"] = loop_name
-            raw["capture"] = capture
-            if write_fixed:
-                output = dict(raw.get("output") or {})
-                audio = dict(output.get("audio") or {})
-                audio["device_name"] = out_name
-                output["audio"] = audio
-                raw["output"] = output
-            with p.open("w", encoding="utf-8") as f:
-                yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
+                updates.append((["capture", "loopback_device"], _yaml_scalar(loop_name)))
+                updates.append((["output", "audio", "device_name"], _yaml_scalar(out_name)))
+            for key_path, val in updates:
+                # 用 _yaml_set_or_create：老配置可能整段没有 `capture` / `output.audio`，
+                # 那个「只在已存在路径上替换」的函数会静默 no-op（设置就永远存不下去）。
+                text = _yaml_set_or_create(text, key_path, val)
+            _write_config_text(p, text)     # 写前校验 YAML：宁可这次不生效，也不写坏配置
         except Exception as exc:
-            print(f"[gui] 保存设备配置失败：{exc}")
+            print(f"[gui] 保存设备配置失败：{exc}", flush=True)
             return
         # 同步内存里的配置，引擎启动时会读
         self._cfg.output.setdefault("capture", {})["mic_device"] = mic_name
@@ -3607,6 +3639,8 @@ class TranslationGUI:
         db = float(self._gate_var.get())
         self._gate_val_lbl.configure(text=f"{db:g} dB")
         self._apply_gate_live()
+        # 勾上「启用」→ 立刻开始采电平；取消勾选 → 立刻停并释放设备
+        self._sync_gate_level_probe()
         if self._gate_save_job is not None:
             try:
                 self._root.after_cancel(self._gate_save_job)
@@ -3675,13 +3709,92 @@ class TranslationGUI:
               flush=True)
         self._set_status("info", t("输入门限已保存：{db} dB", db=f"{db:g}"))
 
+    def _gate_probe_wanted(self) -> bool:
+        """独立电平探针**该不该在跑**（四个条件同时成立）。
+
+        ① 没在退出（`_closing`）；② 没有引擎在跑；③ 勾了「启用」；④ 设置窗**可见**。
+
+        ⚠️ 窗口是常驻对象（建好即 withdraw，不是每次销毁重建），所以「开着吗」只能
+        判 `winfo_viewable()`，判「对象在不在」永远为真。
+        """
+        if self._closing or self._headless or self._engines:
+            return False
+        var = getattr(self, "_gate_enabled_var", None)
+        if var is None or not bool(var.get()):
+            return False
+        win = self._settings_win
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_viewable())
+        except Exception:  # noqa: BLE001 — 窗口已销毁：当作「没开着」
+            return False
+
+    def _sync_gate_level_probe(self) -> None:
+        """把探针对齐到 `_gate_probe_wanted()` 的判定（幂等，可以放心高频调）。
+
+        调用点：开/关设置窗、勾「启用」、引擎启动与停止、`_poll` 每 100ms 兜底一次
+        （兜底那次是为了保证「窗口关着时绝不可能还开着采集」—— 万一有别的路径
+        把窗口藏起来而没走 `_close_settings`，这里最迟一跳就把它停掉）。
+
+        「目标不在 / 目标变了」由**探针自己在后台低频处理**（`LevelProbe` 里
+        每 `RETRY_S` 重试、每 `RECHECK_S` 复查采集目标）—— 界面这里不重建对象：
+        这样不会每 100ms 刷一行日志，也不需要界面去懂 PipeWire 的目标集合。
+        只有「用户取消勾选 / 关窗 / 开始翻译」才会把探针整个丢掉、设备立刻释放。
+        """
+        if not self._gate_probe_wanted():
+            self._stop_gate_probe()
+            return
+        if self._gate_probe is not None:
+            return                          # 在跑（或在后台等目标）就别动它
+        capture_cfg = (self._cfg.output or {}).get("capture") or {}
+        name = capture_cfg.get("loopback_device") or None
+        probe = LevelProbe(device_name=name)
+        self._gate_probe = probe
+        probe.start()
+        print(f"[level] 设置窗已打开且勾了「启用」→ 开始独立电平采集"
+              f"（设备：{name or '自动检测'}；没在翻译，不占用引擎那条腿）", flush=True)
+
+    def _stop_gate_probe(self) -> None:
+        """停掉探针并释放设备（`LevelProbe.stop()` 内部会 join 线程 + close 源）。"""
+        probe = self._gate_probe
+        if probe is None:
+            return
+        self._gate_probe = None             # 先摘掉：_refresh_gate_level 立刻回到「—」
+        was_running = probe.running
+        probe.stop()
+        if was_running:
+            print(f"[level] 已停止独立电平采集并释放设备（本次共采 {probe.chunks} 块）",
+                  flush=True)
+
+    def _gate_level_db(self) -> float | None:
+        """当前该画出来的电平（dBFS）；**没有可用来源**时返回 None（读数显示「—」）。
+
+        优先级是硬的：**有引擎 → 只用引擎的** `input_gate.level_db`（那条腿本来就在采，
+        电平与真正被上送的音频同源）；没引擎 → 用独立探针。两路并用等于白开一路
+        loopback 去抢同一个 WASAPI 端点。
+        """
+        if self._engines:
+            lvl = LEVEL_FLOOR_DB
+            for e in self._engines:
+                g = getattr(e, "input_gate", None)
+                if g is not None:
+                    lvl = max(lvl, float(g.level_db))
+            return lvl
+        probe = self._gate_probe
+        # 探针开不了设备（在后台低频重试）/ 还没有第一块数据时 `has_data=False` / 读取
+        # 异常停下 —— 这几种都显示「—」，绝不拿一个没有可信读数或已经死掉的来源假装有电平。
+        if probe is not None and probe.running and probe.has_data:
+            return float(probe.level_db)
+        return None
+
     def _refresh_gate_level(self) -> None:
         """刷新设置窗里的实时电平条（每 100ms 一次）。
 
         横轴 -70 ~ 0 dBFS：门限是白竖线，蓝色填充 = 当前电平已超过门限（这段会被翻译）。
-        数据来源是运行中引擎的 `input_gate.level_db`（loopback 采集腿每 100ms 更新）；
-        没有引擎在跑就只画门限线、读数显示「—」—— 电平只有真在采集时才有意义，
-        不假装有数据。
+        数据来源见 `_gate_level_db()`：正在翻译时是引擎那条 loopback 腿，没翻译时是
+        独立探针（设置窗可见 + 勾了「启用」才在采）；两路都没有就只画门限线、
+        读数显示「—」—— 没有真在采集就不假装有数据。
         """
         cv = self._gate_level_canvas
         gvar = getattr(self, "_gate_var", None)
@@ -3700,7 +3813,8 @@ class TranslationGUI:
         x_thr = (thr - lo) / (hi - lo) * w
         cv.delete("all")                       # 每 100ms 重建（2 个图元，开销可忽略）
         cv.create_line(x_thr, 0, x_thr, h, fill=TEXT, width=2)
-        if not self._engines:
+        lvl = self._gate_level_db()
+        if lvl is None:
             self._gate_level_hold = LEVEL_FLOOR_DB
             if self._gate_level_lbl is not None:
                 try:
@@ -3708,12 +3822,9 @@ class TranslationGUI:
                 except Exception:  # noqa: BLE001
                     pass
             return
-        lvl = LEVEL_FLOOR_DB
-        for e in self._engines:
-            g = getattr(e, "input_gate", None)
-            if g is not None:
-                lvl = max(lvl, float(g.level_db))
-        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声
+        # 峰值保持（每 100ms 掉 1.5dB）：逐块读数跳得厉害，直接画会闪成噪声。
+        # 只在这一处做 —— 引擎的 level_db 与探针的 level_db 都是「最近一块的瞬时值」，
+        # 两条路进来的观感因此完全一致。
         self._gate_level_hold = max(lvl, self._gate_level_hold - 1.5, LEVEL_FLOOR_DB)
         db = max(lo, min(hi, self._gate_level_hold))
         x_lvl = (db - lo) / (hi - lo) * w
@@ -3767,8 +3878,12 @@ class TranslationGUI:
             self._overlay_out.tick()      # 手腕屏的热重载 / 淡出
         # 输入门限的实时电平条：每 100ms 刷一次（_poll 本身 50ms 一跳）
         self._gate_level_tick += 1
-        if self._gate_level_canvas is not None and self._gate_level_tick % 2 == 0:
-            self._refresh_gate_level()
+        if self._gate_level_tick % 2 == 0:
+            # 顺带兜底同步探针启停：万一有别的路径把设置窗藏起来而没走 _close_settings，
+            # 这里最迟一跳就把采集停掉 —— 「窗口关着时不许还开着采集」不能只靠调用点自觉。
+            self._sync_gate_level_probe()
+            if self._gate_level_canvas is not None:
+                self._refresh_gate_level()
         self._root.after(50, self._poll)
 
     # ================================================================ 聊天气泡
