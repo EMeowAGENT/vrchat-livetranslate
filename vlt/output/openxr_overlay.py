@@ -202,6 +202,12 @@ def layer_geometry(width_m: float, aspect: float, curvature: float) -> dict:
 # 拿不到就退回平面层，并在调用点留一行 `[overlay:xr]`（降级不许静默）。
 CYLINDER_EXT = "XR_KHR_composition_layer_cylinder"
 
+# HTC Vive Tracker 的交互 profile 是**扩展**（`XR_HTCX_vive_tracker_interaction`）：
+# `/user/vive_tracker_htcx/role/...` 这族路径只有在该扩展启用时才存在，否则
+# `xrStringToPath` 直接 `XR_ERROR_PATH_UNSUPPORTED`（实测：没接 tracker 的 WiVRn/Monado
+# 就是这样）。所以「要不要建 tracker 锚点」按**启用的扩展**判断，而不是撞上去看报错。
+TRACKER_EXT = "XR_HTCX_vive_tracker_interaction"
+
 
 def effective_curvature(curvature: float, extensions: list[str]) -> float:
     """按**运行时实际启用**的扩展决定这一帧用不用柱面层。
@@ -596,6 +602,14 @@ class XrOverlaySession:
         第二次起必然抛 `ActionsetsAlreadyAttachedError`，被热重载的 `except` 吃掉 ——
         **面板压根没换过挂点**（用户实测日志：切左手/切 tracker 各报一次这条错）。
         所以这里改成「一次建全、之后只换 space」。
+
+        ⚠️ 建议绑定**必须按 interaction profile 聚合，每个 profile 只调一次**。规范同一节：
+        「If the application successfully calls xrSuggestInteractionProfileBindings more than
+        once for an interaction profile, the runtime **must discard the previous suggested
+        bindings and replace them** with the new suggested bindings」。逐个动作各调一次的话，
+        每个 profile 上只剩**最后一个动作**的绑定 —— 实测踩过：修好右手之后，右手那条把
+        左手那条覆盖掉，左手锚点就永远 untracked、静默退回 VIEW（面板跟着头）。
+        这个 API 收的就是一张绑定**表**，一次给全才是它的用法。
         """
         if self._actions_ready:
             return
@@ -604,22 +618,20 @@ class XrOverlaySession:
             self.action_set = xr.create_action_set(self.instance, xr.ActionSetCreateInfo(
                 action_set_name="vlt_wrist", localized_action_set_name="VLT Wrist Panel",
                 priority=0))
-        # tracker 先探一下这个运行时认不认 HTC tracker 的 role 路径（没接 tracker 的
-        # Monado/WiVRn 就是 PathUnsupportedError）。不认就**整族跳过**，别对着 8 个
-        # role 各报一次错 —— 日志会变噪音，真正的故障反而被淹。
-        tracker_ok = True
-        try:
-            xr.string_to_path(self.instance, "/user/vive_tracker_htcx/role/right_wrist")
-        except Exception:  # noqa: BLE001
-            tracker_ok = False
-            log.info("[overlay:xr] 本运行时不支持 HTC tracker 的 role 路径 → 跳过 tracker 动作"
-                     "（左右手锚点不受影响；要用 tracker 锚点得先在运行时里接上 tracker）")
+        # tracker 整族的可用性：HTC tracker 的 role 路径属于扩展
+        # `XR_HTCX_vive_tracker_interaction`，运行时不支持（没接 tracker 的 WiVRn/Monado 就是）
+        # 就**整族跳过** —— 否则每开一次程序对着 8 个 role 各报一次错，真正的故障反而被淹。
+        tracker_ok = TRACKER_EXT in self.extensions
+        if not tracker_ok:
+            log.info("[overlay:xr] 本运行时没启用 %s → 跳过 tracker 动作（左右手锚点不受影响；"
+                     "要用 tracker 锚点得先在运行时里接上 tracker）", TRACKER_EXT)
+        skip_tracker = not tracker_ok
         for anchor, idx in self._anchor_keys():
             # ★ 逐个锚点降级：某个运行时（或某版 Monado）不认 tracker 的 role 路径时，
             #   只该让**那一个锚点**不可用，绝不能把整条手腕屏拖死 —— 现在开局就会建
             #   全部 8 个 tracker role 的动作，一个不认就整条腿没了（老实现只建当前
             #   锚点，所以踩不到，改成「一次建全」之后这层兜底是必须的）。
-            if anchor == "tracker" and not tracker_ok:
+            if anchor == "tracker" and skip_tracker:
                 continue
             try:
                 full, top = anchor_paths(anchor, idx)
@@ -634,21 +646,37 @@ class XrOverlaySession:
                     #    右边/左手那个建不出来 → 查不到 space → 面板静默回退到 VIEW（跟着头）。
                     localized_action_name=f"Wrist Anchor {anchor} {idx}",
                     subaction_paths=[xr.string_to_path(self.instance, top)]))
-                profiles = ((self.TRACKER_PROFILE,) if anchor == "tracker"
-                            else self.HAND_PROFILES)
-                for profile in profiles:
-                    try:
-                        xr.suggest_interaction_profile_bindings(
-                            self.instance, xr.InteractionProfileSuggestedBinding(
-                                interaction_profile=xr.string_to_path(self.instance, profile),
-                                suggested_bindings=[xr.ActionSuggestedBinding(
-                                    action=act, binding=xr.string_to_path(self.instance, full))]))
-                    except Exception:  # noqa: BLE001 — 运行时不认的 profile/绑定跳过
-                        pass
                 self._actions[(anchor, idx)] = act
             except Exception as exc:  # noqa: BLE001
-                log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的动作建不出来，该锚点退回 VIEW 空间"
-                            "（其它锚点不受影响）：%s: %s", anchor, idx, type(exc).__name__, exc)
+                if anchor == "tracker":
+                    skip_tracker = True          # 一个 role 建不出来 → 整族跳过（同一扩展管）
+                    log.warning("[overlay:xr] ⚠️ tracker 的 role 路径用不了 → tracker 锚点整族跳过"
+                                "（左右手不受影响）：%s: %s", type(exc).__name__, exc)
+                else:
+                    log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的动作建不出来，该锚点退回 VIEW 空间"
+                                "（其它锚点不受影响）：%s: %s", anchor, idx, type(exc).__name__, exc)
+
+        # 按 interaction profile 聚合绑定：**每个 profile 一次性给全**（见上面的规范引用）。
+        # 左右手可以放同一次调用：控制器 profile 的 allowlist 对 /user/hand/left 与
+        # /user/hand/right 都有效且都定义了 /input/grip/pose。
+        by_profile: dict[str, list[tuple[Any, str]]] = {}
+        for (anchor, idx), act in self._actions.items():
+            full, _ = anchor_paths(anchor, idx)
+            profiles = ((self.TRACKER_PROFILE,) if anchor == "tracker" else self.HAND_PROFILES)
+            for profile in profiles:
+                by_profile.setdefault(profile, []).append((act, full))
+        for profile, pairs in by_profile.items():
+            try:
+                xr.suggest_interaction_profile_bindings(
+                    self.instance, xr.InteractionProfileSuggestedBinding(
+                        interaction_profile=xr.string_to_path(self.instance, profile),
+                        suggested_bindings=[xr.ActionSuggestedBinding(
+                            action=act, binding=xr.string_to_path(self.instance, full))
+                            for act, full in pairs]))
+            except Exception as exc:  # noqa: BLE001 — 运行时不认的 profile 整组跳过
+                log.info("[overlay:xr] 交互 profile %s 的绑定建议被运行时拒绝（该 profile 上的"
+                         "锚点会退回 VIEW 空间）：%s", profile, exc)
+
         # ★ 唯一的 attach 机会
         xr.attach_session_action_sets(self.session, xr.SessionActionSetsAttachInfo(
             action_sets=[self.action_set]))
@@ -1065,6 +1093,9 @@ class OpenXrOverlay:
         柱面扩展（`CYLINDER_EXT`）算进去。请求一个运行时没有的扩展会让 `create_instance`
         直接失败 —— 那是**整条手腕屏消失**，比「不弯」严重得多。柱面的能力判定改由
         `submit()` 按实际启用的扩展做，拿不到就退回平面（`effective_curvature()`）。
+
+        `TRACKER_EXT` 同理：有就启用（tracker 锚点才有可能可用），没有就不请求 ——
+        反正那族路径不存在，`_ensure_actions()` 会按启用列表把 tracker 整族跳过。
         """
         import xr
         required = ["XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable"]
@@ -1074,8 +1105,8 @@ class OpenXrOverlay:
                 n = e.extension_name
                 have.add(n.decode() if isinstance(n, bytes) else str(n))
         except Exception:  # noqa: BLE001
-            return list(required)            # 枚举不出来就只赌必需项，不赌柱面
-        want = required + [CYLINDER_EXT]
+            return list(required)            # 枚举不出来就只赌必需项，不赌柱面/tracker
+        want = required + [CYLINDER_EXT, TRACKER_EXT]
         return [e for e in want if e in have]
 
     def close(self) -> None:
