@@ -132,9 +132,9 @@ STRINGS: dict[str, str] = {
         "(filters out players talking softly in the distance)",
     "当前电平:": "Level:",
     "门限:": "Threshold:",
-    "只有响度超过门限的声音才会被翻译；改完立刻生效（开始翻译后这里显示实时电平）":
-        "Only audio louder than the threshold gets translated; changes apply at once "
-        "(the live level appears here while translation is running)",
+    "只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）":
+        "Only sounds louder than the threshold are translated; changes take effect "
+        "immediately (the live level shows here while \"Enable\" is checked)",
     "输入门限已保存：{db} dB": "Input gate saved: {db} dB",
     # ---- 设置弹窗：音色 ----
     "音色": "Voice Timbre",
