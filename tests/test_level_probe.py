@@ -19,7 +19,12 @@
 4. 读数与峰保：电平口径与引擎那条腿同源（同一份 `to_16k_mono` / `chunk_level_db`），
    峰保仍只在界面那一处做（每 100ms 掉 1.5dB），两条路观感一致；
 5. 失败留痕不静默：开不了设备 / 读取异常 → 一行 `[level]` 日志 + `last_error`，
-   读数「—」，且**不重试刷日志**。
+   读数「—」；开不了设备时**低频自愈**（每 RETRY_S 重试，同一理由不重复打日志）；
+6. **复查采集目标**（Linux 的坑）：目标流消失/增减 → 立刻关掉当前一路重开 ——
+   `pw-record --target=` 在目标消失后会静默回落到默认源（麦克风），不复查就会
+   一直采着不属于 VRChat 的信号；
+7. 读到第一块真数据之前 `has_data=False`，界面显示「—」—— 不许把地板值画成
+   假的 `-70 dB`。
 
 ## 离线保证
 
@@ -56,6 +61,7 @@ _i18n.detect_system_language = lambda: "zh"
 
 from vlt.engine import LEVEL_FLOOR_DB  # noqa: E402
 from vlt.level_probe import LevelProbe  # noqa: E402
+import vlt.level_probe as level_probe_mod  # noqa: E402
 
 # 最小配置：capture 段留空 → 门限按默认值（enabled=True、-45dBFS），正是本用例要的前提
 CONFIG_BODY = """\
@@ -147,9 +153,14 @@ def _wait_for(pred, timeout: float = 3.0, what: str = "条件") -> None:  # noqa
 
 
 def _probe(opener, **kw) -> LevelProbe:  # noqa: ANN001, ANN202
-    """建一个探针：read 超时压到 50ms，用例里 stop() 才不用干等 200ms。"""
+    """建一个探针：read 超时压到 50ms，用例里 stop() 才不用干等 200ms。
+
+    ⚠️ 默认 `recheck=None`：本机（Linux）产品默认会去查 PipeWire 图，测试机器上没有
+    那套东西，注入假源时必须显式关掉复查；要验复查的用例自己传 `recheck=`。
+    """
     kw.setdefault("read_timeout", 0.05)
     kw.setdefault("join_timeout", 3.0)
+    kw.setdefault("recheck", None)
     return LevelProbe(opener=opener, **kw)
 
 
@@ -229,28 +240,204 @@ def test_silence_timeout_returns_to_floor() -> None:
     print(f"  ✓ 静音（read 超时）→ 回落地板值 {LEVEL_FLOOR_DB:g}dB；探针仍在跑、不算失败")
 
 
-def test_open_failure_leaves_trace_and_does_not_retry() -> None:
-    """★ 开不了设备：一行 `[level]` 日志 + `last_error`，不崩、**不重试刷日志**。"""
+def test_open_failure_logs_once_and_retries_low_frequency() -> None:
+    """★ 开不了设备：一行 `[level]` 日志 + `last_error`，同一理由**不重复打**；
+    但会**低频重试**（不是永久放弃）—— 这是「先开窗、后启动 VRChat」能自愈的前提。"""
     calls: list[int] = []
 
     def boom():
         calls.append(1)
         raise OSError("模拟：设备被独占（AUDCLNT_E_DEVICE_INVALIDATED）")
 
-    p = _probe(boom)
+    p = _probe(boom, retry_s=0.05)               # 重试周期压到 50ms 好观察
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         p.start()
-        _wait_for(lambda: p.running is False, what="失败后停下")
-        time.sleep(0.3)                          # 给「万一在重试」留出暴露的时间
+        _wait_for(lambda: len(calls) >= 3, what="失败后按 RETRY_S 低频重试")
+        _wait_for(lambda: p.running is True, what="重试期间线程仍活着（在等目标）")
+        _wait_for(lambda: p.has_data is False, what="没有可信数据")
+        time.sleep(0.1)                          # 多留几跳，看日志会不会被刷
     out = buf.getvalue()
-    assert calls == [1], f"失败后不许重试（opener 被调了 {len(calls)} 次）"
-    assert "[level]" in out and "❌" in out, f"失败必须留痕：{out!r}"
+    assert len(calls) >= 3, f"没有低频重试（opener 只调了 {len(calls)} 次）"
+    assert out.count("[level] ❌") == 1, f"同一理由只许一行日志：{out!r}"
     assert p.last_error and "设备被独占" in p.last_error, f"last_error 没记原因：{p.last_error!r}"
-    assert p.level_db == LEVEL_FLOOR_DB
-    p.stop()                                     # 失败了也要能安全 stop
+    assert p.level_db == LEVEL_FLOOR_DB and p.has_data is False
+    p.stop()                                     # 等待中的探针也要能安全 stop
     p.stop()                                     # 且幂等
-    print("  ✓ 开设备失败：1 行 [level] 留痕、last_error 有原因、opener 只调 1 次、不崩")
+    print(f"  ✓ 开设备失败：1 行 [level] 留痕、last_error 有原因、opener 重试 "
+          f"{len(calls)} 次（日志不刷屏）、不崩")
+
+
+def test_open_failure_recovers_when_target_appears() -> None:
+    """★ F2 自愈：先开设置窗（VRChat 还没跑）→ 环境恢复后**自动接上**，不必关窗重开。
+
+    这是 Linux 上很常见的顺序：设置窗先开着，VRChat 后启动。旧实现开失败一次就
+    永久停下、读数一直「—」。
+    """
+    calls: list[int] = []
+    src = FakeSource([_pcm(3277)], repeat=True)
+
+    def opener():
+        calls.append(1)
+        if len(calls) <= 2:
+            raise RuntimeError("没找到 VRChat 的音频输出流（VRChat 在跑并且出声了吗？）")
+        return src
+
+    p = _probe(opener, retry_s=0.05)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p.start()
+        _wait_for(lambda: p.has_data and p.chunks >= 2, what="环境恢复后自动接上并出数")
+    assert len(calls) >= 3, f"应重试到成功：opener 调了 {len(calls)} 次"
+    assert p.running is True and p.last_error is None, "接上后不该还留着错误"
+    assert abs(p.level_db - _db_of(3277)) < 0.05, f"接上后读数不对：{p.level_db:.2f}"
+    assert src.close_calls == 0, "接上后设备不该被关"
+    p.stop()
+    out = buf.getvalue()
+    assert out.count("[level] ❌") == 1, f"失败理由只留一行：{out!r}"
+    assert "[level] ✅" in out, f"恢复要有「接上」留痕：{out!r}"
+    print(f"  ✓ F2：opener 前 2 次失败、第 3 次成功 → 自动接上（读数 {p.level_db:.1f} dB）、"
+          f"失败日志 1 行 + 恢复日志 1 行")
+
+
+def test_recheck_reopens_when_targets_change() -> None:
+    """★ F1：目标集合变化（VRChat 播放流增减）→ 关掉旧的一路、按新目标重开。
+
+    `pw-record --target=<serial>` 在目标节点消失后不会退出、会回落到默认源（麦克风），
+    必须由探针主动收尾，否则读数会变成麦克风的电平。
+    """
+    sig = ["3684|3833"]                          # 初始：2 路
+    made: list[FakeSource] = []
+
+    def opener():
+        s = FakeSource([_pcm(3277)], repeat=True)
+        made.append(s)
+        return s
+
+    p = _probe(opener, recheck=lambda: sig[0], recheck_s=0.05, retry_s=0.05)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p.start()
+        _wait_for(lambda: len(made) == 1 and made[0].read_calls >= 2,
+                  what="第一路采起来")
+        sig[0] = "3684"                          # 掉了一路 → 签名变了
+        _wait_for(lambda: len(made) >= 2, what="目标变化后重开一路")
+        assert made[0].close_calls >= 1, "★ 旧路必须关掉（否则回落到麦克风还继续采）"
+        _wait_for(lambda: made[1].read_calls >= 1, what="新路在读")
+    p.stop()
+    out = buf.getvalue()
+    assert "采集目标变化" in out and "重开采集" in out, f"变化要有留痕：{out!r}"
+    assert made[1].close_calls >= 1, "stop() 后新路也要关"
+    print(f"  ✓ F1：签名 2 路 → 1 路 → 关旧路（close {made[0].close_calls} 次）+ 重开一路")
+
+
+def test_recheck_to_empty_keeps_waiting_then_recovers() -> None:
+    """★ F1 + F2 合体：VRChat 退出（目标空）→ 关掉采集、**不再采麦克风**、读数回「—」；
+    VRChat 再起 → 自动接上。这是「窗口开着、VRChat 中途退出/重进」的完整来回。"""
+    sig = ["3684|3833"]
+    made: list[FakeSource] = []
+
+    def opener():
+        if not sig[0]:
+            raise RuntimeError("没找到 VRChat 的音频输出流（VRChat 在跑并且出声了吗？）")
+        s = FakeSource([_pcm(3277)], repeat=True)
+        made.append(s)
+        return s
+
+    p = _probe(opener, recheck=lambda: sig[0], recheck_s=0.05, retry_s=0.05)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p.start()
+        _wait_for(lambda: len(made) == 1 and made[0].read_calls >= 2, what="采起来")
+        assert p.has_data is True
+        sig[0] = ""                              # VRChat 退出：目标全没了
+        _wait_for(lambda: made[0].close_calls >= 1, what="目标消失后关掉采集")
+        assert p.running is True, "★ 目标没了也要继续等（低频重试），不是永久死掉"
+        assert p.has_data is False, "★ 不许再显示麦克风的电平（has_data 必须归 False）"
+        assert p.level_db == LEVEL_FLOOR_DB
+        sig[0] = "4273"                          # VRChat 回来了
+        _wait_for(lambda: len(made) >= 2 and p.has_data, what="VRChat 回来自动接上")
+    p.stop()
+    out = buf.getvalue()
+    assert out.count("[level] ❌") == 1, f"「没目标」只留一行、不刷屏：{out!r}"
+    assert "[level] ✅" in out, f"恢复要有留痕：{out!r}"
+    print(f"  ✓ F1+F2：目标消失 → 关采集（close {made[0].close_calls} 次）且 has_data=False；"
+          f"目标回来 → 自动接上（第 {len(made)} 路）")
+
+
+def test_no_fake_level_before_first_chunk() -> None:
+    """★ F3：刚起来还没读到第一块时 `has_data=False`、`level_db` 仍是地板值 ——
+    界面据此显示「—」，不许把地板值 clamp 成假的 `-70 dB`。"""
+    src = FakeSource([])                          # 永不产块：read 一直超时返回 None
+    p = _probe(lambda: src)
+    p.start()
+    try:
+        _wait_for(lambda: src.read_calls >= 3, what="连着读了几次仍然没有块")
+        assert p.running is True, "没有块不是失败：探针要还活着"
+        assert p.last_error is None, f"静音不该记错误：{p.last_error!r}"
+        assert p.has_data is False, "★ 没读到块就不许有读数"
+        assert p.level_db == LEVEL_FLOOR_DB
+    finally:
+        p.stop()
+    print("  ✓ F3：第一块之前 has_data=False（界面显示「—」而不是假的 -70 dB）")
+
+
+def test_open_level_source_linux_branch() -> None:
+    """★ 补覆盖空白：真正执行 `open_level_source()` 的 **Linux 分支**
+    （`pick_vrchat_targets` + 逐路 `pw-record` + 多路混音），CI 的假 opener 用例从没走过。
+
+    用假 `pick_vrchat_targets` + 假 backend，**不碰任何真设备**。
+    """
+    from vlt import platform as plat
+    from vlt.platform.audio import MixedAudioSource
+    from vlt.engine import LoopbackTarget
+
+    def _t(serial: str) -> LoopbackTarget:
+        return LoopbackTarget(id=serial, name=f"VRChat.exe (audio stream #{serial})",
+                              sample_rate=48000, channels=2)
+
+    opened_ids: list[str] = []
+
+    class _Backend:
+        def open_loopback(self, target, blocksize=0):  # noqa: ANN001, ANN202
+            opened_ids.append(target.id)
+            return FakeSource([], rate=48000, channels=2)
+
+    saved = (level_probe_mod.pick_vrchat_targets, plat.IS_LINUX, plat.capture_backend)
+    try:
+        level_probe_mod.pick_vrchat_targets = lambda: [_t("1"), _t("2")]
+        plat.IS_LINUX = True
+        plat.capture_backend = lambda: _Backend()
+        with contextlib.redirect_stdout(io.StringIO()):
+            src = level_probe_mod.open_level_source()
+        assert isinstance(src, MixedAudioSource) and src.count == 2, \
+            "多路必须混成一路（与引擎同口径）"
+        assert opened_ids == ["1", "2"], f"应逐路各开一条：{opened_ids}"
+
+        # 单路：直接返回那一路，不无谓地包一层混音
+        opened_ids.clear()
+        level_probe_mod.pick_vrchat_targets = lambda: [_t("9")]
+        with contextlib.redirect_stdout(io.StringIO()):
+            src1 = level_probe_mod.open_level_source()
+        assert not isinstance(src1, MixedAudioSource) and opened_ids == ["9"]
+
+        # 没有目标 → 抛（由 LevelProbe 统一留痕/重试）
+        level_probe_mod.pick_vrchat_targets = lambda: []
+        try:
+            level_probe_mod.open_level_source()
+        except RuntimeError as exc:
+            assert "VRChat" in str(exc), f"错误文案该指向 VRChat：{exc}"
+        else:
+            raise AssertionError("没有 VRChat 流时必须抛异常，不能返回 None")
+
+        # 签名口径：与引擎腿一致（serial 排序拼接）
+        level_probe_mod.pick_vrchat_targets = lambda: [_t("2"), _t("1")]
+        assert level_probe_mod.vrchat_target_signature() == "1|2"
+        level_probe_mod.pick_vrchat_targets = lambda: []
+        assert level_probe_mod.vrchat_target_signature() == ""
+    finally:
+        (level_probe_mod.pick_vrchat_targets, plat.IS_LINUX, plat.capture_backend) = saved
+    print("  ✓ Linux 分支真执行：多路混音 / 单路直取 / 无目标抛错 / 签名口径")
 
 
 def test_read_error_leaves_trace_and_closes_device() -> None:
@@ -326,6 +513,7 @@ def _gui(fake_chunks=(), **src_kw):  # noqa: ANN001, ANN202
         return src
 
     def _factory(**kw):  # noqa: ANN003
+        kw.setdefault("recheck", None)           # 测试机器没有 PipeWire，别去查真图
         return LevelProbe(opener=_opener, read_timeout=0.05, **kw)
 
     saved_env = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")}
@@ -528,7 +716,11 @@ def test_engine_wins_and_no_second_stream() -> None:
 
 
 def test_open_failure_shows_dash_and_logs_once() -> None:
-    """★ 端到端的失败路径：开不了设备 → 读数「—」+ 只留一行日志（不刷屏）。"""
+    """★ 端到端的失败路径：开不了设备 → 读数「—」+ 只留一行日志（不刷屏）。
+
+    注意与「不重试」的区别：探针会在后台按 `RETRY_S`（默认 5s）低频重试，所以
+    1s 的窗口里 opener 只该被调 1 次；关窗重开会把等待中的探针整个丢掉再建一个。
+    """
     with _gui(open_error=OSError("模拟：没有可采集的系统输出")) as (gui, state):
         buf = io.StringIO()
         old = sys.stdout
@@ -537,12 +729,13 @@ def test_open_failure_shows_dash_and_logs_once() -> None:
             gui._open_settings()                                     # noqa: SLF001
             gui._root.update()                                       # noqa: SLF001
             _wait_gui(gui, lambda: gui._gate_probe is not None        # noqa: SLF001
-                      and gui._gate_probe.running is False, what="探针失败停下")  # noqa: SLF001
+                      and gui._gate_probe.last_error is not None, what="探针失败留痕")  # noqa: SLF001
             _pump(gui, 1.0)                  # 兜底同步跑 ~10 跳：不许重试刷日志
         finally:
             sys.stdout = old
         out = buf.getvalue()
-        assert state["opens"] == 1, f"失败后不许重试（opener 被调 {state['opens']} 次）"
+        assert state["opens"] == 1, \
+            f"1s 内不该重试（RETRY_S=5s）：opener 被调 {state['opens']} 次"
         assert out.count("[level] ❌") == 1, f"失败日志应正好一行：{out!r}"
         probe = gui._gate_probe                                      # noqa: SLF001
         assert probe is not None and probe.last_error, "失败原因要留着（last_error）"
@@ -550,13 +743,27 @@ def test_open_failure_shows_dash_and_logs_once() -> None:
         assert fail_label == "—", f"失败时读数必须是「—」：{fail_label!r}"
         assert gui._gate_level_db() is None, "失败时不许假装有电平"     # noqa: SLF001
 
-        # 用户重开设置窗 → 才会再试一次（这是唯一的「重试」入口）
+        # 用户重开设置窗 → 会重新建一个探针再试一次
         with _quiet():
             gui._close_settings()                                    # noqa: SLF001
             _open(gui)
-            _wait_gui(gui, lambda: state["opens"] == 2, what="重开设置窗后再试一次")
-    print(f"  ✓ 开设备失败：读数「—」、[level] ❌ 只 1 行、opener 只 1 次；"
-          f"重开设置窗才再试（共 {state['opens']} 次）")
+            _wait_gui(gui, lambda: state["opens"] == 2, what="重开设置窗后重建探针再试")
+    print(f"  ✓ 开设备失败：读数「—」、[level] ❌ 只 1 行、1s 内 opener 只 1 次；"
+          f"重开设置窗重建（共 {state['opens']} 次）")
+
+
+def test_gui_dash_until_first_chunk() -> None:
+    """★ F3 的界面侧：探针起来了但还没读到块 → 读数「—」（不是假的 -70 dB）。"""
+    with _gui() as (gui, state):                 # 假源永不产块：read 一直超时
+        _open(gui)
+        _wait_probe(gui, state, 1)
+        with _quiet():
+            _pump(gui, 0.5)
+        assert gui._gate_probe.has_data is False                     # noqa: SLF001
+        assert gui._gate_level_db() is None, "没读到块就不该有电平"     # noqa: SLF001
+        dash_label = _label(gui)
+        assert dash_label == "—", f"第一块之前读数应是「—」：{dash_label!r}"
+    print("  ✓ F3（界面）：探针在跑但没读到块 → 读数「—」")
 
 
 def test_peak_hold_semantics_unchanged() -> None:
@@ -573,6 +780,7 @@ def test_peak_hold_semantics_unchanged() -> None:
 
         class _Stub:                    # 直接喂已知电平，避开线程时序
             running = True
+            has_data = True
             level_db = -20.0
 
         stub = _Stub()
@@ -643,7 +851,12 @@ def main() -> int:
         test_probe_reports_level_of_known_pcm,
         test_probe_level_matches_engine_recipe,
         test_silence_timeout_returns_to_floor,
-        test_open_failure_leaves_trace_and_does_not_retry,
+        test_open_failure_logs_once_and_retries_low_frequency,
+        test_open_failure_recovers_when_target_appears,
+        test_recheck_reopens_when_targets_change,
+        test_recheck_to_empty_keeps_waiting_then_recovers,
+        test_no_fake_level_before_first_chunk,
+        test_open_level_source_linux_branch,
         test_read_error_leaves_trace_and_closes_device,
         test_stop_joins_thread_and_is_idempotent,
         test_probe_idle_until_window_visible_and_checked,
@@ -651,6 +864,7 @@ def main() -> int:
         test_close_window_stops_and_never_reopens,
         test_engine_wins_and_no_second_stream,
         test_open_failure_shows_dash_and_logs_once,
+        test_gui_dash_until_first_chunk,
         test_peak_hold_semantics_unchanged,
         test_hint_text_and_five_languages,
     ]
