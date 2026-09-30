@@ -1,8 +1,9 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.4.1 "_settings_page"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.5.0 "LevelProbe"
 
-第二个参数 = 本版新增功能里必定出现的字符串（默认「俄语」）。判据是「在解包出来的
+第二个参数 = 本版新增功能里必定出现的字符串（v0.5.0 用「LevelProbe」—— 实时电平那一路
+新加的类名；修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠）。判据是「在解包出来的
 字节码里搜得到」——不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
 复核项：

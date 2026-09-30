@@ -385,7 +385,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.2.2 "手腕屏没启动起来"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.5.0 "LevelProbe"
   ```
 
 ---

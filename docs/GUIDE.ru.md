@@ -387,7 +387,7 @@ build_exe.bat                                              :: сборка + п�
   (SHA256, реальный запуск `--self-test`, строка версии, поиск строк новых функций в байткоде, попиксельное сравнение иконки):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.2.2 "手腕屏没启动起来"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.5.0 "LevelProbe"
   ```
 
 ---

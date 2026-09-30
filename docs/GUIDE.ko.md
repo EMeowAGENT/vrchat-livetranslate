@@ -384,7 +384,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.2.2 "手腕屏没启动起来"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.5.0 "LevelProbe"
   ```
 
 ---
