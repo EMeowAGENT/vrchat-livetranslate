@@ -33,8 +33,11 @@ Tk 窗在 X11 上就是一块**不透明矩形**。要让像素真的透过去�
   只 `XFree` XImage 结构体本身。
 * `XImage.byte_order` 必须是 `LSBFirst`、`bits_per_pixel` 32（x86_64 恒成立，
   这里显式检查并拒绝，防「字节序不符却照画」这种最难查的花屏）。
-* **没有合成器时 ARGB 的透明区会显示为黑**（没人做混合）——建窗时探测
-  `_NET_WM_CM_S<n>` 选主，没有就打一行醒目警告；功能照用，用户起 picom 即恢复。
+* **没有合成器时逐像素 alpha 无人混合**（早期行为：透明区显示为黑，用户实测报过
+  「明显黑色边框」）——建窗时探测 `_NET_WM_CM_S<n>` 选主，没有就**自动降级**：
+  每帧按面板 alpha 裁 1 位形状蒙版（`overlay_pixels.alpha_mask_bits`），黑框消失；
+  圆角变锯齿、底板是实色（没合成器时物理上修不了），日志有一行说明。有合成器时
+  **不裁形**，保持圆润的逐像素透明。
 * **错误护栏复用 `linux._guarded`**：Tk 进程里未被接管的 X 错误会被 Tk 的
   错误处理器升级成致命错误，凡是可能落在「已销毁句柄」上的请求都要裹上它。
 
@@ -51,12 +54,13 @@ from typing import Any, Callable
 
 from PIL import Image
 
-from .overlay_pixels import clamp01, premultiplied_bgra
+from .overlay_pixels import alpha_mask_bits, clamp01, premultiplied_bgra
 # 复用 linux.py 的现成工具（都是连接无关的）：
 #   * `_guarded` —— 说明与理由见 linux.py 模块内文档（X 错误护栏）；
 #   * `set_click_through` —— X Shape 输入区（协议级穿透）；
+#   * `set_window_shape` —— 1 位形状蒙版（无合成器时的降级裁形，见 _draw）；
 #   * `set_tool_window` —— WM_HINTS input=False（不抢焦点）。
-from .linux import _guarded, set_click_through, set_tool_window
+from .linux import _guarded, set_click_through, set_tool_window, set_window_shape
 
 _LOG = "[desktop:x11]"
 
@@ -266,6 +270,7 @@ class ArgbWindow:
         self._gc: Any = None
         self._img: Any = None
         self._buf: Any = None
+        self._has_compositor = True   # 建窗时探测；没有 → 逐像素 alpha 无人混合
 
         self._drag_active = False
         self._drag_anchor_pos: tuple[int, int] = (0, 0)
@@ -327,7 +332,7 @@ class ArgbWindow:
         self._gc = gc
         self._make_image(w, h)
 
-        self._compositor_note()
+        self._has_compositor = self._compositor_note()
         if not set_tool_window(self._win):
             print(f"{_LOG} ⚠️ 「不抢焦点」没设上（WM_HINTS）→ 点面板可能把焦点从游戏抢走",
                   flush=True)
@@ -336,20 +341,27 @@ class ArgbWindow:
                     lambda: self._x11.XMapRaised(dpy, ctypes.c_ulong(self._win))) is None:
             raise RuntimeError("XMapRaised 失败")
 
-    def _compositor_note(self) -> None:
-        """没有合成器时 ARGB 透明区会显示为黑 —— 提前说清楚（不挡功能）。"""
+    def _compositor_note(self) -> bool:
+        """探测合成器并说明降级路径；返回是否有合成器。
+
+        没有合成器时逐像素 alpha **无人混合**：若不处理，透明区会显示为黑（早期版本
+        的行为，用户实测报过）。这里返回 False，`_draw` 会改用 1 位形状蒙版把透明区
+        裁掉 —— 黑框没了（圆角变锯齿、底板仍是实色，这些没有合成器时物理上修不了）。
+        """
         owner = 0
         try:
             atom = int(self._x11.XInternAtom(
                 self._dpy, f"_NET_WM_CM_S{self._screen}".encode(), 0))
             if atom:
                 owner = int(self._x11.XGetSelectionOwner(self._dpy, ctypes.c_ulong(atom)))
-        except Exception:  # noqa: BLE001 — 探测失败就当没有，不值得拦建窗
+        except Exception:  # noqa: BLE001 — 探测失败就按没有，不值得拦建窗
             owner = 0
         if not owner:
             print(f"{_LOG} ⚠️ 没检测到合成器（_NET_WM_CM_S{self._screen} 无主）："
-                  f"透明区域会显示为黑。起一个合成器（如 picom）后透明即刻恢复；"
-                  f"字幕本身不受影响。", flush=True)
+                  f"逐像素 alpha 无人混合 → 已改用 1 位形状蒙版裁掉透明区"
+                  f"（没有黑框；圆角为锯齿、底板是实色）。起一个合成器（如 picom）"
+                  f"后**重启程序**即恢复圆润透明。", flush=True)
+        return bool(owner)
 
     def _make_image(self, w: int, h: int) -> None:
         """（重）建出图缓冲：Python 持有数据，XImage 只是借用。
@@ -444,6 +456,21 @@ class ArgbWindow:
             self._mark_dead("XPutImage 报错（窗口被外部销毁？）")
             return
         self._dirty = False
+        if not self._has_compositor:
+            # 无合成器降级：按面板 alpha 裁 1 位形状蒙版（黑框没了；圆角为锯齿）。
+            # 口径与 Tk 回落路径完全一致（overlay_pixels.alpha_mask_bits），只是
+            # Tk 那边抠的是键色底，这里抠的是"没人混合的透明区"。
+            try:
+                mask = alpha_mask_bits(img)
+                if not set_window_shape(self._win, mask, w, h) and not self._shape_warned:
+                    self._shape_warned = True
+                    print(f"{_LOG} ⚠️ 形状蒙版没设上（X Shape 不可用？）"
+                          f"→ 无合成器时透明区会显黑", flush=True)
+            except Exception as exc:  # noqa: BLE001 — 裁形失败不许带崩出图
+                if not self._shape_warned:
+                    self._shape_warned = True
+                    print(f"{_LOG} ⚠️ 形状蒙版失败（已忽略）："
+                          f"{type(exc).__name__}: {exc}", flush=True)
 
     # ---------- 事件泵 / 指针 ----------
 

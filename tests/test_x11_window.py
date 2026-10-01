@@ -240,6 +240,26 @@ def _input_region_count(wid: int) -> int:
     return int(n.value)
 
 
+def _bounding_area(wid: int) -> int:
+    """形状蒙版（Bounding=0）的矩形覆盖面积；没设过 = 默认区域 = 整窗面积。"""
+    x11, xext, dpy = _raw()
+    n, order = ctypes.c_int(), ctypes.c_int()
+    ptr = xext.XShapeGetRectangles(dpy, ctypes.c_ulong(wid), 0,
+                                   ctypes.byref(n), ctypes.byref(order))
+    if not ptr:
+        return 0
+
+    class _Rect(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                    ("width", ctypes.c_ushort), ("height", ctypes.c_ushort)]
+
+    try:
+        rects = ctypes.cast(ptr, ctypes.POINTER(_Rect))
+        return sum(int(rects[i].width) * int(rects[i].height) for i in range(n.value))
+    finally:
+        x11.XFree(ptr)
+
+
 def _read_window(wid: int, w: int, h: int) -> bytes:
     """XGetImage 回读窗口内容（无合成器时 = XPutImage 写进去的原始字节）。"""
     x11, _xext, dpy = _raw()
@@ -324,7 +344,13 @@ def test_live_window() -> None:
         mid = _px(raw, stride, 110, 30)
         assert mid == (0, 0, 0, 128), f"半透明黑应为预乘 (0,0,0,128)：{mid}"
         assert _px(raw, stride, 200, 30) == (0, 0, 0, 0), "透明区不是全零"
-        print("  建窗（32 位 / ORD / 映射）+ 像素回读（不透明 / 半透明 / 全透明）OK")
+        # 无合成器降级：1 位形状蒙版把透明区裁掉（这就是「黑框」的修法）——
+        # 面积 = 实心像素数 = 2/3 宽（左 73 + 中 73 列）× 全高
+        expect = (2 * 220 // 3) * 120
+        assert _bounding_area(win._win) == expect, \
+            f"无合成器没裁形：{_bounding_area(win._win)}（应 {expect}）"
+        print("  建窗（32 位 / ORD / 映射）+ 像素回读（不透明 / 半透明 / 全透明）"
+              f"+ 无合成器裁形（面积 {expect}）OK")
 
         # 穿透：输入区为空 → 真点击收不到；解锁拖动 → 恢复整窗 → 收得到
         assert _input_region_count(win._win) == 0, "click_through 初始没置空输入区"
@@ -356,22 +382,26 @@ def test_live_window() -> None:
         assert drag_log == [(270, 210)], f"拖动回调不对：{drag_log}"
         print("  拖动（xdotool 真指针，落点 270,210 对 root 核对）OK")
 
-        # 改尺寸 + 整体透明度（重建缓冲后仍然画对）
+        # 改尺寸 + 整体透明度（重建缓冲后仍然画对；蒙版跟着新尺寸重设）
         win.set_size((260, 140))
+        win.set_panel(_three_band_panel((260, 140)))
         _pump(win, 0.15)
         a = _attrs(win._win)
         assert (a.width, a.height) == (260, 140), (a.width, a.height)
         raw, stride = _read_window(win._win, 260, 140)
         assert _px(raw, stride, 30, 30) == (0, 0, 255, 255), "改尺寸后出图不对"
+        expect = (2 * 260 // 3) * 140
+        assert _bounding_area(win._win) == expect, "改尺寸后蒙版没重设"
         win.set_alpha(0.5)
         _pump(win, 0.15)
         raw, stride = _read_window(win._win, 260, 140)
         got = _px(raw, stride, 30, 30)
         assert all(abs(g - w) <= 2 for g, w in zip(got, (0, 0, 127, 127))), \
             f"整层 alpha=0.5 不对：{got}"
+        assert _bounding_area(win._win) == expect, "蒙版不该随整层透明度变化"
         win.set_alpha(1.0)
         _pump(win, 0.1)
-        print("  改尺寸（缓冲重建）+ 整层透明度（0.5 → 预乘减半）OK")
+        print("  改尺寸（缓冲/蒙版重建）+ 整层透明度（0.5 → 预乘减半、蒙版不变）OK")
     finally:
         win.close()
 
@@ -446,8 +476,11 @@ def test_live_compositor() -> None:
             f"半透明黑合成不对：{got_mid}（应约 {tuple(int(v * 0.5) for v in BG)}）"
         assert near(got_right, BG), f"透明区没透出底色：{got_right}（应 {BG}）"
         assert near(got_outer, BG), f"背底对照不对：{got_outer}"
+        # 有合成器：**不该**裁形（保持圆润的逐像素 alpha；裁了圆角会变锯齿）
+        assert _bounding_area(win._win) == 240 * 120, \
+            f"有合成器却裁了形：{_bounding_area(win._win)}（应整窗 {240 * 120}）"
         print(f"  picom 合成：不透明红 {got_left} / 半透明 {got_mid} / "
-              f"全透明透出底色 {got_right}（窗外 {got_outer}）OK")
+              f"全透明透出底色 {got_right}（窗外 {got_outer}）+ 不裁形 OK")
     finally:
         win.close()
         x11.XDestroyWindow(dpy, ctypes.c_ulong(base))

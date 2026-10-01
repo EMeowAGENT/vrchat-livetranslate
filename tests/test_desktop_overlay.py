@@ -171,25 +171,31 @@ def test_clamp_alpha_bounds() -> None:
 
 # ---------------------------------------------------------------- 5. from_dict
 def test_alpha_mask_bits() -> None:
-    """形状蒙版字节口径：LSB-first、行末补零、阈值 128、只看面板自身 alpha。"""
+    """形状蒙版字节口径：LSB-first、行末补零、阈值语义、只看面板自身 alpha。"""
     from PIL import Image
 
-    from vlt.output.desktop_overlay import alpha_mask_bits
+    from vlt.platform.overlay_pixels import alpha_mask_bits
     # 9 像素宽（跨字节边界）2 行：第一行前 4 个实心，第二行全空
     img = Image.new("RGBA", (9, 2), (0, 0, 0, 0))
     for x in range(4):
         img.putpixel((x, 0), (255, 0, 0, 255))
     bits = alpha_mask_bits(img)
     assert bits == b"\x0f\x00\x00\x00", bits     # LSB-first：0b0000_1111 → 0x0f
-    # 阈值：127 不算、128 算
+    # 默认阈值 32：31 不算、32 算（只裁"几乎全透明"的外圈——
+    # 128 会误裁 border_alpha=120 的边框与低透明度底板，见函数文档）
     img2 = Image.new("RGBA", (8, 1), (0, 0, 0, 0))
+    img2.putpixel((0, 0), (0, 0, 0, 31))
+    img2.putpixel((7, 0), (0, 0, 0, 32))
+    assert alpha_mask_bits(img2) == b"\x80", alpha_mask_bits(img2)
+    # 显式阈值仍然可用：127 不算、128 算
     img2.putpixel((0, 0), (0, 0, 0, 127))
     img2.putpixel((7, 0), (0, 0, 0, 128))
-    assert alpha_mask_bits(img2) == b"\x80", alpha_mask_bits(img2)
+    assert alpha_mask_bits(img2, threshold=128) == b"\x80", \
+        alpha_mask_bits(img2, threshold=128)
     # 宽度不是 8 的倍数也照打包（行末补零）
     img3 = Image.new("RGBA", (3, 1), (0, 0, 0, 255))
     assert alpha_mask_bits(img3) == b"\x07", alpha_mask_bits(img3)
-    print("  alpha_mask_bits（LSB-first / 行补零 / 阈值 128）OK")
+    print("  alpha_mask_bits（LSB-first / 行补零 / 默认阈值 32 / 显式阈值）OK")
 
 
 def test_from_dict_defaults_inherit_and_override() -> None:

@@ -27,7 +27,6 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
 """
 from __future__ import annotations
 
-import numpy as np
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +36,7 @@ from PIL import Image
 
 # 调试帧是"跑完要看"的产物 → 可写目录（exe 旁），与手腕屏的 dry-run 同一个口径
 from ..paths import APP_DIR
+from ..platform.overlay_pixels import alpha_mask_bits
 from .overlay import OverlayConfig, _unpack_entry, render_conversation, render_panel
 
 # 色键：窗口底色与贴图底色必须是**同一个**颜色，Tk 才会把那一片抠成透明。
@@ -241,23 +241,6 @@ def clamp_alpha(a: Any) -> float:
     if v != v:                                  # NaN
         return ALPHA_DEFAULT
     return max(ALPHA_MIN, min(ALPHA_MAX, v))
-
-
-def alpha_mask_bits(image: Image.Image, threshold: int = 128) -> bytes:
-    """RGBA 面板 → **1 位形状蒙版**的 LSB-first 打包字节（X11 `XCreateBitmapFromData` 口径）。
-
-    口径：`alpha >= threshold` 的像素算「实心」；每行按 8 像素一字节、**最左像素 = 最低位**、
-    行末补 0 到字节边界、行序自上而下 —— 与 `np.packbits(..., bitorder="little")` / XBM
-    完全一致。Tk 回落路径在 Linux 上用它把面板圆角外的键色底抠掉（`-transparentcolor`
-    是 Windows 专属属性，Linux 的 Tk 根本没有）。
-
-    ⚠️ 用**面板自己的 alpha**，不乘整层 `cfg.alpha`：整层透明度由 Tk 的 `-alpha`
-    （`_NET_WM_WINDOW_OPACITY`）统一做 —— 乘进来的话 `alpha=0.3` 时没有像素过得了
-    128/0.3 的阈值，整个窗口会被蒙版裁没。形状与透明度是两件事。
-    """
-    rgba = np.asarray(image.convert("RGBA"))
-    solid = (rgba[..., 3] >= int(threshold)).astype(np.uint8)
-    return np.packbits(solid, axis=1, bitorder="little").tobytes()
 
 
 def _clamp_into_area(x: int, y: int, w: int, h: int,
