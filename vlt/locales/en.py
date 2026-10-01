@@ -36,10 +36,10 @@ STRINGS: dict[str, str] = {
     # ---- 手腕屏微调面板 ----
     "锚点:": "Anchor:",
     "tracker 序号:": "Tracker #:",
-    "（仅锚点=前臂 tracker 时有效）": "(only when Anchor = Forearm Tracker)",
+    "（仅锚点=外部 tracker 时有效）": "(only when Anchor = External Tracker)",
     "右手": "Right Hand",
     "左手": "Left Hand",
-    "前臂 tracker": "Forearm Tracker",
+    "外部 tracker": "External Tracker",
     "头显前固定": "Fixed to HMD",
     "位置X": "Pos X",
     "位置Y": "Pos Y",
@@ -88,6 +88,7 @@ STRINGS: dict[str, str] = {
     "正在启动（双向）…": "Starting (both directions)…",
     "正在启动…": "Starting…",
     "已停止": "Stopped",
+    "正在停止…": "Stopping…",
     "已切换为{target} → 中文": "Switched to {target} → Chinese",
 
     # ---- 设备扫描 / 选择 ----
