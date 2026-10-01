@@ -36,10 +36,10 @@ STRINGS: dict[str, str] = {
     # ---- 手腕屏微调面板 ----
     "锚点:": "Anchor:",
     "tracker 序号:": "Tracker #:",
-    "（仅锚点=前臂 tracker 时有效）": "(only when Anchor = Forearm Tracker)",
+    "（仅锚点=外部 tracker 时有效）": "(only when Anchor = External Tracker)",
     "右手": "Right Hand",
     "左手": "Left Hand",
-    "前臂 tracker": "Forearm Tracker",
+    "外部 tracker": "External Tracker",
     "头显前固定": "Fixed to HMD",
     "位置X": "Pos X",
     "位置Y": "Pos Y",
@@ -88,6 +88,7 @@ STRINGS: dict[str, str] = {
     "正在启动（双向）…": "Starting (both directions)…",
     "正在启动…": "Starting…",
     "已停止": "Stopped",
+    "正在停止…": "Stopping…",
     "已切换为{target} → 中文": "Switched to {target} → Chinese",
 
     # ---- 设备扫描 / 选择 ----
@@ -365,6 +366,9 @@ STRINGS: dict[str, str] = {
         "Desktop subtitles are on — drag them where you want; opacity is under \"Tune ▸\"",
     "桌面字幕没启动起来，已自动取消勾选":
         "Desktop subtitles could not start, so the tick was reverted",
+    "桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动":
+        "Desktop subtitles aren't running — tick \"Desktop Subtitles\" first, "
+        "then unlock dragging",
     "解锁拖动": "Unlock & Drag",
     "锁定位置": "Lock Position",
     "桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」":

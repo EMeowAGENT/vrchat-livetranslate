@@ -40,6 +40,21 @@ ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
 # 音频流静默超过这个时长 = 上一句说完了（给虚拟麦打句尾标记的兜底触发）
 SENTENCE_GAP_S = 0.6
+# 收尾时排空 chatbox 的预算：最多 2s（原来是 12×0.5s=6s，纯白等 —— 限流是
+# 每 0.4s 才放一条，积压十几条本来也排不完，白等 6 秒只是让「停止」更慢）。
+CHATBOX_DRAIN_ROUNDS = 4
+CHATBOX_DRAIN_INTERVAL_S = 0.5
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    """两个字符串的公共前缀长度（用来识别"同一句在续写"）。"""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
@@ -509,15 +524,40 @@ class Engine:
         self._thread = t
         t.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        if self._thread is None:
-            return
+    def request_stop(self) -> None:
+        """只**发**停止信号，不等收尾（幂等、线程安全、立即返回）。
+
+        为什么要有这个入口：`stop()` 会在**调用方线程**上等引擎收尾（本仓库停止时
+        实测 ~10s，见下），而界面要停的不止一个引擎 —— 顺序调用就等于让第二个引擎
+        在前一个收尾期间继续采集/上送（用户真机日志：点停止后 loopback 腿又跑了 10s）。
+        界面现在先对所有引擎 `request_stop()`（并发下发，采集立刻停），收尾交给后台线程。
+        """
         self._stopping = True
         self._stop_event.set()          # 直接置位（线程安全）：采集循环下个周期就退出
         if self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._schedule_stop)
-        self._stopped.wait(timeout)
-        self._thread.join(timeout)
+
+    def wait_stopped(self, timeout: float = 5.0) -> bool:
+        """等本引擎**真正收尾完**（线程退出）。返回 False = 超时（线程可能还在跑）。
+
+        只等收尾、不发信号 —— 与 `request_stop()` 配对给界面用。
+        """
+        ok = self._stopped.wait(timeout)
+        if ok and self._thread is not None:
+            self._thread.join(0.5)
+            self._thread = None
+        return ok
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """阻塞版停止（CLI / 测试 / 关窗收尾用）：发信号后等收尾，最多 timeout 秒。
+
+        界面按钮**不要**直接用它 —— 它在调用方线程上等，正是「停止翻译后窗口无响应」
+        的来源（实测双向下 20.04s 无响应）。界面走 `request_stop()` + 后台 `wait_stopped()`。
+        """
+        if self._thread is None:
+            return
+        self.request_stop()
+        self.wait_stopped(timeout)
         self._thread = None
 
     def join(self, timeout: float | None = None) -> None:
@@ -689,11 +729,16 @@ class Engine:
             pass
         try:
             if self._chatbox is not None:
-                for _ in range(12):
+                for _ in range(CHATBOX_DRAIN_ROUNDS):
                     if self._chatbox.pending_count == 0:
                         break
                     self._chatbox.flush_pending()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(CHATBOX_DRAIN_INTERVAL_S)
+                _left = self._chatbox.pending_count
+                if _left:
+                    # 降级路径留痕（禁静默降级）：这几条**发不出去**了，得让人看得见。
+                    print(f"[chatbox] 停止时仍有 {_left} 条未发完（限流窗口内排不完，"
+                          f"已放弃等待；它们不会重发）", flush=True)
         except Exception:
             pass
         try:

@@ -3,7 +3,7 @@
 > **中文** | [English](GUIDE.en.md) | [日本語](GUIDE.ja.md) | [한국어](GUIDE.ko.md) | [Русский](GUIDE.ru.md)
 >
 > 这份是 **Linux 专用**。Windows 请看 [GUIDE.md](GUIDE.md)。
-> 两边**共用同一份 `config.yaml`**，配置语义一致（同一组 `anchor` / `offset` 换平台不会失效）。
+> 两边**共用同一份 `config.yaml`**，配置语义一致（同一组 `anchor` / `offsets` 换平台不会失效）。
 
 ---
 
@@ -27,6 +27,7 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
 
 1. **Wayland 会话**（niri / KDE / GNOME 都行）。
    手腕屏走 **Wayland + EGL**；X11 下走不通（精简 XWayland 的 GLX 建不出 context，实测过）。
+   （界面本身走 Tk/**X11**，Wayland 会话下由 XWayland 提供 —— 桌面发行版默认都有这套基础库。）
 2. **PipeWire**（大多数现代发行版默认就是）—— 需要 `pw-dump` / `pw-record` / `pw-cat`。
    > ⚠️ 我们不依赖 PulseAudio 兼容层。实测某些环境下 `pactl` 连不上，而 `pw-dump` 正常，
    > 所以全程用 PipeWire **原生**工具。
@@ -57,7 +58,9 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ./VRChatLiveTranslate-x86_64.AppImage
 ```
 
-- 解释器与全部依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`
+- Python 解释器与全部 Python 依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`。
+  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行）、**portaudio**（麦克风）、
+  X11 基础库（XWayland）与一套中日韩字体
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
 - 仍然要自备一个**阿里云百炼 API key**（见下一节）
@@ -170,22 +173,32 @@ Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」�
 1. **界面上的「微调 ▸」**（在「输出」那一行的右端）：锚点 + **14 个滑块**
    （位置 X/Y/Z、俯仰/偏航/翻滚、大小、弯曲、透明度、译文字号、原文字号、面板高、
    底板不透明度、原文不透明度）—— 戴着看效果边调最快。完整表格见 GUIDE.md 的「手腕屏微调面板」。
-2. 直接改 `config.yaml` 的 `overlay.anchor` + `overlay.offset`，存盘即生效
+2. 直接改 `config.yaml` 的 `overlay.anchor` + `overlay.offsets.<锚点>`，存盘即生效
 
 ```yaml
 overlay:
   anchor: right_hand         # left_hand | right_hand | tracker | hmd
-  offset:
-    pos: [0.0, 0.06, 0.02]   # 相对锚点的偏移（米）
-    rot: [-47, -16, 0]       # 欧拉角（度），约定 Rz·Ry·Rx
+  offsets:                   # ★ 每个锚点各存一套：切锚点时界面自动载入对应这一份
+    right_hand:
+      pos: [0.0, 0.06, 0.02] # 相对锚点的偏移（米）
+      rot: [-47, -16, 0]     # 欧拉角（度），约定 Rz·Ry·Rx
+    left_hand:
+      pos: [0.0, 0.06, 0.02]
+      rot: [-47, 16, 0]      # 左手 = 右手镜像（见下方说明）
+    hmd:
+      pos: [0.0, -0.10, -0.35]
+      rot: [0, 0, 0]
+  offset:                    # 兜底：某个锚点没在 offsets 里单独存过时用它
     width_m: 0.23            # 面板宽度（米）—— 弯曲时按**弧长**算，与 Windows 一致
     curvature: 0.0           # 弯曲：占整圆的比例（0.5 = 半圈 180°；0.1~0.3 好看）。
                              # 改它只弯曲，面板中心不动（两边朝你卷）
 ```
 
-> ⚠️ **默认的 `rot` 是为「右手腕」调的**（作者实测值）。改到 `left_hand` 时要镜像：
-> **`rx` 不变、`ry` 取反、`rz` 取反** → `[-47, -16, 0]` 变成 `[-47, 16, 0]`。
-> 这只是起始值，最终戴着微调。左右手坐标系沿 X 轴镜像，原因见
+> ⚠️ **左右手不能照抄**：默认的 `rot` 是为「右手腕」调的（作者实测值），而左右手 grip
+> 坐标系沿 X 轴镜像，换到 `left_hand` 要 **`rx` 不变、`ry` 取反、`rz` 取反** ——
+> `[-47, -16, 0]` 变成 `[-47, 16, 0]`（位置的 `x` 分量同理）。这才是模板里
+> `left_hand` 那份跟 `right_hand` 不一样的原因。每一份都只是**起始值**，
+> 最终戴着微调；调好之后各存各的，来回切不会互相覆盖。原因见
 > [docs/平台约束记录.md](平台约束记录.md) 第五节。
 
 ### 译音（对方直接听到）
@@ -305,7 +318,8 @@ overlay:
 1. **需要 Wayland**。X11 会话下手腕屏不可用（GLX 建不出 context）。
 2. **`anchor: tracker` 未实测**。OpenXR 里 tracker 是**按 role 寻址**的
    （`/user/vive_tracker_htcx/role/...`），和 Windows 侧「第 N 个 GenericTracker」的语义
-   不完全一样；`tracker_index` 是这张 role 表的序号。代码写了，但没有硬件验证过。
+   不完全一样；`tracker_index` 是这张 role 表的序号（0=右腕 1=左腕 2=右肘 3=左肘
+   4=胸 5=腰 6=右脚 7=左脚）。代码写了，但没有硬件验证过。
 3. **手腕屏需要 OpenXR 运行时**（Monado / WiVRn）。没有的话这条腿会自己禁用，其它功能不受影响。
 4. **VRChat 走 Proton**：虚拟麦克风能否被 VRChat 列出取决于 winepulse，属于需要在你的环境实测的部分。
 5. **自更新只对 AppImage 生效**（源码运行不做，只给 `git pull` 指引）。

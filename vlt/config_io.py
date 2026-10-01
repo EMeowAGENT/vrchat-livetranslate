@@ -126,6 +126,25 @@ def _yaml_set_or_create(text: str, path: list[str], value: str) -> str:
         got = _find(key_path[0], indent, lo, hi)
         if got is None:                          # 父级缺失 → 在本区间末尾补建整条链
             at = hi
+            # ⚠️ 不能直接插在 `hi`（= 本块后面的第一个真行）：块尾往往还挂着**空行**
+            #    和**下一段的标题注释**，插在它们后面的话，那段注释就变成新键的注释了。
+            #    实测：在 `overlay:` 末尾补建 `offsets:`，结果
+            #        # 第三条腿：译音输出（模型译音 → 虚拟声卡 → …）
+            #          offsets:
+            #            …
+            #        output:
+            #    「译音输出」的说明被挂到了手腕屏的键上。所以往回退过空行、
+            #    以及**比本块更浅**的注释（那是下一段的标题；本块内部的续行注释
+            #    缩进更深，必须留在原地 —— 见 `_yaml_set_in_text` 里那条取舍）。
+            while at > lo:
+                s = lines[at - 1].lstrip()
+                if not s:
+                    at -= 1
+                    continue
+                if s.startswith("#") and (len(lines[at - 1]) - len(s)) < indent:
+                    at -= 1
+                    continue
+                break
             if at == len(lines) and lines and lines[-1] == "":
                 at = len(lines) - 1               # 保住文件末尾的那个换行
             block: list[str] = []
