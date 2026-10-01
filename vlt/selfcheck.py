@@ -110,6 +110,22 @@ def verify_imports(allow_fat: bool = False) -> int:
             return 1
         print(f"xr 只留当前平台：{sorted(want_api)}（{size / 1024 / 1024:.0f}MB）")
 
+    # ⑤ X11（XLIB）绑定结构体：**只构造、不建上下文** —— 钉住「PyOpenGL 的 GLX 类型
+    #    真在包里」。与 OpenGL.platform.egl 同一类坑：这些模块靠运行时 import 名
+    #    解析，静态分析看不到；缺了的话 X11 用户建 session 时才炸。
+    import ctypes as _ct
+
+    import xr
+    _f = {n: tp for n, tp in xr.GraphicsBindingOpenGLXlibKHR._fields_}
+    xr.GraphicsBindingOpenGLXlibKHR(
+        x_display=_ct.cast(_ct.c_void_p(1), _f["x_display"]),
+        visualid=1,
+        glx_fbconfig=_ct.cast(_ct.c_void_p(2), _f["glx_fbconfig"]),
+        glx_drawable=3,
+        glx_context=_ct.cast(_ct.c_void_p(4), _f["glx_context"]),
+    )
+    print("X11/XLIB 绑定结构体可构造（PyOpenGL GLX 类型在包里）")
+
     print("OK")
     return 0
 

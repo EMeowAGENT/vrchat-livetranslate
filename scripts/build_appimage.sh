@@ -565,7 +565,7 @@ cat <<EOF
     \${XDG_DATA_HOME:-~/.local/share}/vrchat-livetranslate/   （config.yaml / logs / out）
 
 注意：
-  * 需要 **Wayland 会话**（手腕屏走 Wayland + EGL）
+  * 桌面会话 Wayland / X11 都行（手腕屏：Wayland 走 EGL、X11 走 GLX）
   * 手腕屏还需要 **OpenXR 运行时已起 + 头显已连**（Monado / WiVRn）
   * 译音虚拟声卡由程序运行时自己声明，**不需要**事先装 VB-Cable 之类
   * 需要宿主自带一套中日韩字体

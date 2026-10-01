@@ -519,6 +519,160 @@ def test_backend_xr_calls_are_wellformed():
     print(f"  后端 {calls} 处 xr.* 调用：句柄/个数/字段 全部正确 OK")
 
 
+def test_extensions_per_backend_required():
+    """★ 后端决定必需扩展清单：X11/XLIB 不该要求 `XR_MNDX_egl_enable`。
+
+    MNDX 是 Wayland 的 EGL 绑定专有扩展；X11 走 `XR_KHR_opengl_enable` 的 XLIB 分支。
+    """
+    import types
+
+    from vlt.output.openxr_overlay import EglGlContext, XlibGlxContext
+
+    assert "XR_MNDX_egl_enable" in EglGlContext.REQUIRED_EXTENSIONS
+    assert "XR_MNDX_egl_enable" not in XlibGlxContext.REQUIRED_EXTENSIONS
+    assert "XR_KHR_opengl_enable" in XlibGlxContext.REQUIRED_EXTENSIONS
+
+    class _E:
+        def __init__(self, name: str) -> None:
+            self.extension_name = name.encode()
+
+    fake = types.ModuleType("xr")
+    fake.enumerate_instance_extension_properties = lambda: [  # type: ignore[attr-defined]
+        _E("XR_EXTX_overlay"), _E("XR_KHR_opengl_enable"), _E("XR_MNDX_egl_enable")]
+    saved = sys.modules.get("xr")
+    sys.modules["xr"] = fake
+    try:
+        got_x11 = OpenXrOverlay._extensions(XlibGlxContext.REQUIRED_EXTENSIONS)  # noqa: SLF001
+        assert "XR_MNDX_egl_enable" not in got_x11, f"X11 不该要 MNDX：{got_x11}"
+        assert "XR_KHR_opengl_enable" in got_x11, got_x11
+        got_way = OpenXrOverlay._extensions(EglGlContext.REQUIRED_EXTENSIONS)    # noqa: SLF001
+        assert "XR_MNDX_egl_enable" in got_way, f"Wayland 需要 MNDX：{got_way}"
+    finally:
+        if saved is None:
+            sys.modules.pop("xr", None)
+        else:
+            sys.modules["xr"] = saved
+    print("  后端必需扩展清单 OK（X11 不要 MNDX · Wayland 要）")
+
+
+def test_glx_binding_struct_fields():
+    """★ XLIB 绑定结构体：指针字段必须 cast 成 pyopenxr/PyOpenGL 声明的类型。
+
+    不建真上下文（`__new__` 绕过 __init__ 塞假地址）—— 这条只钉「结构体构造」；
+    真上下文在 `tests/test_overlay_glx.py` 里用 Xvfb+GLX 跑。
+    pyopenxr 在 Windows 测试机上没装 → 跳过（该后端本来就是 Linux 独占）。
+    """
+    try:
+        import xr
+    except Exception:  # noqa: BLE001
+        print("  SKIP: 没有 pyopenxr（Windows 测试机不装）")
+        return
+
+    import ctypes as _ct
+
+    from vlt.output.openxr_overlay import XlibGlxContext
+
+    ctx = XlibGlxContext.__new__(XlibGlxContext)
+    ctx.display = 0xDEAD0000
+    ctx.fbconfig = 0xDEAD0001
+    ctx.visualid = 0x21
+    ctx.pbuffer = 0xDEAD0002
+    ctx.context = 0xDEAD0003
+    b = ctx.binding()
+    assert type(b) is xr.GraphicsBindingOpenGLXlibKHR, type(b)
+    fields = dict(xr.GraphicsBindingOpenGLXlibKHR._fields_)
+    assert _ct.cast(b.x_display, _ct.c_void_p).value == 0xDEAD0000
+    assert b.visualid == 0x21
+    assert _ct.cast(b.glx_fbconfig, _ct.c_void_p).value == 0xDEAD0001
+    assert b.glx_drawable == 0xDEAD0002
+    assert _ct.cast(b.glx_context, _ct.c_void_p).value == 0xDEAD0003
+    # 类型必须真是声明的那几个（给错类型运行时会 TypeError）
+    assert b.x_display.__class__ is fields["x_display"]
+    print("  XLIB 绑定结构体字段 OK（含指针 cast 类型）")
+
+
+def test_create_gl_context_selection():
+    """★ 后端选择：Wayland 优先、失败回退 X11；`VLT_OVERLAY_GL` 可强制。"""
+    import os
+
+    import vlt.output.openxr_overlay as O
+
+    class _Ok:
+        def __init__(self, name: str, log: list[str]) -> None:
+            self.name = name
+            log.append(name)
+
+    class _Fail:
+        def __init__(self, name: str, log: list[str]) -> None:
+            log.append(name)
+            raise RuntimeError(f"{name} 建不起来（模拟）")
+
+    saved_backends = dict(O._GL_BACKENDS)
+    saved_env = {k: os.environ.get(k)
+                 for k in ("WAYLAND_DISPLAY", "DISPLAY", "VLT_OVERLAY_GL")}
+    log: list[str] = []
+    try:
+        O._GL_BACKENDS.clear()
+        O._GL_BACKENDS.update(wayland=lambda: _Ok("wayland", log),
+                              x11=lambda: _Ok("x11", log))
+        os.environ["WAYLAND_DISPLAY"] = "wayland-1"
+        os.environ["DISPLAY"] = ":0"
+        os.environ.pop("VLT_OVERLAY_GL", None)
+        assert O.create_gl_context().name == "wayland", f"两个都有时应先 Wayland：{log}"
+
+        # Wayland 建不起来 → 回退 X11
+        log.clear()
+        O._GL_BACKENDS["wayland"] = lambda: _Fail("wayland", log)
+        assert O.create_gl_context().name == "x11", f"Wayland 失败应回退 X11：{log}"
+
+        # 只有 DISPLAY（Xorg 会话）→ 直接 X11，别去碰 Wayland
+        log.clear()
+        O._GL_BACKENDS["wayland"] = lambda: _Ok("wayland", log)
+        os.environ.pop("WAYLAND_DISPLAY", None)
+        assert O.create_gl_context().name == "x11", f"Xorg 会话应该直接走 X11：{log}"
+        assert log == ["x11"], f"不该先试 Wayland：{log}"
+
+        # 强制开关：只试指定那条
+        log.clear()
+        os.environ["WAYLAND_DISPLAY"] = "wayland-1"
+        os.environ["VLT_OVERLAY_GL"] = "wayland"
+        assert O.create_gl_context().name == "wayland", log
+        assert log == ["wayland"], log
+
+        # 强制的那条失败 → 直接抛（不回退，便于排查）
+        log.clear()
+        O._GL_BACKENDS["x11"] = lambda: _Fail("x11", log)
+        os.environ["VLT_OVERLAY_GL"] = "x11"
+        try:
+            O.create_gl_context()
+        except RuntimeError as exc:
+            assert "x11" in str(exc), str(exc)
+        else:
+            raise AssertionError("强制 x11 且失败时应抛 RuntimeError")
+        assert log == ["x11"], f"强制模式不该试别的后端：{log}"
+
+        # 两条都失败（auto、环境里两个都看不到）→ 两条都试、错误信息里两边的都有
+        log.clear()
+        os.environ.pop("WAYLAND_DISPLAY", None)
+        os.environ.pop("DISPLAY", None)
+        os.environ.pop("VLT_OVERLAY_GL", None)
+        O._GL_BACKENDS["wayland"] = lambda: _Fail("wayland", log)
+        try:
+            O.create_gl_context()
+        except RuntimeError as exc:
+            msg = str(exc)
+            assert "wayland" in msg and "x11" in msg, msg
+        else:
+            raise AssertionError("全失败应抛 RuntimeError")
+    finally:
+        O._GL_BACKENDS.clear()
+        O._GL_BACKENDS.update(saved_backends)
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("  GL 后端选择 OK（Wayland 优先 · 回退 X11 · 强制开关）")
 class _Rec:
     """一条假记录（够 pyopenxr 那种「构造器只装字段」的用法）。"""
 
@@ -747,6 +901,9 @@ if __name__ == "__main__":
     test_backend_config_field()
     test_composition_layers_declare_alpha_flags()
     test_backend_xr_calls_are_wellformed()
+    test_extensions_per_backend_required()
+    test_glx_binding_struct_fields()
+    test_create_gl_context_selection()
     test_anchor_actions_are_built_once_and_switchable()
     test_unsupported_tracker_path_degrades_only_that_anchor()
     print("ALL PASSED")
