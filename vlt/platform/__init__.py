@@ -29,7 +29,7 @@ __all__ = [
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
     "set_click_through", "set_tool_window", "top_level_hwnd", "screen_work_area",
-    "monitor_work_area",
+    "monitor_work_area", "create_desktop_window",
 ]
 
 _backend: Any = None
@@ -292,3 +292,25 @@ def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
     """
     return (_as_work_area(_desktop_call("monitor_work_area", None, hwnd))
             or screen_work_area())
+
+
+def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
+                          click_through: bool = True, on_drag_end: Any = None,
+                          backend: str = "auto") -> Any:
+    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell / X11 ARGB）。
+
+    返回 `None` = 本平台/本会话没有原生实现（Windows、没有 layer-shell 的合成器、
+    强制 `backend=tk` 等），调用方（`vlt/output/desktop_overlay.py`）回落 Tk 那条腿。
+
+    `backend` 是上层配置透传的选择（`auto|native|tk|wayland|x11`，见
+    `vlt/output/desktop_overlay.py:BACKENDS`）—— **怎么挑、挑不到为什么**由后端
+    模块（`linux.py`）自己打日志，门面不吭声、也不兜异常（调用方接了异常）。
+
+    返回对象必须满足 `vlt/platform/base.py:DesktopWindow` 的窗口契约。
+    """
+    mod = desktop_window_backend()
+    fn = getattr(mod, "create_desktop_window", None) if mod is not None else None
+    if fn is None:
+        return None
+    return fn(size=size, alpha=alpha, click_through=click_through,
+              on_drag_end=on_drag_end, backend=backend)

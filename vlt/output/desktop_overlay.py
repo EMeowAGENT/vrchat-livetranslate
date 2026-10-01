@@ -43,6 +43,12 @@ ANCHORS = ("top_left", "top_center", "top_right",
 
 MODES = ("conversation", "latest")
 
+# 窗口后端：auto=有原生就用、没有则回落 Tk（Tk 是正常路径之一，不留警告）；
+# native=显式要求原生（建不起来时留一行警告再回落）；tk=强制 Tk；
+# wayland / x11=强制某一条原生后端（不可用回落 Tk 并留日志）。
+# ⚠️ 启动时生效；运行中改这条需要重启桌面字幕那条腿。
+BACKENDS = ("auto", "native", "tk", "wayland", "x11")
+
 ALPHA_MIN, ALPHA_MAX, ALPHA_DEFAULT = 0.2, 1.0, 0.9
 
 # 锚点 → (水平, 垂直) 的**分子**（分母恒为 2）：0=贴起始边、1=居中、2=贴结束边。
@@ -68,6 +74,7 @@ class DesktopOverlayConfig:
 
     enabled: bool = False
     mode: str = "conversation"            # conversation=镜像聊天区 | latest=只显示最新一句（歌词式）
+    backend: str = "auto"                 # 窗口后端，见 BACKENDS（启动时生效）
     attach_to_game: bool = True           # True=贴在目标窗口上并跟随
     anchor: str = "bottom_center"         # 见 ANCHORS；free=用 pos 绝对定位
     offset: tuple[int, int] = (0, -48)    # 相对锚点的像素偏移
@@ -124,10 +131,18 @@ class DesktopOverlayConfig:
             print(f"[desktop] ⚠️ 配置里的 mode={mode!r} 不认识（可选 {MODES}）"
                   f" → 用 {base.mode}")
             mode = base.mode
+        # backend 只看本段：`overlay.backend`（auto/null）是手腕屏那套，语义完全不同，
+        # 继承过来会让桌面字幕跟着手腕屏的开关走，属于配置语义漂移。
+        backend = str(own("backend", base.backend, _as_str) or base.backend)
+        if backend not in BACKENDS:
+            print(f"[desktop] ⚠️ 配置里的 backend={backend!r} 不认识（可选 {BACKENDS}）"
+                  f" → 用 {base.backend}")
+            backend = base.backend
 
         cfg = DesktopOverlayConfig(
             enabled=bool(own("enabled", base.enabled, _as_bool)),
             mode=mode,
+            backend=backend,
             attach_to_game=bool(own("attach_to_game", base.attach_to_game, _as_bool)),
             anchor=anchor,
             offset=own("offset", base.offset, _as_pair),

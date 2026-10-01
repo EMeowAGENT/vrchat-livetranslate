@@ -226,6 +226,22 @@ def test_from_dict_defaults_inherit_and_override() -> None:
     print("  from_dict 默认 / visual 继承 / 显式覆盖 / 垃圾值回落 OK")
 
 
+def test_backend_config() -> None:
+    """`desktop_overlay.backend`：默认 auto、五个合法值都认、垃圾值回落，且**不从 overlay 段继承**。
+
+    `overlay.backend`（auto/null）是手腕屏那套，语义完全不同 —— 继承过来会让桌面字幕
+    跟着手腕屏的开关走，属于配置语义漂移。
+    """
+    from vlt.output.desktop_overlay import BACKENDS
+    assert BACKENDS == ("auto", "native", "tk", "wayland", "x11"), BACKENDS
+    assert DesktopOverlayConfig.from_dict({}).backend == "auto"
+    for want in ("native", "tk", "wayland", "x11"):
+        assert DesktopOverlayConfig.from_dict({"backend": want}).backend == want, want
+    assert DesktopOverlayConfig.from_dict({"backend": "glx"}).backend == "auto"    # 垃圾值
+    assert DesktopOverlayConfig.from_dict({}, visual={"backend": "null"}).backend == "auto"
+    print("  backend 配置（默认 / 五个合法值 / 垃圾值回落 / 不继承）OK")
+
+
 # ---------------------------------------------------------------- 6. dry-run 出图
 def test_dry_run_renders_frames() -> None:
     cfg = DesktopOverlayConfig(enabled=True, mode="conversation", size_px=(640, 240),
@@ -547,6 +563,7 @@ def test_facade_safe_defaults_without_backend() -> None:
         assert platform.top_level_hwnd(4321) == 4321
         assert platform.screen_work_area() == (0, 0, 1920, 1080)
         assert platform.monitor_work_area(1234) == (0, 0, 1920, 1080)
+        assert platform.create_desktop_window((320, 120)) is None    # 没有原生窗 → 回落 Tk
     finally:
         platform.desktop_window_backend = real
     print("  门面兜底（没有桌面窗口后端时的安全默认值）OK")
@@ -1127,6 +1144,7 @@ if __name__ == "__main__":
     test_resolve_position_falls_back_to_cfg_pos()
     test_clamp_alpha_bounds()
     test_from_dict_defaults_inherit_and_override()
+    test_backend_config()
     test_dry_run_renders_frames()
     test_mode_dispatch_renders_differently()
     test_start_without_game_window()
