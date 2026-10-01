@@ -13,7 +13,8 @@
    - `grim` 截图验：面板画出来了 / 透明处透出背景 / 50% 混色正确 / move 生效 / 改尺寸生效；
    - `zwlr_virtual_pointer_v1` 注入指针：穿透时收不到点击、解锁后能拖动；
      两种拖动源都验：relative-pointer（sway 系）+ 本地坐标法（niri 系，
-     `VLT_WAYLAND_NO_RELATIVE=1` 模拟「不发 relative_motion」的合成器）。
+     `VLT_WAYLAND_NO_RELATIVE=1` 模拟「不发 relative_motion」的合成器）；
+   - 跨屏拖动：拖到另一块屏松开后自动换面落位（双输出嵌套 sway）。
 
 缺 sway / grim / 起不来时**跳过**第 3 层（不判红，但会在输出里说清原因）。
 
@@ -85,7 +86,16 @@ def test_pure_logic() -> None:
     assert drag_target((2158, 930), (635.63, 292.26), (1696.40, -154.91)) == (3219, 483)
     assert drag_target((100, 200), (10.0, 10.0), (10.0, 10.0)) == (100, 200)    # 没动
     assert drag_target((0, 0), (0.0, 0.0), (-5.2, 7.6)) == (-5, 8)              # 负向 + 四舍五入
-    print("  纯逻辑：输出选择（命中/跨屏/最近/空表/负坐标）+ 边距 + 尺寸取整 + 拖动公式 OK")
+
+    # 有效几何：xdg-output 优先（wlroots 的 geometry x/y 恒为 0，只有 logical_position
+    # 能区分多屏）；没有 xdg-output 时回退 geometry/mode÷scale。
+    _eg = W.LayerShellWindow._effective_geom
+    assert _eg({"x": 0, "y": 0, "width": 1280, "height": 720, "scale": 1,
+                "lx": 2000, "ly": 0, "lw": 1280, "lh": 720}) == (2000, 0, 1280, 720)
+    assert _eg({"x": 60, "y": 70, "width": 2560, "height": 1440, "scale": 2,
+                "lx": None, "ly": None, "lw": None, "lh": None}) == (60, 70, 1280, 720)
+    assert _eg({"width": 0, "height": 0}) is None
+    print("  纯逻辑：输出选择（命中/跨屏/最近/空表/负坐标）+ 边距 + 尺寸取整 + 拖动公式 + 有效几何 OK")
 
 
 # ---------------------------------------------------------------- 2. 接口签名
@@ -112,7 +122,14 @@ def test_interface_signatures() -> None:
     assert mgr["methods"] == [("destroy", ""), ("get_relative_pointer", "no")], mgr
     rel = W.read_interface(W.iface_rel_pointer)
     assert rel["events"] == [("relative_motion", "uuffff")], rel
-    print("  手写接口签名：layer-shell（9 请求/2 事件）+ relative-pointer 与 XML 一字不差 OK")
+
+    xm = W.read_interface(W.iface_xdg_manager)
+    assert xm["methods"] == [("destroy", ""), ("get_xdg_output", "no")], xm
+    xo = W.read_interface(W.iface_xdg_output)
+    assert xo["events"] == [("logical_position", "ii"), ("logical_size", "ii"),
+                            ("done", ""), ("name", "s"), ("description", "s")], xo
+    print("  手写接口签名：layer-shell（9 请求/2 事件）+ relative-pointer + xdg-output "
+          "与 XML 一字不差 OK")
 
 
 # ---------------------------------------------------------------- 3. 真协议（嵌套 sway）
@@ -125,16 +142,22 @@ def _have(cmd: str) -> bool:
 class _NestedSway:
     """自拉一个私有 headless sway —— 与用户会话完全隔离。"""
 
-    def __init__(self) -> None:
+    def __init__(self, outputs: int = 1) -> None:
         self.rt = tempfile.mkdtemp(prefix="vlt-wl-test-")
         os.chmod(self.rt, 0o700)
         self.conf = Path(self.rt) / "sway.conf"
-        self.conf.write_text("output * bg #336699 solid_color\n", encoding="utf-8")
+        conf = "output * bg #336699 solid_color\n"
+        if outputs > 1:
+            # 跨屏用例：两块输出并排（放远一点，避免不同 wlroots 版本的默认尺寸把两块叠一起）
+            conf += "output HEADLESS-1 position 0 0\n"
+            conf += "output HEADLESS-2 position 2000 0\n"
+        self.conf.write_text(conf, encoding="utf-8")
         before = set(os.listdir(self.rt))
         env = dict(os.environ)
         env["XDG_RUNTIME_DIR"] = self.rt
         env["WLR_BACKENDS"] = "headless"
         env["WLR_LIBINPUT_NO_DEVICES"] = "1"
+        env["WLR_HEADLESS_OUTPUTS"] = str(max(1, int(outputs)))
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("DISPLAY", None)
         env.pop("WAYLAND_SOCKET", None)
@@ -495,8 +518,101 @@ def test_live_window() -> None:
         sway.stop()
 
 
+def test_cross_output_drag() -> None:
+    """跨屏拖动：拖动中面板夹在本屏边缘（中途换面会打断指针 grab）→ **松手立即落到
+    指针所在的那块屏**（在松开分支里补一次 move()，走安全的重建面路径）。
+
+    用双输出嵌套 sway（`WLR_HEADLESS_OUTPUTS=2`）验证：输出切换 + 落点在新屏上 + 旧屏干净。
+    """
+    missing = [c for c in ("sway", "grim") if not _have(c)]
+    if missing:
+        print(f"  SKIP：缺 {missing}（跨屏用例跳过）")
+        return
+    sway = _NestedSway(outputs=2)
+    if not sway.ok:
+        print(f"  SKIP：双输出嵌套 sway 没起来（{sway.tail(6)}）")
+        sway.stop()
+        return
+
+    saved = {k: os.environ.get(k) for k in ("XDG_RUNTIME_DIR", "WAYLAND_DISPLAY")}
+    win = None
+    try:
+        os.environ["XDG_RUNTIME_DIR"] = sway.rt
+        os.environ["WAYLAND_DISPLAY"] = sway.sock
+        env = sway.env()
+
+        drag_ends: list[tuple[int, int]] = []
+        size = (200, 96)
+        win = W.LayerShellWindow(size=size, alpha=1.0, click_through=True,
+                                 on_drag_end=lambda x, y: drag_ends.append((x, y)))
+        assert win.available, "跨屏用例：窗口建不起来"
+        outs = win._output_infos()
+        if len(outs) < 2:
+            print(f"  SKIP：嵌套 sway 只给了 {len(outs)} 块输出")
+            return
+        a, b = outs[0], outs[-1]
+        win.move(a.x + 50, a.y + 40)
+        win.set_panel(_make_panel(size))
+        win.set_draggable(True)
+        _pump(win, 0.5)
+        g_before = win._output_global
+        assert win._output is not None and win._output.x == a.x, (win._output, a)
+
+        vp = _VirtualPointer()
+        xs0 = min(o.x for o in outs)
+        ys0 = min(o.y for o in outs)
+        span_w = max(o.x + o.width for o in outs) - xs0
+        span_h = max(o.y + o.height for o in outs) - ys0
+        press = (a.x + 50 + 100, a.y + 40 + 20)              # 面板中心
+        target = (b.x + 300, b.y + 200)                      # 另一块屏上
+        vp.motion_abs(press[0] - xs0, press[1] - ys0, span_w, span_h)
+        vp.frame()
+        vp.sync()
+        _pump(win, 0.2)
+        vp.button(1)
+        vp.frame()
+        vp.sync()
+        _pump(win, 0.2)
+        # 一次相对位移直接把指针带到另一块屏（拖到被 grab 的面上的相对事件不会因出屏丢）
+        vp.motion(target[0] - press[0], target[1] - press[1])
+        vp.frame()
+        vp.sync()
+        _pump(win, 0.4)
+        vp.button(0)
+        vp.frame()
+        vp.sync()
+        _pump(win, 0.6)                                       # 松手 → 补 move → 换面 + 等 configure
+
+        assert drag_ends, "跨屏拖动：结束回调没触发"
+        assert win._output_global != g_before, "跨屏松开后没有换到另一块屏"
+        assert win._output is not None and win._output.x == b.x, (win._output, b)
+        pos = win.position
+        assert b.x - 8 <= pos[0] <= b.x + b.width + 8, (pos, b)
+
+        shot = _grim(env)
+        got = _px(shot, (pos[0] + 100, pos[1] + 20))
+        assert _near(got, (255, 0, 0), 8), f"换面后面板没画在新屏上：{got}"
+        got_old = _px(shot, (a.x + 50 + 100, a.y + 40 + 20))
+        assert _near(got_old, BACKDROP, 8), f"旧屏位置没有清掉：{got_old}"
+        print(f"  跨屏拖动：松手从屏 A 落到屏 B（落点 {pos}，"
+              f"输出切换 {g_before}→{win._output_global}）OK")
+    finally:
+        if win is not None:
+            try:
+                win.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        sway.stop()
+
+
 def main() -> int:
-    tests = [test_pure_logic, test_interface_signatures, test_live_window]
+    tests = [test_pure_logic, test_interface_signatures, test_live_window,
+             test_cross_output_drag]
     print("test_wayland_window:")
     failed = 0
     for fn in tests:

@@ -239,6 +239,9 @@ overlay:
 - **拖动**：解锁后按住面板拖动，两种位移源自动切换 —— 支持相对指针的合成器（sway/wlroots 系）
   用相对增量；niri 系不发相对位移事件，自动改用 `wl_pointer.motion` 的本地坐标差
   （niri 的 click-grab 冻结焦点坐标，位移精确）。
+- **跨屏拖动**：拖动过程中面板夹在本屏边缘（中途换面会打断指针 grab），**松手时自动落到
+  指针所在的那块屏**；拖动全程平滑跨屏跟手属后续项。多屏位置取自 xdg-output
+  （wlroots 的 `wl_output.geometry` x/y 恒为 0，不能拿来认屏）。
 - 找窗/跟随走 `vlt/platform/linux.py`（纯 `ctypes` 直调 libX11/libXext，不新增依赖），
   与 Windows 侧同名同语义；找窗走 `_NET_WM_NAME`（退回 `WM_NAME`），几何经
   `XTranslateCoordinates` 折算到屏幕坐标（多屏 / 负坐标都对）。

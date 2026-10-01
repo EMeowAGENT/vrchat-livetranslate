@@ -34,10 +34,16 @@ niri / sway / Hyprland / KWin 6.x / labwc / Cage / gamescope 等实现 layer-she
 libwayland-client 只导出**通用**入口（`wl_proxy_marshal_array_flags` 等）和核心协议的
 **接口数据**（`wl_surface_interface` 一类是导出的 data 符号）；请求帮助函数
 （`wl_surface_attach` 一类）都是头文件里的 `static inline`，编译进各个客户端，不在 .so 里。
-非核心协议（layer-shell / relative-pointer）更是没有任何现成绑定。纯 ctypes 下唯一的
-办法就是按 XML 手写 `wl_interface` / `wl_message` 结构 —— 下面的 `_build_layer_shell()`
-与 `_build_relative_pointer()` 与 wlr-protocols / wayland-protocols 的 XML 一一对应
-（改的时候对着 XML 核签名；`tests/test_wayland_window.py` 有签名断言守着）。
+非核心协议（layer-shell / relative-pointer / xdg-output）更是没有任何现成绑定。纯 ctypes
+下唯一的办法就是按 XML 手写 `wl_interface` / `wl_message` 结构 —— 下面的
+`_build_layer_shell()` / `_build_relative_pointer()` / `_build_xdg_output()` 与
+wayland-protocols / wlr-protocols 的 XML 一一对应（改的时候对着 XML 核签名；
+`tests/test_wayland_window.py` 有签名断言守着）。
+
+⚠️ **多屏位置必须读 xdg-output**：wlroots 系合成器（sway 等）的 `wl_output.geometry`
+x/y **恒为 (0,0)**（实测：双屏 3280 宽布局里两块都报 (0,0)）—— 拿它挑输出/算边距会认错屏；
+`zxdg_output_v1.logical_position/logical_size` 才是真实位置。niri/smithay 两者都对，
+但统一走 xdg-output、geometry 只作兜底。
 
 ⚠️ **数组式 marshalling（`wl_proxy_marshal_array_flags`）的槽位数必须与 XML 一字不差**。
 踩过：`wl_shm.create_pool` 签名是 `(new_id, fd, size)`，少写 1 个 new_id 槽 → libwayland
@@ -192,6 +198,10 @@ _REL_MANAGER_GET = 1
 _REL_MANAGER_DESTROY = 0
 _REL_POINTER_DESTROY = 0
 
+# --- xdg-output-unstable-v1（多屏真实位置；wlroots 的 wl_output.geometry x/y 恒为 0）
+# ⚠️ XML 里同样是 destroy 在前：opcode 0=destroy、1=get_xdg_output
+_XDG_MANAGER_GET = 1
+
 _BTN_LEFT = 0x110          # linux/input-event-codes.h
 _WL_POINTER_STATE_PRESSED = 1
 _WL_SEAT_CAPABILITY_POINTER = 1
@@ -253,6 +263,8 @@ iface_layer_shell: _WlInterface | None = None
 iface_layer_surface: _WlInterface | None = None
 iface_rel_manager: _WlInterface | None = None
 iface_rel_pointer: _WlInterface | None = None
+iface_xdg_manager: _WlInterface | None = None
+iface_xdg_output: _WlInterface | None = None
 iface_xdg_popup: _WlInterface | None = None      # 仅 types 表占位，从不实例化
 
 
@@ -365,6 +377,43 @@ def _build_relative_pointer(lib: Any) -> None:
     _KEEP.extend([rp_methods, rp_events, rm_methods, iface_rel_pointer, iface_rel_manager])
 
 
+def _build_xdg_output(lib: Any) -> None:
+    """xdg-output：多屏的**真实**逻辑位置/尺寸（wlroots 的 wl_output.geometry x/y 恒为 0）。"""
+    global iface_xdg_manager, iface_xdg_output
+    output_iface = _core_iface(lib, "wl_output_interface")
+
+    iface_xdg_output = _WlInterface()
+    iface_xdg_output.name = b"zxdg_output_v1"
+    iface_xdg_output.version = 3
+    xo_methods = (_WlMessage * 1)(_mk_msg("destroy", "", []))
+    xo_events = (_WlMessage * 5)(
+        _mk_msg("logical_position", "ii", [0, 0]),
+        _mk_msg("logical_size", "ii", [0, 0]),
+        _mk_msg("done", "", []),
+        _mk_msg("name", "s", [0]),
+        _mk_msg("description", "s", [0]),
+    )
+    iface_xdg_output.method_count = 1
+    iface_xdg_output.methods = xo_methods
+    iface_xdg_output.event_count = 5
+    iface_xdg_output.events = xo_events
+
+    iface_xdg_manager = _WlInterface()
+    iface_xdg_manager.name = b"zxdg_output_manager_v1"
+    iface_xdg_manager.version = 3
+    xm_methods = (_WlMessage * 2)(
+        _mk_msg("destroy", "", []),                                  # opcode 0
+        _mk_msg("get_xdg_output", "no",                              # opcode 1
+                [ctypes.addressof(iface_xdg_output), output_iface]),
+    )
+    iface_xdg_manager.method_count = 2
+    iface_xdg_manager.methods = xm_methods
+    iface_xdg_manager.event_count = 0
+    iface_xdg_manager.events = None
+
+    _KEEP.extend([xo_methods, xo_events, xm_methods, iface_xdg_output, iface_xdg_manager])
+
+
 def read_interface(iface: _WlInterface) -> dict:
     """测试用：把 `wl_interface` 结构读回成可断言的字典。"""
     def msgs(ptr: Any, count: int) -> list[tuple[str, str]]:
@@ -411,6 +460,7 @@ def _load_lib() -> Any:
     lib.wl_proxy_destroy.restype = None
     _build_layer_shell(lib)
     _build_relative_pointer(lib)
+    _build_xdg_output(lib)
     return lib
 
 
@@ -520,6 +570,18 @@ class _RelPointerListener(ctypes.Structure):
     ]
 
 
+class _XdgOutputListener(ctypes.Structure):
+    _fields_ = [
+        ("logical_position", _cb(ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_int32, ctypes.c_int32)),
+        ("logical_size", _cb(ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_int32, ctypes.c_int32)),
+        ("done", _cb(ctypes.c_void_p, ctypes.c_void_p)),
+        ("name", _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)),
+        ("description", _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)),
+    ]
+
+
 class _LayerSurfaceListener(ctypes.Structure):
     _fields_ = [
         ("configure", _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
@@ -563,6 +625,7 @@ class LayerShellWindow:
         self._shm: Any = None
         self._layer_shell: Any = None
         self._rel_manager: Any = None
+        self._xdg_manager: Any = None
         self._seat: Any = None
         self._pointer: Any = None
         self._rel_pointer: Any = None
@@ -636,6 +699,13 @@ class LayerShellWindow:
         if "zwp_relative_pointer_manager_v1" in self._globals:
             self._rel_manager = self._bind_global("zwp_relative_pointer_manager_v1", None,
                                                   cap=1, iface=iface_rel_manager)
+        if "zxdg_output_manager_v1" in self._globals:
+            self._xdg_manager = self._bind_global("zxdg_output_manager_v1", None,
+                                                  cap=3, iface=iface_xdg_manager)
+            # registry 顺序不保证 manager 先到：给已绑上的输出补挂 xdg_output
+            for gname, st in self._outputs.items():
+                if "xdg_addr" not in st:
+                    self._make_xdg_output(int(gname), st["addr"], st)
         if "wl_seat" in self._globals:
             self._seat = self._bind_global("wl_seat", "wl_seat_interface", cap=1)
             self._attach_listener(self._seat, self._seat_listener())
@@ -672,6 +742,12 @@ class LayerShellWindow:
         def on_global_remove(_data: Any, _reg: Any, name: int) -> None:
             st = self._outputs.pop(int(name), None)
             if st is not None:
+                xa = st.get("xdg_addr")
+                if xa:
+                    try:
+                        self._lib.wl_proxy_destroy(ctypes.c_void_p(int(xa)))
+                    except Exception:  # noqa: BLE001
+                        pass
                 addr = self._output_proxies.pop(st["addr"], None)
                 if addr is not None:
                     try:
@@ -717,7 +793,9 @@ class LayerShellWindow:
                           interface=_core_iface(self._lib, "wl_output_interface"),
                           version=ver)
         st = {"x": 0, "y": 0, "width": 0, "height": 0, "scale": 1, "done": False,
-              "addr": _addr(proxy)}
+              "addr": _addr(proxy),
+              # xdg-output 的真实逻辑位置/尺寸（优先；wlroots 的 geometry x/y 恒为 0）
+              "lx": None, "ly": None, "lw": None, "lh": None, "name": None}
         self._outputs[int(name)] = st
         self._output_proxies[st["addr"]] = int(name)
 
@@ -757,25 +835,87 @@ class LayerShellWindow:
         self._listeners.append(listener)
         self._attach_listener(proxy, listener)
 
+        if self._xdg_manager is not None:
+            self._make_xdg_output(int(name), proxy, st)
+
+    def _make_xdg_output(self, gname: int, wl_output: Any, st: dict) -> None:
+        """给一块输出挂 xdg-output：**多屏真实位置/尺寸**。
+
+        wlroots 系（sway/Hyprland）的 `wl_output.geometry` x/y 恒为 (0,0)（实测），
+        `zxdg_output_v1.logical_position/logical_size` 才是能区分多屏的坐标。
+        """
+        if self._xdg_manager is None or iface_xdg_output is None:
+            return
+        ver = min(3, int(self._lib.wl_proxy_get_version(_ptr(self._xdg_manager))))
+        xo = self._req(self._xdg_manager, _XDG_MANAGER_GET,
+                       [("n", None), ("o", wl_output)],
+                       interface=ctypes.addressof(iface_xdg_output), version=ver)
+        if not xo:
+            return
+        st["xdg_addr"] = _addr(xo)
+
+        def on_pos(_d: Any, _o: Any, x: int, y: int) -> None:
+            st["lx"], st["ly"] = int(x), int(y)
+
+        def on_size(_d: Any, _o: Any, w: int, h: int) -> None:
+            st["lw"], st["lh"] = int(w), int(h)
+
+        def on_name(_d: Any, _o: Any, s: bytes) -> None:
+            if s:
+                st["name"] = s.decode() if isinstance(s, (bytes, bytearray)) else str(s)
+
+        listener = _XdgOutputListener(
+            _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32)(on_pos),
+            _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32)(on_size),
+            _cb(ctypes.c_void_p, ctypes.c_void_p)(lambda *a: None),
+            _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(on_name),
+            _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(lambda *a: None))
+        self._listeners.append(listener)
+        self._attach_listener(xo, listener)
+
+    @staticmethod
+    def _effective_geom(st: dict) -> tuple[int, int, int, int] | None:
+        """输出的**有效**全局逻辑几何：xdg-output 优先，geometry/mode 兜底。
+
+        ⚠️ wlroots 系（sway/Hyprland）的 `wl_output.geometry` x/y **恒为 (0,0)** ——
+        只有 xdg-output 的 `logical_position/logical_size` 能区分多屏（实测：双屏
+        3280 宽布局里两块都报 (0,0)，拿它挑输出会认错屏）。
+        """
+        scale = max(1, int(st.get("scale", 1)))
+        x = st.get("lx")
+        y = st.get("ly")
+        w = st.get("lw")
+        h = st.get("lh")
+        if x is None:
+            x = int(st.get("x", 0))
+        if y is None:
+            y = int(st.get("y", 0))
+        if not w:
+            w = int(st.get("width", 0)) // scale
+        if not h:
+            h = int(st.get("height", 0)) // scale
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, w, h)
+
     def _output_infos(self) -> list[OutputInfo]:
         out: list[OutputInfo] = []
         for gname, st in self._outputs.items():
-            scale = max(1, int(st.get("scale", 1)))
-            w = int(st.get("width", 0)) // scale
-            h = int(st.get("height", 0)) // scale
-            if w <= 0 or h <= 0:
+            geom = self._effective_geom(st)
+            if geom is None:
                 continue
-            out.append(OutputInfo(x=int(st["x"]), y=int(st["y"]), width=w, height=h,
-                                  scale=scale, name=str(gname)))
+            x, y, w, h = geom
+            out.append(OutputInfo(x=x, y=y, width=w, height=h,
+                                  scale=max(1, int(st.get("scale", 1))),
+                                  name=str(st.get("name") or gname)))
         out.sort(key=lambda o: (o.y, o.x))
         return out
 
     def _global_for_output(self, output: OutputInfo) -> int:
         for gname, st in self._outputs.items():
-            scale = max(1, int(st.get("scale", 1)))
-            if (int(st["x"]) == output.x and int(st["y"]) == output.y
-                    and int(st.get("width", 0)) // scale == output.width
-                    and int(st.get("height", 0)) // scale == output.height):
+            if self._effective_geom(st) == (output.x, output.y,
+                                            output.width, output.height):
                 return int(gname)
         return 0
 
@@ -1128,6 +1268,10 @@ class LayerShellWindow:
                     self._drag_active = False
                     self._drag_mode = ""
                     self._drag_anchor_local = None
+                    # 跨屏落位：拖动中面板被夹在本输出边缘（中途换面会打断指针 grab）——
+                    # 松开后补一次 move()：此时不在拖动中，会走安全的重建 layer 面路径，
+                    # 把面换到指针松手时所在的那块屏上（落点即指针位置）。
+                    self.move(*self._pos)
                     if self._on_drag_end is not None:
                         try:
                             self._on_drag_end(self._pos[0], self._pos[1])
@@ -1286,15 +1430,23 @@ class LayerShellWindow:
             self._release_buffers()
             self._destroy_surface()
             for proxy in (self._pointer, self._rel_pointer, self._rel_manager,
-                          self._seat, self._layer_shell, self._shm, self._compositor,
-                          self._registry):
+                          self._xdg_manager, self._seat, self._layer_shell, self._shm,
+                          self._compositor, self._registry):
                 if proxy:
                     try:
                         self._lib.wl_proxy_destroy(_ptr(proxy))
                     except Exception:  # noqa: BLE001
                         pass
             self._pointer = self._rel_pointer = self._rel_manager = self._seat = None
+            self._xdg_manager = None
             self._layer_shell = self._shm = self._compositor = self._registry = None
+            for st in self._outputs.values():
+                xa = st.get("xdg_addr")
+                if xa:
+                    try:
+                        self._lib.wl_proxy_destroy(ctypes.c_void_p(int(xa)))
+                    except Exception:  # noqa: BLE001
+                        pass
             for addr in self._output_proxies:
                 try:
                     self._lib.wl_proxy_destroy(ctypes.c_void_p(int(addr)))
