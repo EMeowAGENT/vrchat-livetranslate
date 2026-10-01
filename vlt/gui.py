@@ -3759,8 +3759,9 @@ class TranslationGUI:
         elapsed = time.monotonic() - t0
         if stuck:
             print(f"[gui] ⚠️ 停止收尾超时（{STOP_WAIT_S:.0f}s）：第 {stuck} 个引擎还没退出"
-                  "（界面已恢复，可再点「开始翻译」）", flush=True)
-        self._q.put(("stop_done", elapsed, len(engines)))
+                  "（仍在关麦克风/虚拟声卡；界面照常恢复，状态栏会如实提示仍在收尾）",
+                  flush=True)
+        self._q.put(("stop_done", elapsed, len(engines), bool(stuck)))
         self._stop_done_evt.set()
 
     def _on_close(self) -> None:
@@ -4203,14 +4204,24 @@ class TranslationGUI:
                     self._on_voice_preview_done(item[1], item[2], item[3])
                 elif kind == "stop_done":
                     # 引擎收尾完成（后台线程入队）→ 恢复「开始翻译」。
-                    # item = ("stop_done", 收尾用时, 引擎数)
+                    # item = ("stop_done", 收尾用时, 引擎数, 是否有引擎超时未退出)
+                    _, elapsed, n_engines, incomplete = item
+                    # 超时也照样放开：收尾线程已经不再等了，一直禁着等于把界面永久锁死
+                    # （只能重启应用）。代价是极端情况下可能与还在关设备的旧引擎抢麦克风 ——
+                    # 那种失败会在启动路径上如实报错并留痕，比界面锁死可恢复得多。
                     self._start_btn.configure(state=tk.NORMAL)
                     self._stop_btn.configure(state=tk.DISABLED)
-                    print(f"[gui] 停止收尾完成：{item[2]} 个引擎，用时 {item[1]:.2f}s",
+                    print(f"[gui] 停止收尾完成：{n_engines} 个引擎，用时 {elapsed:.2f}s"
+                          + ("（有引擎超时未退出，仍在关设备）" if incomplete else ""),
                           flush=True)
                     # 引擎失败时状态栏已有 error 消息，别用"已停止"盖掉
                     if self._last_status_level != "error":
-                        self._set_status("info", t("已停止"))
+                        if incomplete:
+                            # 降级路径也要在状态栏如实留痕（本仓库禁静默降级）：
+                            # 只写「已停止」会骗人 —— 上一条腿其实还没收完。
+                            self._set_status("warn", t("已停止（上一次会话仍在收尾）"))
+                        else:
+                            self._set_status("info", t("已停止"))
         except queue.Empty:
             pass
         if (self._pending_starts == 0 and self._engines
