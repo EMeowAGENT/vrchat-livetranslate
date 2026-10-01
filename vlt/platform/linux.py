@@ -852,9 +852,11 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 #      「鼠标穿透」会设了个寂寞：穿透区的点击直接消失，上层下层谁都不收（实测）。
 #   2. **点击穿透 = `XShapeCombineRectangles(ShapeInput, 空)`**，实测点击会正确落到
 #      下层窗口；恢复 = `XShapeCombineMask(None)`（回到默认输入区）。
-#   3. Wayland 会话（Tk 走 XWayland）下这组调用**仍可用**（能找到窗口、能读几何），
-#      但**窗口位置 / 置顶 / 透明度由合成器决定**：niri 实测忽略位置请求（按平铺
-#      管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
+#   3. **Tk 回落路径**（Wayland 会话里 Tk 走 XWayland）下这组调用仍可用（能找到窗口、
+#      能读几何），但窗口位置 / 置顶 / 透明度由合成器决定：niri 实测忽略位置请求（按
+#      平铺管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
+#      ⚠️ 字幕窗现在**优先走原生 layer-shell**（`vlt/platform/wayland.py`），本组 X11
+#      调用只用于「找 VRChat 窗口、读几何」；只有原生窗建不起来时才回落 Tk。
 #      首次用到本组能力时打印一行说明；边界见 `docs/GUIDE.linux.md` 的「桌面字幕」。
 #
 # 语义与 Windows 侧对齐（facade 的文档就是契约）：

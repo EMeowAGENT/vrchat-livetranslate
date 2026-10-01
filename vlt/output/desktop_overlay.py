@@ -7,15 +7,18 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
 
 * **渲染复用** `vlt/output/overlay.py` 的 `render_conversation` / `render_panel`：
   桌面字幕与手腕屏长一个样，这里不另写一套画字逻辑；
-* **出图口是 Tk**：`overrideredirect` 无边框 + `-topmost` 置顶 + `-alpha` 整窗透明度
-  + `-transparentcolor` 色键（把 RGBA 面板贴到 :data:`TRANSPARENT_KEY` 同色的 RGB 底上，
-  圆角外那一圈就真的透过去）；
-* **平台能力一律走 `vlt.platform` 门面**（找窗口 / 客户区 / 鼠标穿透 / 工作区）：
+* **出图口有两条腿**（`desktop_overlay.backend` 选择，见 :data:`BACKENDS`）：
+  * **原生窗**（Linux：Wayland layer-shell + wl_shm，逐像素透明 / 协议级鼠标穿透 /
+    overlay 层置顶；X11 原生 ARGB 窗待接入）——经门面 `create_desktop_window` 拿窗口对象，
+    此后只按窗口契约调用（`vlt/platform/base.py:DesktopWindow`）；
+  * **Tk 回落**（Windows 色键 / 没有 layer-shell 的合成器 / X11 会话）：
+    `overrideredirect` 无边框 + `-topmost` + `-alpha`；`-transparentcolor` 色键把
+    RGBA 面板外的圆角抠掉（Windows 专属属性）；
+* **平台能力一律走 `vlt.platform` 门面**（找窗口 / 客户区 / 鼠标穿透 / 工作区 / 原生窗）：
   本文件里不许出现 Win32 调用，也不许直接 import 平台独占模块 —— 那是红灯门禁
   （`tests/test_desktop_overlay.py::test_shared_module_stays_platform_clean`；
   产物级的「不混进另一个平台实现」另由 `scripts/check_platform_purity.py` 把关）。
-  门面上没有对等实现的平台（Linux）会拿到安全默认值，桌面字幕于是退化成
-  「固定在屏幕坐标上的一块置顶面板」，仍然可用，只是不跟随游戏窗口 —— 降级会打日志。
+  门面上没有对等实现的平台会拿到安全默认值 —— 降级由调用方/后端打日志说明。
 
 离线可验证：`python -m vlt.output.desktop_overlay --demo --out <dir>` 只渲染 PNG，不建窗口。
 """
@@ -367,7 +370,7 @@ class DesktopOverlay:
 
         窗口后端的选择：`backend=native/wayland/x11` 或 `auto` 且门面能给出原生窗
         （Wayland layer-shell，逐像素透明）→ 用它；否则回落 Tk（Windows 色键 /
-        X11 形状蒙版兜底 / GNOME 等没有 layer-shell 的合成器）。
+        GNOME 等没有 layer-shell 的合成器；X11 原生 ARGB 窗待接入）。
         """
         if self._started:
             return True
@@ -424,7 +427,7 @@ class DesktopOverlay:
         return True
 
     def _create_native_window(self) -> Any:
-        """问门面要原生叠加窗（Linux：Wayland layer-shell / X11 ARGB）；拿不到返回 None。
+        """问门面要原生叠加窗（Linux：Wayland layer-shell；X11 ARGB 待接入）；拿不到返回 None。
 
         建不起来的原因由后端自己打日志（`vlt/platform/linux.py`）；这里只兜异常。
         """

@@ -167,14 +167,16 @@ def detect_ui_language() -> str:
 # ---------------------------------------------------------------- 桌面叠加窗（issue #11）
 #
 # 桌面模式的字幕窗（`vlt/output/desktop_overlay.py`，**共享模块**）需要几件平台事实：
-# 找游戏窗口、拿它的客户区、给自己的窗口打上鼠标穿透/不抢焦点、知道屏幕工作区多大。
-# 这些能力目前只有 Windows 侧实现（Tk + Win32 扩展样式）。
+# 找游戏窗口、拿它的客户区、给自己的窗口打上鼠标穿透/不抢焦点、知道屏幕工作区多大，
+# 以及在 Linux 上要一个**原生窗**（Wayland layer-shell，逐像素透明/协议级穿透）。
+# Windows 侧在 `win.py` 用 Win32 扩展样式实现；Linux 侧在 `linux.py`
+# （X11 直调 libX11/libXext；Wayland 直调 libwayland-client，见 `wayland.py`）。
 #
 # ⚠️ 门面在这里**兜底**而不是让共享模块去 import 平台独占模块：
-#   * `linux.py` 没有这些属性 → 下面每个函数返回安全默认值（None / False / 原值 /
-#     (0,0,1920,1080)），Linux 侧**一个文件都不用改**就能导入共享模块；
-#   * 于是桌面字幕在 Linux 上退化成「固定在屏幕坐标上的一块置顶面板」（不跟随游戏窗口），
-#     降级由调用方（desktop_overlay）打日志说明，门面自己不吭声。
+#   * 缺失的实现 → 每个函数返回安全默认值（None / False / 原值 / (0,0,1920,1080)；
+#     `create_desktop_window` 返回 None 让调用方回落 Tk）；
+#   * 降级（回落 Tk、没找到窗口等）由调用方/后端打日志说明，门面自己不吭声；
+#     测试进程里建原生窗会被 `linux.py` 的防呆拒绝（不许碰用户会话的合成器）。
 #
 # 判定「有没有桌面窗口能力」用 `find_window_by_title` 这一个属性作探针：它是这套能力里
 # 最核心的一个，缺了它其余几个也没有意义。
@@ -297,7 +299,7 @@ def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
 def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
                           click_through: bool = True, on_drag_end: Any = None,
                           backend: str = "auto") -> Any:
-    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell / X11 ARGB）。
+    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell；X11 ARGB 待接入）。
 
     返回 `None` = 本平台/本会话没有原生实现（Windows、没有 layer-shell 的合成器、
     强制 `backend=tk` 等），调用方（`vlt/output/desktop_overlay.py`）回落 Tk 那条腿。

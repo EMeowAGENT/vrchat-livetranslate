@@ -226,7 +226,8 @@ overlay:
 # 后端（`backend`）：Wayland 会话（niri / sway / Hyprland / KDE 等实现了 layer-shell 的
 # 合成器）自动用**原生 layer-shell 窗**——逐像素透明（真圆角、底板半透明）、overlay 层
 # 置顶、协议级鼠标穿透；GNOME(Mutter) 等没有 layer-shell 的合成器、以及 X11 会话自动
-# 回落到 Tk 窗（X11 上用形状蒙版抠掉面板外的底色）。
+# 回落到 Tk 窗（Windows 靠色键透明；X11 会话与没有 layer-shell 的合成器也走 Tk ——
+# 逐像素透明的原生 X11 窗待接入）。
 desktop_overlay:
   enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
   mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）

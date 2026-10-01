@@ -152,8 +152,8 @@ class DesktopWindow(Protocol):
     #: 建起来了吗（建窗失败时必须为 False，调用方据此丢弃对象、回落 Tk）
     available: bool
 
-    def set_panel(self, image: Any, alpha: float = 1.0) -> None:
-        """贴一帧 RGBA 面板（`alpha` 是整层乘子，0~1）。"""
+    def set_panel(self, image: Any, alpha: float | None = None) -> None:
+        """贴一帧 RGBA 面板。`alpha` 是整层乘子（0~1）；**None = 保持当前值**。"""
 
     def move(self, x: int, y: int) -> None:
         """移到屏幕坐标（X11 语义；Wayland 后端自己换算到输出局部坐标系）。"""

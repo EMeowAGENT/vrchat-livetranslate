@@ -690,6 +690,21 @@ def test_facade_safe_defaults_without_backend() -> None:
     print("  门面兜底（没有桌面窗口后端时的安全默认值）OK")
 
 
+def test_create_desktop_window_refuses_in_test_process() -> None:
+    """测试进程里**不许**真的去连用户的合成器建原生窗（与虚拟声卡同一道防呆）。
+
+    实测踩过：旧的 GUI 用例在 Wayland 机器上会直接连用户正在用的 niri 弹出一块
+    layer 面。真协议验收（tests/test_wayland_window.py）直连**私有嵌套合成器**、
+    不走这个入口，所以这里可以一刀切拒绝。
+    """
+    if not platform.IS_LINUX:
+        print("  跳过（非 Linux：Windows 走 Tk，没有原生桌面窗）")
+        return
+    from vlt.platform import linux as lx
+    assert lx.create_desktop_window((64, 64)) is None, "测试进程居然建出了原生窗！"
+    print("  测试进程拒绝建原生窗（回落 Tk）OK")
+
+
 def test_monitor_work_area_falls_back_to_primary() -> None:
     """多屏那条能力的兜底：没有句柄 / 句柄失效 / 后端没这项能力 → 回落主屏工作区。
 
@@ -736,11 +751,13 @@ def test_shared_module_stays_platform_clean() -> None:
     src = (ROOT / "vlt" / "output" / "desktop_overlay.py").read_text(encoding="utf-8")
     for bad in ("import ctypes", "ctypes.", "windll", "user32",
                 "platform.win", "platform import win",
-                "EnumWindows", "GetWindowLong", "SetWindowLong"):
+                "EnumWindows", "GetWindowLong", "SetWindowLong",
+                "libwayland", "libX11", "zwlr_"):     # 原生后端只能走门面
         assert bad not in src, f"desktop_overlay.py 里出现了平台独占字样：{bad!r}"
     for name in ("desktop_window_backend", "find_game_window", "window_client_rect",
                  "is_window", "set_click_through", "set_tool_window",
-                 "top_level_hwnd", "screen_work_area", "monitor_work_area"):
+                 "top_level_hwnd", "screen_work_area", "monitor_work_area",
+                 "create_desktop_window"):
         assert callable(getattr(platform, name, None)), f"platform 门面缺 {name}"
     if platform.IS_WINDOWS:
         from vlt.platform import win as w
@@ -1276,6 +1293,7 @@ if __name__ == "__main__":
     test_attach_and_follow_fake_game_window()
     test_work_area_follows_attached_monitor()
     test_facade_safe_defaults_without_backend()
+    test_create_desktop_window_refuses_in_test_process()
     test_monitor_work_area_falls_back_to_primary()
     test_shared_module_stays_platform_clean()
     test_win32_helpers_on_real_windows()

@@ -595,6 +595,7 @@ class LayerShellWindow:
         self._buttons_seen = 0        # 收到的指针按键总数（穿透验证 / 排障用）
 
         self._listeners: list[Any] = []                  # listener 结构 + 回调的引用池
+        self._buffer_listeners: list[Any] = []           # shm 缓冲的 release 监听（重建时整批换掉）
 
         try:
             self._setup(_lib)
@@ -933,7 +934,7 @@ class LayerShellWindow:
             listener = _BufferListener(
                 _cb(ctypes.c_void_p, ctypes.c_void_p)(
                     (lambda _i: (lambda _d, _b: self._on_buffer_release(_i)))(i)))
-            self._listeners.append(listener)
+            self._buffer_listeners.append(listener)
             self._attach_listener(buf, listener)
         self._shm_fd = fd
         self._shm_map = mm
@@ -952,6 +953,7 @@ class LayerShellWindow:
             except Exception:  # noqa: BLE001
                 pass
         self._buffers = []
+        self._buffer_listeners.clear()          # 旧缓冲的监听引用整批释放，别随重建越积越多
         if self._pool is not None:
             try:
                 self._req(self._pool, _WL_SHM_POOL_DESTROY, [])
@@ -1031,26 +1033,28 @@ class LayerShellWindow:
             return False
         prepared = False
         try:
-            if self._lib.wl_display_prepare_read(_ptr(self._display)) == 0:
-                prepared = True
-            else:
+            if self._lib.wl_display_prepare_read(_ptr(self._display)) != 0:
                 # 队列里还有没派发的事件：先派发；下一跳再 prepare
                 if self._lib.wl_display_dispatch_pending(_ptr(self._display)) == -1:
                     return self._mark_dead("dispatch_pending 失败")
                 return True
+            prepared = True
             self._lib.wl_display_flush(_ptr(self._display))
             fd = self._lib.wl_display_get_fd(_ptr(self._display))
             r, _, _ = select.select([fd], [], [], max(0, timeout_ms) / 1000.0)
             if r:
                 if self._lib.wl_display_read_events(_ptr(self._display)) == -1:
                     return self._mark_dead("read_events 失败")
-                prepared = False
-            if self._lib.wl_display_dispatch_pending(_ptr(self._display)) == -1:
-                return self._mark_dead("dispatch_pending 失败")
-            return True
+            else:
+                # 没数据：按规范先 cancel 收尾，再派发已排队的（dispatch 不再夹在 prepare 中间）
+                self._lib.wl_display_cancel_read(_ptr(self._display))
+            prepared = False
         finally:
             if prepared:
                 self._lib.wl_display_cancel_read(_ptr(self._display))
+        if self._lib.wl_display_dispatch_pending(_ptr(self._display)) == -1:
+            return self._mark_dead("dispatch_pending 失败")
+        return True
 
     def _pump_until(self, pred: Callable[[], bool], timeout_s: float) -> bool:
         end = time.monotonic() + timeout_s
@@ -1176,6 +1180,7 @@ class LayerShellWindow:
     # ---------- 对外（窗口契约） ----------
 
     def set_panel(self, image: Image.Image, alpha: float | None = None) -> None:
+        """贴一帧面板；`alpha=None` 保持当前整层乘子（窗口契约，见 base.DesktopWindow）。"""
         self._panel = image
         if alpha is not None:
             self._alpha = clamp01(alpha)
