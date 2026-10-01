@@ -227,7 +227,8 @@ overlay:
 # 合成器）自动用**原生 layer-shell 窗**；X11 会话（含带 XWayland 的 GNOME/Weston）用
 # **原生 ARGB 覆盖窗**——两者都是逐像素透明（真圆角、底板半透明）、置顶、协议级鼠标穿透。
 # X11 的透明需要合成器（picom 等）：没检测到时启动日志会提醒，透明区显示为黑。
-# 两条原生腿都建不起来时回落到 Tk 窗（Windows 靠色键透明；Linux 上无逐像素透明）。
+# 两条原生腿都建不起来时回落到 Tk 窗（Windows 靠色键透明；Linux 会用 1 位形状蒙版
+# 抠掉面板外的键色底，但做不到逐像素半透明）。
 desktop_overlay:
   enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
   mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
