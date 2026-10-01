@@ -145,6 +145,10 @@ class AppConfig:
     output: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)      # 界面上次的选择（方向/输出勾选），启动时恢复
     text_input: dict[str, Any] = field(default_factory=dict)   # 打字输入（替代说话）
+    # 房间中继原始配置段。**故意不在这里做字段级校验**：校验统一走
+    # `vlt/room/model.py::RoomConfig.from_dict`（脏值回落 + 留痕都做好了），
+    # 这里只负责把原始 dict 带出来，避免出现两份口径。
+    room: dict[str, Any] = field(default_factory=dict)
     # 桌面字幕（PC 桌面模式：贴 VRChat 窗口的叠加窗）。与 `overlay`（头显手腕屏）是两条腿，
     # 视觉参数从 `overlay` 段继承，见 vlt/output/desktop_overlay.py 的 from_dict。
     desktop_overlay: dict[str, Any] = field(default_factory=dict)
@@ -244,6 +248,11 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
     raw_audio = raw_output.get("audio") or {}
     raw_capture = raw.get("capture") or {}
     raw_textin = raw.get("text_input") or {}
+    # room 段原样带出（脏值交给 RoomConfig.from_dict 回落 + 留痕）；
+    # 用户把 `room:` 写成一行字符串之类时这里只保证类型是 dict，不做字段级校验。
+    raw_room = raw.get("room") or {}
+    if not isinstance(raw_room, dict):
+        raw_room = {}
     output = {
         "audio": {
             "enabled": bool(raw_audio.get("enabled", False)),
@@ -274,6 +283,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         overlay=raw.get("overlay") or {},
         output=output,
         ui=raw.get("ui") or {},
+        room=raw_room,
         desktop_overlay=raw.get("desktop_overlay") or {},
         text_input={
             "enabled": bool(raw_textin.get("enabled", True)),

@@ -24,7 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from ..paths import APP_DIR as ROOT
-from .overlay import OverlayConfig, render_conversation, render_panel
+from .overlay import OverlayConfig, _unpack_entry, render_conversation, render_panel
 
 def build_matrix(pos: tuple[float, float, float], rot_deg: tuple[float, float, float]):
     """构造 OpenVR 的 3x4 位姿矩阵（行主序）。需要 openvr 才能返回其 ctypes 类型。"""
@@ -203,12 +203,16 @@ class WristOverlay:
         self._upload(img)
 
     def update_entries(self, entries, force: bool = False) -> None:
-        """刷新成**对话视图**（GUI 用这个）：entries = [(who, source, translation), ...]。
+        """刷新成**对话视图**（GUI 用这个）：entries = [(who, source, translation), ...]
+        或 4 元组 [(who, source, translation, label), ...]（label = 说话人昵称）。
 
         与 `update()` 的区别：`update()` 是"当前这一句"（CLI 单腿场景够用），
         `update_entries()` 是"最近几句对话"——手腕上只有一块屏，内容应该像 GUI 的聊天区。
         """
-        key = tuple((w, (s or "").strip(), (t or "").strip()) for w, s, t in (entries or []))
+        # ⚠️ 必须走 `_unpack_entry`：房间链路会传 4 元组，直接解包 3 个会 ValueError，
+        # 把整条手腕屏刷新打死（合并 main 时这行曾随 overlay.py 拆分而丢失过一次）。
+        key = tuple((w, (s or "").strip(), (t or "").strip(), (lab or "").strip())
+                    for w, s, t, lab in (_unpack_entry(e) for e in (entries or [])))
         if key == self._last_entries and not force:
             return
         self._last_entries = key
