@@ -12,7 +12,8 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
   圆角外那一圈就真的透过去）；
 * **平台能力一律走 `vlt.platform` 门面**（找窗口 / 客户区 / 鼠标穿透 / 工作区）：
   本文件里不许出现 Win32 调用，也不许直接 import 平台独占模块 —— 那是红灯门禁
-  （`tests/test_platform_purity.py`、`scripts/check_platform_purity.py`）。
+  （`tests/test_desktop_overlay.py::test_shared_module_stays_platform_clean`；
+  产物级的「不混进另一个平台实现」另由 `scripts/check_platform_purity.py` 把关）。
   门面上没有对等实现的平台（Linux）会拿到安全默认值，桌面字幕于是退化成
   「固定在屏幕坐标上的一块置顶面板」，仍然可用，只是不跟随游戏窗口 —— 降级会打日志。
 
@@ -604,9 +605,17 @@ class DesktopOverlay:
                 print(f"[desktop] ⚠️ 泵 Tk 事件失败：{type(exc).__name__}: {exc}")
 
     def _work_area(self) -> tuple[int, int, int, int]:
-        from ..platform import screen_work_area
+        """夹取用的屏幕可用区域。
+
+        **已贴到目标窗口**就用「那块显示器」的工作区：主屏工作区只有主屏那一份，
+        拿它夹副屏上的字幕会把字幕拽回主屏（左侧副屏坐标是负的，拽得尤其明显）。
+        没有目标窗口（自由模式 / 找不到窗口）才沿用主屏工作区。
+        """
+        from ..platform import monitor_work_area, screen_work_area
         try:
-            area = tuple(int(v) for v in screen_work_area())
+            raw = (monitor_work_area(self._game_hwnd) if self._game_hwnd
+                   else screen_work_area())
+            area = tuple(int(v) for v in raw)
             left, top, right, bottom = area            # type: ignore[misc]
             if right > left and bottom > top:
                 return (left, top, right, bottom)      # type: ignore[return-value]

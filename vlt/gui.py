@@ -473,6 +473,10 @@ class TranslationGUI:
         self._desktop_out: Any | None = None
         self._desktop_dragging = False
         self._desktop_save_job: str | None = None
+        # 用户是否**真的动过**透明度滑块：`_save_desktop_cfg()` 也被「锁定位置」和拖动
+        # 落盘调到，只有这个标志为真才写 alpha —— 否则用户只是拖了个位置，
+        # 滑块上那个（可能是继承来的 / 默认的）值就被写进配置，透明度悄悄变了。
+        self._desktop_alpha_touched = False
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -1070,11 +1074,19 @@ class TranslationGUI:
 
         # 桌面字幕（PC 桌面模式）：只需要「透明度 + 拖动解锁」两件，与上面那堆 VR 参数
         # 无关；放在同一块「微调」里，用户不用记两处入口。
-        _dov = self._cfg.desktop_overlay if isinstance(self._cfg.desktop_overlay, dict) else {}
+        #
+        # ⚠️ 滑块初值必须与**窗口真实透明度同源**：窗口那侧是
+        #    `DesktopOverlayConfig.from_dict(desktop_overlay 段, overlay 段)` 解析出来的
+        #    （desktop_overlay.alpha → overlay.alpha → 默认值）。只读本段的 alpha 会让
+        #    「overlay.alpha=0.5 且没写 desktop_overlay.alpha」的用户看到滑块停在 0.90、
+        #    而窗口其实是 0.50 —— 更糟的是碰一下滑块就把 0.90 写回配置（透明度突然变了）。
+        from .output.desktop_overlay import DesktopOverlayConfig
+        _dcfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
+                                               visual=self._cfg.overlay or {})
         drow = ttk.Frame(self._tune_body)
         drow.pack(fill=tk.X, pady=(6, 2))
         ttk.Label(drow, text=t("桌面字幕"), font=FONT_UI).pack(side=tk.LEFT)
-        self._desktop_alpha_var = tk.DoubleVar(value=float(_dov.get("alpha", 0.9) or 0.9))
+        self._desktop_alpha_var = tk.DoubleVar(value=float(_dcfg.alpha))
         self._desktop_alpha_lbl = ttk.Label(drow, text=f"{self._desktop_alpha_var.get():.2f}",
                                             font=FONT_STATUS, foreground=TEXT_DIM, width=5)
         tk.Scale(drow, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
@@ -3513,6 +3525,11 @@ class TranslationGUI:
             print(f"[gui] 关闭桌面字幕时出错（忽略）：{exc}", flush=True)
         self._desktop_out = None
         self._desktop_dragging = False
+        # 文案跟着复位：字幕窗都关掉了还写着「锁定位置」，与真实状态不符（用户会以为
+        # 还处在解锁态）。headless 模式下这个按钮没建过 → getattr 兜住。
+        btn = getattr(self, "_desktop_drag_btn", None)
+        if btn is not None:
+            btn.configure(text=t("解锁拖动"))
 
     def _push_desktop(self, force: bool = False) -> None:
         """把聊天区最近几条推给桌面字幕（与手腕屏同一份内容）。"""
@@ -3526,6 +3543,9 @@ class TranslationGUI:
 
     def _on_desktop_alpha(self, _v: str = "") -> None:
         """透明度滑块：先改窗口（立刻见效），停手 300ms 再落盘。"""
+        # 只有**用户拖动滑块**才会走到这里（Tk 的 -command 回调）→ 记下「动过了」，
+        # `_save_desktop_cfg()` 才允许把 alpha 写进配置（见那里的说明）。
+        self._desktop_alpha_touched = True
         a = float(self._desktop_alpha_var.get())
         lbl = getattr(self, "_desktop_alpha_lbl", None)
         if lbl is not None:
@@ -3548,6 +3568,11 @@ class TranslationGUI:
         用 `_yaml_set_or_create` 而不是就地改：用户的 config.yaml 是从**旧模板**生成的，
         里面根本没有 `desktop_overlay:` 段，就地改会因为找不到父键静默失效
         （表现就是"拖了、调了，重启全没了"）。
+
+        ⚠️ alpha 只在**用户真的动过滑块**时才写：本函数也被「锁定位置」与拖动落盘调到，
+        无条件写的话，用户只是把字幕拖了个位置，滑块上那个值（可能是从 `overlay.alpha`
+        继承来的、甚至只是默认的 0.90）就被写进 `desktop_overlay.alpha` 并热重载生效 ——
+        表现为「拖一下位置，透明度突然变了」。
         """
         self._desktop_save_job = None
         p = DEFAULT_CONFIG
@@ -3555,15 +3580,18 @@ class TranslationGUI:
             return
         try:
             text = p.read_text(encoding="utf-8")
-            updates: list[tuple[list[str], str]] = [
-                (["desktop_overlay", "alpha"], _fmt_scalar(float(self._desktop_alpha_var.get()))),
-            ]
+            updates: list[tuple[list[str], str]] = []
+            if self._desktop_alpha_touched:
+                updates.append((["desktop_overlay", "alpha"],
+                                _fmt_scalar(float(self._desktop_alpha_var.get()))))
             if self._desktop_out is not None:
                 for key, val in (self._desktop_out.snap_to_config() or {}).items():
                     if key in ("offset", "pos"):
                         updates.append((["desktop_overlay", key], f"[{val[0]}, {val[1]}]"))
                     else:
                         updates.append((["desktop_overlay", key], str(val)))
+            if not updates:
+                return                               # 什么都没改：不重写配置、也不打误导日志
             for key_path, value in updates:
                 text = _yaml_set_or_create(text, key_path, value)
             _write_config_text(p, text)
@@ -3579,7 +3607,10 @@ class TranslationGUI:
         所以要拖必须先解锁；锁定 = 把落点折算成锚点+偏移写回配置并恢复穿透。
         """
         if self._desktop_out is None:
-            self._set_status("warn", t("桌面字幕没启动起来，已自动取消勾选"))
+            # ⚠️ 这条分支**没有**取消任何勾选（那是 `_on_desktop_toggle` 的事）：
+            #    文案必须如实说「没在运行，先去勾上」，不能谎称已经替用户改了勾选状态。
+            self._desktop_dragging = False
+            self._set_status("warn", t("桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动"))
             return
         self._desktop_dragging = not self._desktop_dragging
         try:

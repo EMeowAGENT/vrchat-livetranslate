@@ -365,6 +365,9 @@ STRINGS: dict[str, str] = {
         "Desktop subtitles are on — drag them where you want; opacity is under \"Tune ▸\"",
     "桌面字幕没启动起来，已自动取消勾选":
         "Desktop subtitles could not start, so the tick was reverted",
+    "桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动":
+        "Desktop subtitles aren't running — tick \"Desktop Subtitles\" first, "
+        "then unlock dragging",
     "解锁拖动": "Unlock & Drag",
     "锁定位置": "Lock Position",
     "桌面字幕已解锁：拖动字幕窗到想要的位置，放好后点「锁定位置」":

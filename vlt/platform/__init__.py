@@ -29,6 +29,7 @@ __all__ = [
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
     "set_click_through", "set_tool_window", "top_level_hwnd", "screen_work_area",
+    "monitor_work_area",
 ]
 
 _backend: Any = None
@@ -259,16 +260,35 @@ def top_level_hwnd(widget_id: int) -> int:
         return int(widget_id)
 
 
+def _as_work_area(rect: Any) -> tuple[int, int, int, int] | None:
+    """把后端给的 (left, top, right, bottom) 校验成合法工作区；不合法返回 None。
+
+    ⚠️ **不做 `max(0, ...)` 之类的钳制**：多屏时副屏在主屏左侧/上方，坐标本来就是负的，
+    钳一下就把副屏工作区改成了错的东西（字幕会被夹到主屏里去）。
+    """
+    try:
+        left, top, right, bottom = (int(v) for v in rect)
+    except (TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom)
+
+
 def screen_work_area() -> tuple[int, int, int, int]:
     """主屏工作区（不含任务栏）；取不到给 1920x1080 的保守值。
 
     不能返回 (0,0,0,0)：调用方拿它做夹取，那会把字幕夹成左上角一个点。
     """
-    rect = _desktop_call("screen_work_area", None)
-    try:
-        left, top, right, bottom = (int(v) for v in rect)
-    except (TypeError, ValueError):
-        return _DEFAULT_WORK_AREA
-    if right <= left or bottom <= top:
-        return _DEFAULT_WORK_AREA
-    return (left, top, right, bottom)
+    return _as_work_area(_desktop_call("screen_work_area", None)) or _DEFAULT_WORK_AREA
+
+
+def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
+    """`hwnd` **所在那块显示器**的工作区；取不到就回落主屏工作区（绝不抛）。
+
+    多显示器时贴窗必须用这一条：`screen_work_area()` 只有主屏那一份，副屏
+    （尤其坐标为负的左侧副屏）上的字幕会被它夹回主屏。没有窗口句柄（自由模式）
+    或本平台没有这项能力（Linux）时，回落到主屏工作区就还是原来的行为。
+    """
+    return (_as_work_area(_desktop_call("monitor_work_area", None, hwnd))
+            or screen_work_area())

@@ -1,17 +1,22 @@
 #!/usr/bin/env python
 """桌面字幕（issue #11：VRChat 桌面模式叠加窗）验收。
 
-盯的是**共享层**：锚点/夹取/透明度/配置继承这些纯函数，dry-run 出图，以及 Tk 冒烟
-（建窗 → 出图 → 拖动 → 透明度 → 关闭幂等）。真正的「贴着 VRChat 窗口跟随」只能在
-跑了游戏的机器上验（见 out/verify_desktop_overlay.py，主控的复验脚本，不进 CI）。
+盯的是**共享层**：锚点/夹取/透明度/配置继承这些纯函数，dry-run 出图，Tk 冒烟
+（建窗 → 出图 → 拖动 → 透明度 → 关闭幂等），多显示器下按「目标窗口所在那块屏」取工作区，
+以及界面那侧的透明度滑块（初值继承 + 只有真拖过才落盘）。真正的「贴着 VRChat 窗口跟随」
+只能在跑了游戏的机器上验 —— 那由维护者本机的复验脚本人工做（不进仓库、不进 CI）。
 
 写法照 `tests/test_overlay_conversation.py`：单文件脚本，直接跑，全绿打印 ALL PASSED。
 """
 from __future__ import annotations
 
+import os
+import re
 import sys
 import tempfile
 from pathlib import Path
+
+import yaml
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
@@ -32,8 +37,21 @@ RECT = (100, 50, 900, 650)          # 目标窗口客户区（屏幕坐标）
 SIZE = (400, 200)                   # 面板像素尺寸
 AREA = (0, 0, 1920, 1080)           # 屏幕工作区
 
+# 副屏工作区：主屏**左侧**那块（坐标全是负的，真实多屏里最常见的一种排布）
+AREA_LEFT = (-1920, 0, 0, 1080)
+# 副屏工作区：主屏**上方**那块（y 为负）
+AREA_ABOVE = (0, -1080, 1920, 0)
+
 # 假「游戏窗口」的标题：独一无二，免得测试去贴用户真在跑的 VRChat
 FAKE_TITLE = "VLT_FAKE_VRCHAT_WINDOW"
+# 一定不存在的标题：界面那条用例靠它退化成屏幕绝对定位，不依赖本机是否真开着 VRChat
+FAKE_MISSING_TITLE = "___vlt_不存在的窗口___"
+
+# 界面透明度滑块用例：沙箱配置里 overlay 段的 alpha，以及用户拖动滑块后的值
+GUI_SANDBOX_DIR = ROOT / "out" / "desktop_overlay_cfg"
+GUI_SANDBOX = GUI_SANDBOX_DIR / "config.yaml"
+GUI_INHERITED_ALPHA = 0.5
+GUI_SLIDER_ALPHA = 0.65
 
 SAMPLE_ENTRIES = [
     ("theirs", "Hello there, can you hear me?", "你好，能听到我说话吗？"),
@@ -75,6 +93,45 @@ def test_position_clamped_into_area() -> None:
     got = compute_position("top_left", (-400, -300), RECT, SIZE, (-1920, 0, 0, 1080))
     assert got == (-400, 0), got
     print("  屏幕夹取（超大面板 / 越界 / 负坐标 / 副屏）OK")
+
+
+# ---------------------------------------------------------------- 2b. 多显示器：副屏不被拽回主屏
+def test_clamp_stays_on_secondary_monitor() -> None:
+    """纯函数：工作区是**副屏**（负坐标）时，夹取结果必须留在副屏里。
+
+    真 bug（审查实测确认）：夹取用的工作区来自 `SPI_GETWORKAREA`，那**只有主屏**一份 ——
+    副屏上的字幕被 `_clamp_into_area` 拽回主屏，用户看到的是字幕"自己跑到另一块屏上"。
+    左侧副屏坐标全是负的，被拽得尤其明显（直接飞到主屏左边界）。
+    """
+    rect = (-1800, 100, -1100, 700)            # 左侧副屏上的目标窗口客户区
+    got = compute_position("bottom_center", (0, -40), rect, SIZE, AREA_LEFT)
+    assert got == (-1650, 460), got
+    assert AREA_LEFT[0] <= got[0] and got[0] + SIZE[0] <= AREA_LEFT[2], \
+        f"横向被拽出副屏：{got}"
+    assert AREA_LEFT[1] <= got[1] and got[1] + SIZE[1] <= AREA_LEFT[3], \
+        f"纵向被拽出副屏：{got}"
+    # 对照：同一个落点用**主屏**工作区去夹 → 被拽到主屏左边界（这就是 bug 的样子）
+    yanked = compute_position("bottom_center", (0, -40), rect, SIZE, AREA)
+    assert yanked == (0, 460), yanked
+    assert yanked != got, (yanked, got)
+
+    # 上方副屏（y 为负）同样成立
+    got2 = compute_position("top_center", (0, 20), (200, -1000, 1600, -200),
+                            SIZE, AREA_ABOVE)
+    assert got2 == (700, -980), got2
+    assert AREA_ABOVE[1] <= got2[1] and got2[1] + SIZE[1] <= AREA_ABOVE[3], got2
+
+    # 面板比副屏还大 → 贴**副屏**左上角（不是主屏的 (0,0)）
+    assert compute_position("center", (0, 0), rect, (3000, 2000),
+                            AREA_LEFT) == (-1920, 0)
+    assert resolve_position(
+        DesktopOverlayConfig(enabled=True, anchor="free", pos=(-1700, 200), size_px=SIZE),
+        None, SIZE, AREA_LEFT) == (-1700, 200)
+    # 自由模式的绝对坐标越出副屏 → 夹到副屏边界，不是夹到 0
+    assert resolve_position(
+        DesktopOverlayConfig(enabled=True, anchor="free", pos=(-9999, 9999), size_px=SIZE),
+        None, SIZE, AREA_LEFT) == (-1920, 880)
+    print("  副屏工作区（负坐标）夹取留在副屏、不被拽回主屏 OK")
 
 
 # ---------------------------------------------------------------- 3. resolve_position
@@ -381,6 +438,87 @@ def test_attach_and_follow_fake_game_window() -> None:
     print("  贴窗 + 跟随移动 + follow=False 不动 OK")
 
 
+def test_work_area_follows_attached_monitor() -> None:
+    """`_work_area()` 的选型：贴窗 → **目标窗口那块屏**；自由模式 → 主屏。
+
+    本机不一定接了副屏，所以用「把门面的 `monitor_work_area` 临时换成一块假的左侧副屏」
+    来钉住选型与夹取（真 Win32 那一条由 `test_win32_helpers_on_real_windows` 覆盖）。
+    换错选型的表现非常具体：副屏上的字幕被主屏工作区夹回主屏，用户看着它"自己跳屏"。
+    """
+    root, tk, why = _try_tk()
+    if root is None:
+        print(f"  跳过（无 Tk）：{why}")
+        return
+    real_monitor = platform.monitor_work_area
+    seen: list[int] = []
+
+    def fake_monitor(hwnd):                      # 假装目标窗口在左侧副屏上
+        seen.append(hwnd)
+        return AREA_LEFT
+
+    fake = None
+    try:
+        fake = tk.Toplevel(root)
+        fake.title(FAKE_TITLE)
+        fake.geometry("500x300+40+40")
+        fake.update()
+        cfg = DesktopOverlayConfig(enabled=True, attach_to_game=True, follow=False,
+                                   anchor="bottom_center", offset=(0, -40),
+                                   size_px=(320, 120), game_title=FAKE_TITLE)
+        ov = DesktopOverlay(cfg, root=root)
+        assert ov.start() is True
+        root.update()
+        if ov.game_rect is None:
+            print("  跳过（本平台没有桌面窗口后端）")
+            ov.close()
+            return
+
+        platform.monitor_work_area = fake_monitor
+        try:
+            # ① 贴窗 → 按目标窗口那块屏取工作区（句柄要传对）
+            got = ov._work_area()
+            assert got == AREA_LEFT, f"贴窗时应按目标窗口那块屏取工作区：{got}"
+            assert seen == [ov._game_hwnd], f"问工作区时该带上目标窗口句柄：{seen}"
+
+            # ② 目标窗口在副屏上 → 落点留在副屏（x 为负），没被主屏工作区拽回来。
+            #    这里只验「_apply_position 用的那条解析链」，不真把窗口挪到屏幕外 ——
+            #    屏外坐标能不能落下去取决于 OS/显示器排布，拿它做断言会假红。
+            ov._game_rect = (-1800, 100, -1100, 700)
+            want = resolve_position(ov.cfg, ov._game_rect, (320, 120), ov._work_area())
+            assert want == compute_position("bottom_center", ov.cfg.offset, ov._game_rect,
+                                            (320, 120), AREA_LEFT), want
+            assert want == (-1610, 540), want
+            assert want[0] < 0, f"字幕被拽回主屏了：{want}"
+            yanked = resolve_position(ov.cfg, ov._game_rect, (320, 120), AREA)
+            assert yanked[0] >= 0 and yanked != want, (yanked, want)
+
+            # ③ 没有目标窗口句柄（自由模式 / 找不到窗口）→ 沿用主屏工作区，不去问 monitor
+            seen.clear()
+            ov._game_hwnd, ov._game_rect = None, None
+            ov.cfg.attach_to_game, ov.cfg.anchor, ov.cfg.pos = False, "free", (10, 20)
+            got = ov._work_area()
+            assert seen == [], f"没有句柄就不该去问 monitor_work_area：{seen}"
+            assert got == platform.screen_work_area(), f"自由模式应沿用主屏工作区：{got}"
+            ov._apply_position()
+            root.update()
+            assert ov.position == (10, 20), ov.position
+        finally:
+            platform.monitor_work_area = real_monitor
+        ov.close()
+    finally:
+        platform.monitor_work_area = real_monitor
+        if fake is not None:
+            try:
+                fake.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+    print("  工作区选型：贴窗按目标窗口那块屏 / 自由模式沿用主屏 OK")
+
+
 # ---------------------------------------------------------------- 平台门面 / 隔离
 def test_facade_safe_defaults_without_backend() -> None:
     """后端缺失（Linux 就是这样）时门面必须返回安全默认值，一个都不许抛。"""
@@ -400,9 +538,51 @@ def test_facade_safe_defaults_without_backend() -> None:
         assert platform.set_tool_window(1234) is False
         assert platform.top_level_hwnd(4321) == 4321
         assert platform.screen_work_area() == (0, 0, 1920, 1080)
+        assert platform.monitor_work_area(1234) == (0, 0, 1920, 1080)
     finally:
         platform.desktop_window_backend = real
     print("  门面兜底（没有桌面窗口后端时的安全默认值）OK")
+
+
+def test_monitor_work_area_falls_back_to_primary() -> None:
+    """多屏那条能力的兜底：没有句柄 / 句柄失效 / 后端没这项能力 → 回落主屏工作区。
+
+    `_work_area()` 在 50ms 一跳的 tick 里，任何异常冒出去都会打断整条翻译腿，
+    所以这里只要求「永远给一个能用的矩形」，绝不要求它一定拿得到副屏那一份。
+    """
+    primary = platform.screen_work_area()
+    assert len(primary) == 4 and primary[2] > primary[0] and primary[3] > primary[1], primary
+    # 没有句柄（自由模式）→ 主屏工作区
+    assert platform.monitor_work_area(0) == primary, platform.monitor_work_area(0)
+    assert platform.monitor_work_area(None) == primary
+    # 失效句柄 → 回落，不抛
+    assert platform.monitor_work_area(0x7FFFFFFF) == primary
+
+    # ⚠️ 门面**不许**对坐标做 `max(0, ...)` 之类的钳制：副屏在主屏左侧/上方时坐标本来就是
+    # 负的，钳一下就把副屏工作区改成错的（字幕被夹回主屏）。用打桩后端喂一份负坐标，要求
+    # **原样**返回 —— 这条是审查时补的：此前把钳制写进门面 `monitor_work_area()`，
+    # 全量用例照样全绿（故障注入实测 M4），等于没人守这条不变量。
+    class _FakeNegativeBackend:
+        @staticmethod
+        def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:  # noqa: ARG004
+            return (-1920, 0, 0, 1080)
+
+    real = platform.desktop_window_backend
+    platform.desktop_window_backend = lambda: _FakeNegativeBackend()
+    try:
+        got = platform.monitor_work_area(1234)
+        assert got == (-1920, 0, 0, 1080), f"门面把副屏的负坐标钳掉了：{got}"
+    finally:
+        platform.desktop_window_backend = real
+
+    real = platform.desktop_window_backend
+    platform.desktop_window_backend = lambda: None     # 假装本平台没有这项能力（Linux）
+    try:
+        assert platform.monitor_work_area(0) == (0, 0, 1920, 1080)
+        assert platform.monitor_work_area(1234) == (0, 0, 1920, 1080)
+    finally:
+        platform.desktop_window_backend = real
+    print(f"  monitor_work_area 无句柄/失效句柄/无后端都回落主屏 {primary} OK")
 
 
 def test_shared_module_stays_platform_clean() -> None:
@@ -414,13 +594,13 @@ def test_shared_module_stays_platform_clean() -> None:
         assert bad not in src, f"desktop_overlay.py 里出现了平台独占字样：{bad!r}"
     for name in ("desktop_window_backend", "find_game_window", "window_client_rect",
                  "is_window", "set_click_through", "set_tool_window",
-                 "top_level_hwnd", "screen_work_area"):
+                 "top_level_hwnd", "screen_work_area", "monitor_work_area"):
         assert callable(getattr(platform, name, None)), f"platform 门面缺 {name}"
     if platform.IS_WINDOWS:
         from vlt.platform import win as w
         for name in ("top_level_hwnd", "find_window_by_title", "window_client_rect",
                      "is_window", "set_click_through", "set_tool_window",
-                     "screen_work_area"):
+                     "screen_work_area", "monitor_work_area"):
             assert callable(getattr(w, name, None)), f"win.py 缺 {name}"
     print("  平台隔离 + 门面 / win 实现齐备 OK")
 
@@ -452,6 +632,8 @@ def test_win32_helpers_on_real_windows() -> None:
         return int(u.GetWindowLongPtrW(ctypes.c_void_p(hwnd), -20)) & 0xFFFFFFFF
 
     fake = None
+    single_monitor = True
+    mon_area: tuple[int, int, int, int] | None = None
     try:
         fake = tk.Toplevel(root)
         fake.title(FAKE_TITLE)
@@ -463,6 +645,17 @@ def test_win32_helpers_on_real_windows() -> None:
         assert platform.is_window(hwnd) is True
         rect = platform.window_client_rect(hwnd)
         assert rect is not None and rect[2] - rect[0] > 200, rect
+        # 多屏：按**窗口所在显示器**取工作区（`screen_work_area()` 只有主屏那一份）
+        mon_area = platform.monitor_work_area(hwnd)
+        assert len(mon_area) == 4 and mon_area[2] > mon_area[0] \
+            and mon_area[3] > mon_area[1], mon_area
+        assert mon_area[0] < rect[2] and rect[0] < mon_area[2] \
+            and mon_area[1] < rect[3] and rect[1] < mon_area[3], \
+            f"工作区 {mon_area} 与窗口客户区 {rect} 不相交（拿错屏了）"
+        single_monitor = int(ctypes.windll.user32.GetSystemMetrics(80)) <= 1  # SM_CMONITORS
+        if single_monitor:
+            assert mon_area == area, f"单屏时应等于主屏工作区：{mon_area} vs {area}"
+        assert w.monitor_work_area(0) == w.screen_work_area()
         # 大小写不敏感
         assert platform.find_game_window(FAKE_TITLE.lower()) == hwnd
         # 精确同名优先于「标题里也含这个子串」的窗口（本程序主窗标题就叫「VRChat 实时同传」）
@@ -495,7 +688,9 @@ def test_win32_helpers_on_real_windows() -> None:
             root.destroy()
         except Exception:  # noqa: BLE001
             pass
-    print("  Win32：找窗口 / 客户区 / 穿透 / 工具窗 OK")
+    note = ("本机只有一块屏 → 副屏（负坐标）那一份只能人工验"
+            if single_monitor else f"本机多屏，按窗口取到 {mon_area}")
+    print(f"  Win32：找窗口 / 客户区 / 穿透 / 工具窗 / 按显示器取工作区 OK（{note}）")
 
 
 def test_click_through_toggles_with_drag() -> None:
@@ -685,7 +880,12 @@ def test_own_window_excluded_from_game_search() -> None:
         mine.update()
         own = platform.top_level_hwnd(mine.winfo_id())
         hit = platform.find_game_window("VRChat")
-        assert hit == own, f"前提不成立：不排除时应当命中我们自己，实际 hwnd={hit}"
+        if hit != own:
+            # ⚠️ 前提不成立就**跳过**，不许断言失败：本机真开着 VRChat（标题精确匹配）时，
+            #    枚举顺序上它可能排在我们前面 → 这条前提恒假，但那是环境不是代码 bug。
+            #    真正要钉的是下面那条（排除自己之后不许再命中自己），它不依赖这个前提。
+            print(f"  跳过（本机另有窗口精确匹配 \"VRChat\"，hwnd={hit}）")
+            return
         hit2 = platform.find_game_window("VRChat", (own,))
         assert hit2 != own, "排除自己之后仍然命中了自己 → VRChat 没开时会贴错窗"
     finally:
@@ -701,10 +901,174 @@ def test_own_window_excluded_from_game_search() -> None:
     print("  找游戏窗口时排除本程序自己的窗口 OK")
 
 
+# ---------------------------------------------------------------- 界面：透明度滑块
+def _make_gui_sandbox() -> None:
+    """把模板改成**沙箱**配置：`overlay.alpha=0.5`、`desktop_overlay` 段**没有** alpha，
+    目标窗口标题指向一个一定不存在的窗口。
+
+    于是「窗口真实透明度」= 从 overlay 段继承来的 0.5，而旧代码里滑块初值只读
+    `desktop_overlay` 段（缺键 → 兜底 0.9）—— 两边是否同源，一验就现形。
+    用行级替换而不是整文件重写：沙箱要跟用户手写配置一样保留注释，
+    后面「落盘不丢东西」那几条验的才是真实场景。
+
+    ⚠️ 全程只读写 `out/` 下的沙箱：仓库根的 `config.yaml` 是被 gitignore 的用户真实
+    个人配置，本用例绝不碰它（也不备份/还原它）。
+    """
+    text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+
+    # ① overlay 段补一行**顶层** alpha（模板里只有 overlay.offset.alpha，不是同一个键：
+    #    `DesktopOverlayConfig.from_dict` 继承的是 overlay 段的顶层 alpha）
+    text, n = re.subn(r"(?m)^(  size_px: \[1024, 440\].*)$",
+                      f"  alpha: {GUI_INHERITED_ALPHA}\n\\g<1>", text)
+    assert n == 1, f"模板里应有且只有 1 行 overlay 段的 `  size_px: [1024, 440]`，命中 {n} 处"
+
+    # ② desktop_overlay 段的 alpha 整行删掉（本用例要的就是"本段没写"）
+    text, n = re.subn(r"(?m)^  alpha: 0\.90.*\n", "", text)
+    assert n == 1, f"模板里 desktop_overlay 段应有且只有 1 行 `  alpha: 0.90`，命中 {n} 处"
+
+    # ③ 目标窗口标题指向一定不存在的窗口：结论不依赖本机是否真开着 VRChat
+    text, n = re.subn(r"(?m)^(  game_title:\s*)\S+", rf"\g<1>{FAKE_MISSING_TITLE}", text)
+    assert n == 1, f"模板里应有且只有 1 行 `  game_title:`，命中 {n} 处"
+
+    GUI_SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+    # .gitattributes 规定源码 LF：显式传 newline，别让 Windows 把整份配置写成 CRLF
+    GUI_SANDBOX.write_text(text, encoding="utf-8", newline="\n")
+
+    data = _read_gui_sandbox()
+    assert data["overlay"]["alpha"] == GUI_INHERITED_ALPHA, data["overlay"].get("alpha")
+    assert "alpha" not in data["desktop_overlay"], data["desktop_overlay"]
+    assert data["desktop_overlay"]["game_title"] == FAKE_MISSING_TITLE
+
+
+def _read_gui_sandbox() -> dict:
+    return yaml.safe_load(GUI_SANDBOX.read_text(encoding="utf-8"))
+
+
+def test_gui_alpha_slider_inherits_and_only_saves_on_touch() -> None:
+    """界面透明度滑块：初值必须与窗口**同源**，且只有用户真拖过才写进配置。
+
+    一条用例钉住两个真 bug：
+    ① 初值原来读 `_dov.get("alpha", 0.9)`（只有 desktop_overlay 段），而窗口那侧走的是
+       `DesktopOverlayConfig.from_dict(desktop_overlay 段, overlay 段)` ——
+       `overlay.alpha=0.5` 且本段没写 alpha 时，窗口是 0.50、滑块停在 0.90；
+    ② `_save_desktop_cfg()` 原来**无条件**把滑块值写进 `desktop_overlay.alpha`，而它也被
+       「锁定位置」与拖动落盘调到 → 用户只把字幕拖了个位置，透明度就被改成 0.90 并热重载。
+
+    顺带钉住两处卫生项：`_stop_desktop()` 要把拖动按钮文案复位成「解锁拖动」；
+    字幕窗没起来时点解锁，文案不许谎称"已自动取消勾选"。
+    """
+    # 起界面会走 `load_api_key()`：干净环境（CI）上没有 key 直接 SystemExit → 假红。
+    # 给一个**拼接出来的假 key**（不触发仓库的凭据扫描钩子）；本用例跟 key 真假无关。
+    os.environ.setdefault("DASHSCOPE_API_KEY", "sk" + "-ws-" + "deskalpha0123456789abcd")
+
+    import vlt.config as _cfg_mod
+    import vlt.i18n as _i18n
+    import vlt.gui as _gui_mod
+
+    _make_gui_sandbox()
+    # 界面语言跟随系统语言（CI 与外国机器是英文系统）→ 钉死 zh，控件树排布才稳定。
+    # ⚠️ 必须在构造窗口**之前**打桩。产品代码不依赖这个补丁。
+    saved = (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG, _i18n.detect_system_language)
+    _cfg_mod.DEFAULT_CONFIG = GUI_SANDBOX
+    _gui_mod.DEFAULT_CONFIG = GUI_SANDBOX            # `_save_desktop_cfg` 用的是这个常量
+    _i18n.detect_system_language = lambda: "zh"
+
+    from vlt.gui import TranslationGUI
+    from vlt.i18n import t
+
+    gui = None
+    try:
+        gui = TranslationGUI()
+        if gui._update_check_job is not None:        # 启动 3 秒后自动查更新：绝不真连 GitHub
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        # ① 滑块初值 == 从 overlay 段继承来的 0.5（不是本段兜底的 0.90）
+        got = float(gui._desktop_alpha_var.get())
+        assert abs(got - GUI_INHERITED_ALPHA) < 1e-9, \
+            f"滑块初值应继承 overlay.alpha={GUI_INHERITED_ALPHA}，实际 {got}（旧代码是 0.9）"
+        assert abs(got - 0.9) > 1e-9, "滑块初值仍是 0.90 —— 没跟窗口同源"
+
+        # ② 起字幕窗：窗口那侧解析出来的 alpha 必须与滑块显示的是同一个值
+        gui._desktop_var.set(True)
+        gui._on_desktop_toggle()
+        gui._root.update()
+        if gui._desktop_out is None:
+            print("  跳过界面落盘断言（本平台没有桌面窗口后端）")
+            return
+        assert abs(gui._desktop_out.cfg.alpha - got) < 1e-9, \
+            f"窗口透明度 {gui._desktop_out.cfg.alpha} 与滑块 {got} 不同源"
+        assert gui._desktop_alpha_touched is False, "没碰过滑块就不该算'动过了'"
+
+        # ③ 只解锁/锁定拖动（模拟拖到某处放手），绝不碰滑块 → 配置里不许出现 alpha。
+        #    落点故意**不等于**模板里的 pos:[80, 80]：否则「位置写进去了」那条断言即使
+        #    落盘整条路失效也照样绿（空过）。拖动放手时 `_on_drag_end` 做的正是这个赋值
+        #    （真鼠标那一路已由 test_drag_moves_window_and_snaps_to_anchor 覆盖）。
+        pos = tuple(gui._desktop_out.position)
+        landed = (pos[0] + 37, pos[1] + 23)
+        assert list(landed) != list(_read_gui_sandbox()["desktop_overlay"]["pos"]), \
+            "落点得与配置里现成的 pos 不同，否则下面那条断言是空过"
+        gui._desktop_out.user_pos = landed
+        gui._toggle_desktop_drag()                   # 解锁
+        assert gui._desktop_dragging is True
+        assert gui._desktop_drag_btn.cget("text") == t("锁定位置"), \
+            gui._desktop_drag_btn.cget("text")
+        gui._toggle_desktop_drag()                   # 锁定 → 落盘
+        data = _read_gui_sandbox()
+        assert "alpha" not in data["desktop_overlay"], \
+            f"只拖了位置就把 alpha 写进配置了：{data['desktop_overlay']}"
+        # 落盘这条路本身得是通的（否则上一条断言是空过）：位置写进去了，值就是落点
+        assert list(data["desktop_overlay"]["pos"]) == list(landed), \
+            f"位置没写进去（落盘路径失效？）：{data['desktop_overlay'].get('pos')} vs {landed}"
+        assert gui._desktop_drag_btn.cget("text") == t("解锁拖动")
+
+        # ④ 真的拖了滑块 → 窗口立刻跟着变，且 alpha 这才被写进配置
+        gui._desktop_alpha_var.set(GUI_SLIDER_ALPHA)
+        gui._on_desktop_alpha()
+        assert gui._desktop_alpha_touched is True
+        assert abs(gui._desktop_out.cfg.alpha - GUI_SLIDER_ALPHA) < 1e-9, \
+            gui._desktop_out.cfg.alpha
+        gui._save_desktop_cfg()                      # 防抖那 300ms 直接跑同一个函数
+        data = _read_gui_sandbox()
+        assert abs(float(data["desktop_overlay"]["alpha"]) - GUI_SLIDER_ALPHA) < 1e-9, \
+            f"拖过滑块后 alpha 该写进配置：{data['desktop_overlay'].get('alpha')}"
+        # 位置那条不能因为多了 alpha 就被冲掉
+        assert list(data["desktop_overlay"]["pos"]) == list(landed), data["desktop_overlay"]
+
+        # ⑤ 卫生项：关掉字幕窗后按钮文案必须复位（原来会一直写着「锁定位置」）
+        gui._toggle_desktop_drag()                   # 再解锁一次
+        assert gui._desktop_drag_btn.cget("text") == t("锁定位置")
+        gui._stop_desktop()
+        assert gui._desktop_out is None and gui._desktop_dragging is False
+        assert gui._desktop_drag_btn.cget("text") == t("解锁拖动"), \
+            f"字幕窗都关了按钮还写着：{gui._desktop_drag_btn.cget('text')!r}"
+
+        # ⑥ 卫生项：字幕窗没在跑时点解锁 → 文案如实（这条分支没取消任何勾选）
+        gui._toggle_desktop_drag()
+        assert gui._desktop_dragging is False
+        status = str(gui._status_label.cget("text"))
+        assert t("桌面字幕还没开启，先勾上「桌面字幕」再解锁拖动") in status, status
+        assert gui._desktop_var.get() is True, "这条分支不该动用户的勾选状态"
+    finally:
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        (_cfg_mod.DEFAULT_CONFIG, _gui_mod.DEFAULT_CONFIG,
+         _i18n.detect_system_language) = saved
+        # 沙箱文件留在 out/ 下即可（已 gitignore）；用户的 config.yaml 全程没被碰过
+    print(f"  界面透明度滑块：初值继承 overlay.alpha={GUI_INHERITED_ALPHA} / "
+          f"只拖位置不写 alpha / 拖过滑块才写 {GUI_SLIDER_ALPHA} / "
+          "按钮文案与提示如实 OK")
+
+
 if __name__ == "__main__":
     print("test_desktop_overlay:")
     test_compute_position_nine_anchors()
     test_position_clamped_into_area()
+    test_clamp_stays_on_secondary_monitor()
     test_resolve_position_falls_back_to_cfg_pos()
     test_clamp_alpha_bounds()
     test_from_dict_defaults_inherit_and_override()
@@ -713,7 +1077,9 @@ if __name__ == "__main__":
     test_start_without_game_window()
     test_tk_smoke_full_cycle()
     test_attach_and_follow_fake_game_window()
+    test_work_area_follows_attached_monitor()
     test_facade_safe_defaults_without_backend()
+    test_monitor_work_area_falls_back_to_primary()
     test_shared_module_stays_platform_clean()
     test_win32_helpers_on_real_windows()
     test_click_through_toggles_with_drag()
@@ -721,4 +1087,5 @@ if __name__ == "__main__":
     test_best_anchor_picks_nearest_grid_point()
     test_drag_moves_window_and_snaps_to_anchor()
     test_own_window_excluded_from_game_search()
+    test_gui_alpha_slider_inherits_and_only_saves_on_touch()
     print("ALL PASSED")

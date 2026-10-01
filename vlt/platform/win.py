@@ -236,7 +236,8 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 # ---------------------------------------------------------------- 桌面叠加窗（issue #11）
 #
 # 桌面（非 VR）模式下的字幕窗：Tk 负责画，这里只提供 Tk 拿不到的那几件 Win32 事实 ——
-# 顶层 HWND、目标窗口客户区、鼠标穿透/不抢焦点的扩展样式、主屏工作区。
+# 顶层 HWND、目标窗口客户区、鼠标穿透/不抢焦点的扩展样式、工作区（主屏那一份，
+# 以及**目标窗口所在显示器**那一份 —— 多屏时只有后者才不会把副屏字幕夹回主屏）。
 #
 # ⚠️ 共享模块（`vlt/output/desktop_overlay.py`）**只能通过 `vlt/platform/__init__.py`
 #    的门面调这些函数**：另一侧平台没有对等实现，门面会返回安全默认值，
@@ -252,6 +253,9 @@ _WS_EX_LAYERED = 0x00080000           # 分层窗口（色键 / 整窗透明度�
 _WS_EX_NOACTIVATE = 0x08000000        # 显示时不抢焦点
 _SPI_GETWORKAREA = 0x0030
 _SM_CXSCREEN, SM_CYSCREEN = 0, 1
+# 窗口不与任何显示器相交（移出屏幕外/正在销毁）时，`MonitorFromWindow` 仍返回**最近**
+# 的那块屏 —— 比返回 NULL 再回落主屏更贴近用户的直觉（字幕就在那块屏附近）。
+_MONITOR_DEFAULTTONEAREST = 2
 
 
 class _RECT(ctypes.Structure):
@@ -261,6 +265,11 @@ class _RECT(ctypes.Structure):
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT),
+                ("rcWork", _RECT), ("dwFlags", ctypes.c_ulong)]
 
 
 def _get_ex_style(hwnd: int) -> int | None:
@@ -453,3 +462,37 @@ def screen_work_area() -> tuple[int, int, int, int]:
     except Exception:  # noqa: BLE001
         pass
     return (0, 0, 1920, 1080)
+
+
+def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
+    """`hwnd` **所在那块显示器**的工作区；拿不到就回落到 `screen_work_area()`。
+
+    多显示器时这条是必需的：`SPI_GETWORKAREA` 只有**主屏**那一份工作区，副屏上的
+    字幕会被它夹回主屏 —— 左侧副屏的坐标本来就是负的，一夹就直接飞到主屏左上角。
+    所以贴窗时按「目标窗口待着的那块屏」取工作区，才是用户眼里的那块屏。
+
+    ⚠️ 返回值**可能是负坐标**（副屏在主屏左侧/上方）：不要做任何 `max(0, ...)` 钳制。
+    """
+    if not hwnd:
+        return screen_work_area()
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetMonitorInfoW.restype = ctypes.c_bool
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+        mon = user32.MonitorFromWindow(ctypes.c_void_p(int(hwnd)),
+                                       _MONITOR_DEFAULTTONEAREST)
+        if not mon:
+            return screen_work_area()
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)      # 忘了填这个 GetMonitorInfoW 直接失败
+        if not user32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi)):
+            return screen_work_area()
+        left, top = int(mi.rcWork.left), int(mi.rcWork.top)
+        right, bottom = int(mi.rcWork.right), int(mi.rcWork.bottom)
+        if right <= left or bottom <= top:
+            return screen_work_area()
+        return (left, top, right, bottom)
+    except Exception:  # noqa: BLE001 — 句柄失效 / 远程桌面 / 老系统都走这里
+        return screen_work_area()

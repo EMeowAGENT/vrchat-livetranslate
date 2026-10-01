@@ -204,9 +204,11 @@ desktop_overlay:
   anchor: bottom_center      # 贴窗时的锚点：top_left/top_center/top_right
                              #              middle_left/center/middle_right
                              #              bottom_left/bottom_center/bottom_right
-                             #              free = 用下面的 pos（窗口内相对坐标）
-  offset: [0, -56]           # 相对锚点的像素偏移（负 y = 往上）（拖动后由界面写回这里）
-  pos: [80, 80]              # attach_to_game=false 时=屏幕绝对坐标；true 且 anchor=free 时=窗口内相对坐标
+                             #              free = 不贴窗口，用下面的 pos 定位
+  offset: [0, -48]           # 相对锚点的像素偏移（负 y = 往上）（拖动后由界面写回这里）
+  pos: [80, 80]              # **屏幕绝对坐标**（不是窗口相对坐标）：attach_to_game=false、
+                             # anchor=free、或找不到目标窗口时用它定位。多屏时副屏在主屏
+                             # 左侧/上方的话，这里可以是负值。
   size_px: [1024, 360]       # 面板像素尺寸。⚠️ 本段**没写**这一项时会继承 overlay.size_px
   alpha: 0.90                # **整窗透明度**（0.2~1.0）—— 界面「微调 ▸」里的滑块改的就是它
   click_through: true        # 鼠标穿透（点字幕窗会点到 VRChat 上）；拖动的瞬间自动临时关掉
