@@ -145,6 +145,9 @@ class AppConfig:
     output: dict[str, Any] = field(default_factory=dict)
     ui: dict[str, Any] = field(default_factory=dict)      # 界面上次的选择（方向/输出勾选），启动时恢复
     text_input: dict[str, Any] = field(default_factory=dict)   # 打字输入（替代说话）
+    # 桌面字幕（PC 桌面模式：贴 VRChat 窗口的叠加窗）。与 `overlay`（头显手腕屏）是两条腿，
+    # 视觉参数从 `overlay` 段继承，见 vlt/output/desktop_overlay.py 的 from_dict。
+    desktop_overlay: dict[str, Any] = field(default_factory=dict)
 
     def direction(self, name: str) -> Direction:
         if name not in self.directions:
@@ -271,6 +274,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         overlay=raw.get("overlay") or {},
         output=output,
         ui=raw.get("ui") or {},
+        desktop_overlay=raw.get("desktop_overlay") or {},
         text_input={
             "enabled": bool(raw_textin.get("enabled", True)),
             # 默认 qwen-mt-flash：实测 qwen3-livetranslate-flash 的**文本**接口会原样回吐
