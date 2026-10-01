@@ -331,6 +331,71 @@ def test_room_generate_button() -> bool:
             pass
 
 
+def test_entry_right_click_menu() -> bool:
+    """★ 文本输入框的右键菜单（剪切/复制/粘贴/全选）。
+
+    背景：Tk 的 `ttk.Entry` / `tk.Text` 在 Windows 上**天生没有右键菜单** —— Ctrl+C/V 能用
+    只是因为 Tk 绑了虚拟事件，鼠标用户根本没有入口（用户实测报「右键没有复制粘贴，
+    只能键盘 C+V」）。这里钉住三件事：每个文本框都挂了菜单、菜单四个条目的文案对、
+    **粘贴/全选/复制真的能改到内容**（只验「绑上了」等于没验）。
+    """
+    from vlt.gui import TranslationGUI
+
+    t = _i18n.t
+    gui = TranslationGUI()
+    try:
+        widgets = {
+            "API key 输入框": gui._key_entry,
+            "房间码输入框": gui._room_code_entry,
+            "昵称输入框": gui._room_nick_entry,
+            "词库文本框": gui._glossary_text,
+            "打字输入框": gui._text_entry,
+        }
+        expected = [t("剪切"), t("复制"), t("粘贴"), t("全选")]
+
+        # ① 每个控件都挂了 <Button-3>，且菜单在、四个条目文案对
+        for name, w in widgets.items():
+            assert w.bind("<Button-3>"), f"{name} 没有右键绑定"
+            menu = getattr(w, "_edit_menu", None)
+            assert menu is not None, f"{name} 没有 _edit_menu（Tk 会把它回收掉 → 菜单点不动）"
+            labels = [menu.entrycget(i, "label") for i in range(4)]
+            assert labels == expected, f"{name} 菜单条目不对：{labels!r}（期望 {expected!r}）"
+        print(f"  ✓ ① 五个文本框都有右键菜单，条目 = {expected}")
+
+        # ② 功能真验：真实剪贴板 → 粘贴，改的是房间码本身
+        root = gui._root
+        root.clipboard_clear()
+        root.clipboard_append("AB12CD34")
+        root.update()                    # 剪贴板在 Tk 里要过一轮事件循环才生效
+        gui._room_code_var.set("")
+        code_menu = gui._room_code_entry._edit_menu
+        code_menu.invoke(2)              # 0 剪切 / 1 复制 / 2 粘贴 / 3 全选
+        assert gui._room_code_var.get() == "AB12CD34", \
+            f"右键「粘贴」没把内容写进房间码：{gui._room_code_var.get()!r}"
+        print(f"  ✓ ② 右键「粘贴」生效 → 房间码 {gui._room_code_var.get()!r}")
+
+        # ③ 全选 + 复制 + 粘贴 一圈（证明另外两个条目也真通，而不只是绑定在）
+        code_menu.invoke(3)              # 全选
+        code_menu.invoke(1)              # 复制
+        gui._room_code_var.set("")
+        gui._room_code_entry.update()
+        code_menu.invoke(2)              # 粘贴
+        assert gui._room_code_var.get() == "AB12CD34", \
+            f"全选→复制→粘贴 之后内容不对：{gui._room_code_var.get()!r}"
+        print(f"  ✓ ③ 全选→复制→粘贴 一圈通过 → {gui._room_code_var.get()!r}")
+
+        # ④ add=\"+\" 回归：右键绑定不得顶掉「打字:」框原有的 <Return>/<Escape>
+        assert gui._text_entry.bind("<Return>"), "右键绑定把 <Return> 顶掉了"
+        assert gui._text_entry.bind("<Escape>"), "右键绑定把 <Escape> 顶掉了"
+        print("  ✓ ④ 右键绑定没有覆盖原有的 <Return>/<Escape>")
+        return True
+    finally:
+        try:
+            gui._root.destroy()
+        except Exception:
+            pass
+
+
 def main() -> int:
     cases = [
         # 一句话：增量 → 增量 → 终版，应只占 1 条气泡
@@ -383,6 +448,11 @@ def main() -> int:
         all_ok &= test_room_generate_button()
     except AssertionError as exc:
         print(f"  ❌ 「随机生成」房间码按钮失败：{exc}")
+        all_ok = False
+    try:
+        all_ok &= test_entry_right_click_menu()
+    except AssertionError as exc:
+        print(f"  ❌ 输入框右键菜单失败：{exc}")
         all_ok = False
     for i, (events, expect) in enumerate(cases, 1):
         print(f"用例 {i}:")

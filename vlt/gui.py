@@ -878,6 +878,40 @@ class TranslationGUI:
         ttk.Separator(parent, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y,
                                                        padx=12, pady=5)
 
+    def _attach_edit_menu(self, widget) -> None:
+        """给文本输入控件挂右键菜单（剪切/复制/粘贴/全选）。
+
+        Tk 的 Entry/Text 在 Windows 上天生没有右键菜单 —— Ctrl+C/V 能用只是因为 Tk 绑了
+        虚拟事件 `<<Copy>>` / `<<Paste>>`，鼠标用户根本没有入口（用户实测报「右键没有复制
+        粘贴」）。这里统一走 Tk 的虚拟事件 `<<Cut>>/<<Copy>>/<<Paste>>/<<SelectAll>>`，
+        Entry 与 Text 通用，**不自己读写剪贴板**（虚拟事件已经处理了选区/插入点/只读等边界）。
+        弹菜单失败只留痕，绝不能让一个右键把界面搞崩。
+        """
+        try:
+            menu = tk.Menu(widget, tearoff=0, bg=SURFACE, foreground=TEXT,
+                           activebackground=ACCENT, activeforeground="#ffffff", bd=0)
+            for label, action in ((t("剪切"), "<<Cut>>"), (t("复制"), "<<Copy>>"),
+                                  (t("粘贴"), "<<Paste>>"), (t("全选"), "<<SelectAll>>")):
+                menu.add_command(label=label,
+                                 command=lambda a=action: widget.event_generate(a))
+            # 存到控件属性上，别让 Tk 把它当垃圾回收掉（局部变量被 GC 后菜单会变空白/点了没反应）
+            widget._edit_menu = menu
+
+            def _popup(event) -> None:
+                try:
+                    widget.focus_set()          # 否则粘贴会落到别的控件上去
+                    menu.tk_popup(event.x_root, event.y_root)
+                except Exception as exc:  # noqa: BLE001 — 一个右键不该把界面搞崩
+                    print(f"[ui] ⚠️ 右键菜单失败：{type(exc).__name__}: {exc}", flush=True)
+                finally:
+                    menu.grab_release()
+
+            # add="+"：别覆盖控件自己已有的绑定（如「打字:」框的 <Return>/<Escape>）
+            widget.bind("<Button-3>", _popup, add="+")
+        except Exception as exc:  # noqa: BLE001 — 挂菜单失败也不该拦住建窗
+            print(f"[ui] ⚠️ 挂右键菜单失败（不影响输入）：{type(exc).__name__}: {exc}",
+                  flush=True)
+
     def _build_controls(self) -> None:
         """第一行 = 会话控制：开/停 | 方向 | 语言对。VR 里最高频的操作全在这行。"""
         ctrl = ttk.Frame(self._root, padding=(14, 12, 14, 8))
@@ -1629,6 +1663,7 @@ class TranslationGUI:
                                     width=34, style="Key.TEntry")
         self._key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         self._key_entry.bind("<Return>", lambda _e: self._on_save_key())
+        self._attach_edit_menu(self._key_entry)      # 右键剪切/复制/粘贴（key 只能整串粘贴，最需要它）
         self._key_status = ttk.Label(body, text="", style="Dim.TLabel",
                                      justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._key_status.pack(anchor=tk.W)
@@ -1858,6 +1893,7 @@ class TranslationGUI:
             bg=SURFACE, fg=TEXT, insertbackground=TEXT, selectbackground=ACCENT,
             selectforeground="#ffffff", relief=tk.FLAT, highlightthickness=1,
             highlightbackground=BORDER, highlightcolor=ACCENT, font=FONT_UI)
+        self._attach_edit_menu(self._glossary_text)   # 右键剪切/复制/粘贴（词库是多行文本）
         # 滚动条**先**占住右侧（它压不动），词库框后打包并 fill=X expand 吸收压缩；
         # 顺序反过来窗口变窄时滚动条会被挤成 1px。样式要显式引用，否则是 clam 的浅灰。
         gloss_sb = ttk.Scrollbar(gloss_box, orient=tk.VERTICAL, style="Vertical.TScrollbar",
@@ -1899,9 +1935,11 @@ class TranslationGUI:
         self._room_code_var = tk.StringVar(value=self._room_cfg.room_code)
         code_entry = ttk.Entry(form, textvariable=self._room_code_var, width=12,
                                style="Key.TEntry", font=FONT_UI)
+        self._room_code_entry = code_entry      # 留引用：右键菜单/自动化测试都要拿到它
         code_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
         code_entry.bind("<Return>", lambda _e: self._on_room_field_change())
         code_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+        self._attach_edit_menu(code_entry)      # 右键粘贴：房间码是从对方那里复制来的，最常用的就是粘贴
         self._room_gen_btn = ttk.Button(form, text=t("随机生成"), command=self._on_room_generate)
         self._room_gen_btn.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
@@ -1910,9 +1948,11 @@ class TranslationGUI:
         self._room_nick_var = tk.StringVar(value=self._room_cfg.nickname)
         nick_entry = ttk.Entry(form, textvariable=self._room_nick_var, width=12,
                                style="Key.TEntry", font=FONT_UI)
+        self._room_nick_entry = nick_entry
         nick_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         nick_entry.bind("<Return>", lambda _e: self._on_room_field_change())
         nick_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+        self._attach_edit_menu(nick_entry)
 
         ttk.Label(body, text=t("和填了同一个房间码的人互相看到对方说的话；只有你自己说的话会被发出去。"),
                   style="Muted.TLabel", justify=tk.LEFT,
@@ -3039,6 +3079,7 @@ class TranslationGUI:
         self._text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self._text_entry.bind("<Return>", self._on_text_enter)
         self._text_entry.bind("<Escape>", lambda _e: self._text_var.set(""))
+        self._attach_edit_menu(self._text_entry)
         self._send_btn = ttk.Button(row, text=t("发送"),
                                     width=_char_width_for(t("发送"), FONT_UI, 8),
                                     command=self._send_typed)
