@@ -337,6 +337,7 @@ class DesktopOverlay:
         self._own_root = root is None     # 自建的 root 由我们负责 destroy
         self._pump = root is None         # 自建 root → 没有主循环，tick() 里自己泵事件
         self._win: Any = None
+        self._native: Any = None          # 原生窗（Wayland layer-shell / X11 ARGB）；None = Tk 那条腿
         self._label: Any = None
         self._photo: Any = None           # ⚠️ 必须留引用：PhotoImage 被 GC = 窗口变空白
         self._hwnd = 0
@@ -362,7 +363,11 @@ class DesktopOverlay:
         """建窗 → 找目标窗口 → 贴上去。
 
         找不到目标窗口**也算成功**（退化成 `cfg.pos` 绝对定位，桌面玩家没开游戏时
-        照样能用来练手/摆位置）；只有 Tk 起不来这类硬失败才返回 False。
+        照样能用来练手/摆位置）；只有窗口根本建不起来这类硬失败才返回 False。
+
+        窗口后端的选择：`backend=native/wayland/x11` 或 `auto` 且门面能给出原生窗
+        （Wayland layer-shell，逐像素透明）→ 用它；否则回落 Tk（Windows 色键 /
+        X11 形状蒙版兜底 / GNOME 等没有 layer-shell 的合成器）。
         """
         if self._started:
             return True
@@ -378,24 +383,31 @@ class DesktopOverlay:
             self.available = True
             return True
 
-        try:
-            import tkinter as tk
-        except Exception as exc:  # noqa: BLE001 — 没有 Tk 就没有桌面字幕这条腿
-            print(f"[desktop] ❌ 本机没有 Tk（tkinter 不可用）：{type(exc).__name__}: {exc}")
-            self.available = False
-            return False
-        try:
-            if self._root is None:
-                self._root = tk.Tk()
-                self._own_root = True
-                self._pump = True
-                self._root.withdraw()      # 只要字幕窗，不要那个空白主窗
-            self._build_window(tk)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[desktop] ❌ 建窗失败：{type(exc).__name__}: {exc}")
-            self.available = False
-            self.close()
-            return False
+        if self.cfg.backend != "tk":
+            self._native = self._create_native_window()
+            if self._native is None and self.cfg.backend in ("native", "wayland", "x11"):
+                print(f"[desktop] ⚠️ backend={self.cfg.backend} 但原生窗建不起来"
+                      f" → 自动回落到 Tk")
+
+        if self._native is None:
+            try:
+                import tkinter as tk
+            except Exception as exc:  # noqa: BLE001 — 没有 Tk 就没有桌面字幕这条腿
+                print(f"[desktop] ❌ 本机没有 Tk（tkinter 不可用）：{type(exc).__name__}: {exc}")
+                self.available = False
+                return False
+            try:
+                if self._root is None:
+                    self._root = tk.Tk()
+                    self._own_root = True
+                    self._pump = True
+                    self._root.withdraw()      # 只要字幕窗，不要那个空白主窗
+                self._build_window(tk)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[desktop] ❌ 建窗失败：{type(exc).__name__}: {exc}")
+                self.available = False
+                self.close()
+                return False
 
         self._started = True
         self.available = True
@@ -405,10 +417,37 @@ class DesktopOverlay:
         self._dirty = True
         self._redraw()                     # 先出一帧空面板：用户立刻能看见窗在哪、好不好拖
         print(f"[desktop] ✅ 桌面字幕已起来：mode={self.cfg.mode} anchor={self.cfg.anchor} "
+              f"后端={'原生' if self._native is not None else 'Tk'} "
               f"面板={self.cfg.size_px[0]}x{self.cfg.size_px[1]} 透明度={self.cfg.alpha:.2f} "
               f"鼠标穿透={'开' if self.cfg.click_through else '关'} "
               f"跟随={'开' if self.cfg.follow else '关'} 位置={self.position}")
         return True
+
+    def _create_native_window(self) -> Any:
+        """问门面要原生叠加窗（Linux：Wayland layer-shell / X11 ARGB）；拿不到返回 None。
+
+        建不起来的原因由后端自己打日志（`vlt/platform/linux.py`）；这里只兜异常。
+        """
+        from ..platform import create_desktop_window
+        try:
+            return create_desktop_window(
+                size=tuple(self.cfg.size_px),
+                alpha=self.cfg.alpha,
+                click_through=self.cfg.click_through,
+                on_drag_end=self._native_drag_end,
+                backend=self.cfg.backend,
+            )
+        except Exception as exc:  # noqa: BLE001 — 原生窗失败不许带崩界面
+            print(f"[desktop] ⚠️ 原生窗创建异常（回落 Tk）：{type(exc).__name__}: {exc}")
+            return None
+
+    def _native_drag_end(self, x: int, y: int) -> None:
+        """原生窗拖动落点：与 Tk 的 `_on_drag_end` 走同一套「折算成锚点+偏移」逻辑。"""
+        self.user_pos = (int(x), int(y))
+        changed = self.snap_to_config(self.user_pos)
+        if changed:
+            print(f"[desktop] 拖动落点 {self.user_pos} → 折算成配置 {changed}"
+                  f"（点「锁定位置」后写回 config.yaml）")
 
     def _build_window(self, tk: Any) -> None:
         """无边框 + 置顶 + 色键透明 + 鼠标穿透。每一步失败都留一行日志再降级。"""
@@ -457,7 +496,14 @@ class DesktopOverlay:
 
     def _apply_exstyles(self) -> None:
         """鼠标穿透 + 不抢焦点 + 不进 alt-tab（能力在平台门面上，缺就降级并留痕）。"""
-        if self._win is None or self.dry_run:
+        if self.dry_run:
+            return
+        want = bool(self.cfg.click_through) and not self._dragging
+        if self._native is not None:
+            # 原生 Wayland 窗：键盘交互在建面时就是 none（不抢焦点）；穿透 = 输入区置空。
+            self._native.set_click_through(want)
+            return
+        if self._win is None:
             return
         from ..platform import set_click_through, set_tool_window
         if not self._hwnd:
@@ -467,13 +513,19 @@ class DesktopOverlay:
         if not set_tool_window(self._hwnd):
             print("[desktop] ⚠️ 「不抢焦点/不进任务栏」没设上（本平台可能不支持）"
                   " → 点字幕可能把焦点从游戏里抢走")
-        want = bool(self.cfg.click_through) and not self._dragging
         if not set_click_through(self._hwnd, want):
             print(f"[desktop] ⚠️ 鼠标穿透（{'开' if want else '关'}）没设上"
                   f"（本平台可能不支持） → 字幕会挡住鼠标")
 
     def close(self) -> None:
         """销毁自己的窗口；自建的 root 一并销毁。重复调用不报错。"""
+        native, self._native = self._native, None
+        if native is not None:
+            try:
+                native.close()
+            except Exception as exc:  # noqa: BLE001 — 关窗失败不值得打断退出流程
+                print(f"[desktop] ⚠️ 销毁原生叠加窗时报错（已忽略）："
+                      f"{type(exc).__name__}: {exc}")
         win, self._win = self._win, None
         self._label = None
         self._photo = None
@@ -565,10 +617,19 @@ class DesktopOverlay:
     def _redraw(self) -> None:
         self._dirty = False
         try:
-            frame = self._composite(self._render())
+            panel = self._render()
         except Exception as exc:  # noqa: BLE001 — 出图失败不许打断翻译腿，保留上一帧
             print(f"[desktop] ⚠️ 出图失败（保留上一帧）：{type(exc).__name__}: {exc}")
             return
+        if self._native is not None:
+            try:
+                self._native.set_panel(panel, self.cfg.alpha)
+                self._frames += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"[desktop] ⚠️ 原生窗贴图失败（保留上一帧）："
+                      f"{type(exc).__name__}: {exc}")
+            return
+        frame = self._composite(panel)
         if self.dry_run:
             path = self._frames_dir / f"frame_{self._frames + 1:03d}.png"
             try:
@@ -605,6 +666,13 @@ class DesktopOverlay:
         if not self._started:
             return
         if self.dry_run:
+            if self._dirty:
+                self._redraw()
+            return
+        if self._native is not None:
+            self._reload_config()
+            self._follow_game()
+            self._native.tick()
             if self._dirty:
                 self._redraw()
             return
@@ -648,10 +716,16 @@ class DesktopOverlay:
         return (0, 0, 1920, 1080)
 
     def _apply_position(self) -> None:
-        if self._win is None:
-            return
         w, h = (int(v) for v in self.cfg.size_px)
         x, y = resolve_position(self.cfg, self._game_rect, (w, h), self._work_area())
+        if self._native is not None:
+            try:
+                self._native.move(x, y)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[desktop] ⚠️ 移动原生窗失败：{type(exc).__name__}: {exc}")
+            return
+        if self._win is None:
+            return
         try:
             # ⚠️ 偏移必须写成 "+x+y"：Tk 把 "-50" 当成"距右边 50"，只有 "+-50" 才是
             #    绝对坐标 -50（多屏时副屏在左侧，坐标是负的）。
@@ -741,9 +815,14 @@ class DesktopOverlay:
         """True = 临时关掉鼠标穿透，好让用户把字幕拖到想要的位置。"""
         on = bool(on)
         self._dragging = on
-        if self.dry_run or self._win is None:
+        if self.dry_run:
             return
-        self._apply_exstyles()
+        if self._native is not None:
+            self._native.set_draggable(on)
+        elif self._win is not None:
+            self._apply_exstyles()
+        else:
+            return
         restored = "开" if (self.cfg.click_through and not on) else "关"
         print(f"[desktop] {'已解锁拖动（鼠标穿透临时关闭）' if on else '已锁定位置'}"
               f" → 鼠标穿透={restored}")
@@ -818,7 +897,12 @@ class DesktopOverlay:
     def set_alpha(self, alpha: Any) -> None:
         """整窗透明度（用户要的「可改透明度」）。夹到 0.2~1.0。"""
         self.cfg.alpha = clamp_alpha(alpha)
-        if self.dry_run or self._win is None:
+        if self.dry_run:
+            return
+        if self._native is not None:
+            self._native.set_alpha(self.cfg.alpha)
+            return
+        if self._win is None:
             return
         try:
             self._win.attributes("-alpha", self.cfg.alpha)
@@ -874,6 +958,11 @@ class DesktopOverlay:
         if (new.size_px, new.anchor, new.offset, new.pos,
                 new.attach_to_game) != (old.size_px, old.anchor, old.offset,
                                         old.pos, old.attach_to_game):
+            if self._native is not None and new.size_px != old.size_px:
+                try:
+                    self._native.set_size(tuple(new.size_px))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[desktop] ⚠️ 原生窗改尺寸失败：{type(exc).__name__}: {exc}")
             self._apply_position()
         self._last_sig = None                        # 视觉参数可能变了 → 下一跳重新出图
         self._dirty = True
@@ -885,6 +974,9 @@ class DesktopOverlay:
 
     def _apply_alpha_only(self) -> None:
         """热重载里改透明度用：与 set_alpha 的区别是**不动 cfg**（已经换过了）。"""
+        if self._native is not None:
+            self._native.set_alpha(self.cfg.alpha)
+            return
         if self._win is None:
             return
         try:
@@ -899,6 +991,11 @@ class DesktopOverlay:
     @property
     def position(self) -> tuple[int, int]:
         """当前窗口的屏幕坐标；没起窗时返回按配置推算的位置。"""
+        if self._native is not None:
+            try:
+                return (int(self._native.position[0]), int(self._native.position[1]))
+            except Exception:  # noqa: BLE001 — 窗口正在销毁：退回推算值
+                pass
         if self._win is not None:
             try:
                 return (int(self._win.winfo_x()), int(self._win.winfo_y()))

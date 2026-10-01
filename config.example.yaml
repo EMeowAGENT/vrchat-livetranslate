@@ -222,10 +222,18 @@ overlay:
 #
 # 开了之后：勾选界面上的「桌面字幕」，字幕窗会立刻出现；「微调 ▸」里有透明度滑块和
 # 「解锁拖动 / 锁定位置」——鼠标穿透是默认开的（不挡你点 VRChat），要拖动得先解锁。
+#
+# 后端（`backend`）：Wayland 会话（niri / sway / Hyprland / KDE 等实现了 layer-shell 的
+# 合成器）自动用**原生 layer-shell 窗**——逐像素透明（真圆角、底板半透明）、overlay 层
+# 置顶、协议级鼠标穿透；GNOME(Mutter) 等没有 layer-shell 的合成器、以及 X11 会话自动
+# 回落到 Tk 窗（X11 上用形状蒙版抠掉面板外的底色）。
 desktop_overlay:
   enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
   mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
                              # latest=只显示最新一句（更像歌词）
+  backend: auto              # auto=有原生就用（Wayland→原生 layer-shell）| native=显式要求原生
+                             #   （回落 Tk 时留一行警告）| tk=强制 Tk | wayland / x11=强制指定
+                             #   某一原生后端（建不起来自动回落 Tk 并留日志；启动时生效）
   attach_to_game: true       # true=贴在 VRChat 窗口上并**跟随**它的移动/缩放
                              #      找不到窗口时自动退化成 pos 的绝对屏幕坐标（会留日志）
   game_title: VRChat         # 目标窗口标题（不区分大小写的子串匹配）

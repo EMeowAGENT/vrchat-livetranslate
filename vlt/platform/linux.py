@@ -491,8 +491,8 @@ def assert_not_default_output_candidate(node_name: str) -> tuple[bool, str]:
     return True, f"{node_name!r} 的类 {media_class!r} 不在默认输出候选里（安全）"
 
 
-def _test_process_guard() -> str | None:
-    """防呆：**测试进程里拒绝真的声明虚拟声卡**。
+def _test_process_guard(action: str = "真的声明虚拟声卡") -> str | None:
+    """防呆：**测试进程里拒绝做「会碰用户会话」的真实操作**（默认：声明虚拟声卡）。
 
     写这个不是洁癖 —— 实测踩过四次：单元测试只桩住了 Windows 侧
     （`E.pick_output_device` / `E.VirtualMic`），于是 Linux 分支绕过打桩、
@@ -501,6 +501,9 @@ def _test_process_guard() -> str | None:
     这里只是**最后一道保险**：万一又漏了，宁可这条腿不启用，也不能动用户的音频。
 
     正常使用（`python -m vlt.gui` / `-m vlt.app`）永远不会命中这个判断。
+
+    `action` 给第二类用途：桌面字幕的原生窗（测试进程建窗会连到**用户正在用的
+    合成器**上 —— 实测 GUI 用例在 Wayland 机器上真的弹出了一块 layer 面）。
     """
     main = sys.modules.get("__main__")
     path = getattr(main, "__file__", None)
@@ -508,7 +511,7 @@ def _test_process_guard() -> str | None:
         return None
     p = Path(path)
     if p.name.startswith("test_") or "tests" in p.parts:
-        return f"检测到测试进程（{p.name}）→ 拒绝真的声明虚拟声卡"
+        return f"检测到测试进程（{p.name}）→ 拒绝{action}"
     return None
 
 
@@ -1026,8 +1029,9 @@ def _wayland_note() -> None:
         return
     _WAYLAND_NOTE_DONE = True
     if os.environ.get("WAYLAND_DISPLAY"):
-        print("[desktop] ⚠️ 检测到 Wayland 会话（界面经 XWayland）：窗口位置/置顶/透明度"
-              "由合成器决定——niri 实测按平铺管理、忽略透明度，字幕跟随可能不生效；"
+        print("[desktop] ℹ️ 检测到 Wayland 会话：字幕窗优先走原生 layer-shell 后端；"
+              "本组 X11 调用只用来找 VRChat 窗口、读几何。若回落到 Tk（合成器不支持 "
+              "layer-shell），位置/透明度由合成器决定（niri 实测按平铺管理、忽略透明度）；"
               "边界见 docs/GUIDE.linux.md「桌面字幕」")
 
 
@@ -1298,3 +1302,60 @@ def screen_work_area() -> tuple[int, int, int, int]:
     if a is not None and a.width > 0 and a.height > 0:
         return (0, 0, int(a.width), int(a.height))
     return (0, 0, 1920, 1080)
+
+
+# ---------------------------------------------------------------- 桌面叠加窗：原生窗
+
+
+def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
+                          click_through: bool = True,
+                          on_drag_end: Any = None, backend: str = "auto") -> Any:
+    """给桌面字幕开一个**原生窗**（Wayland：layer-shell + wl_shm，逐像素透明）。
+
+    返回 `None` 表示「本会话用不了原生窗」，调用方（`desktop_overlay`）回落 Tk：
+      * `backend="tk"`：显式要求 Tk；
+      * 没有 `WAYLAND_DISPLAY`（X11 会话）/ 合成器没有 layer-shell（GNOME/Weston）
+        / libwayland 不可用 / 建窗失败 → 也回落。
+    每一步的**原因**都在这里/后端模块里打出来（门面与共享模块不吭声）。
+
+    X11 原生窗（ARGB visual）还没接入 —— 在那之前 X11 会话继续走 Tk。
+    """
+    if backend == "tk":
+        return None
+    blocked = _test_process_guard("建原生桌面窗（会连到用户正在用的合成器）")
+    if blocked:
+        print(f"[desktop] ⚠️ {blocked} → 回落 Tk", flush=True)
+        return None
+
+    order: list[str] = []
+    if backend in ("auto", "native"):
+        if os.environ.get("WAYLAND_DISPLAY"):
+            order.append("wayland")
+        # （X11 原生窗待接入：`vlt/platform/x11.py`；在那之前 X11 会话保持 Tk 行为）
+    elif backend == "wayland":
+        order.append("wayland")
+    elif backend == "x11":
+        print("[desktop] ⚠️ backend=x11：X11 原生窗尚未接入 → 本次回落 Tk", flush=True)
+        return None
+
+    for kind in order:
+        if kind != "wayland":  # pragma: no cover —— 目前只有这一条原生腿
+            continue
+        try:
+            from .wayland import LayerShellWindow
+        except Exception as exc:  # noqa: BLE001 —— 缺库/缺文件都不该带崩进程
+            print(f"[desktop] ⚠️ 加载原生 Wayland 后端失败（回落 Tk）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            continue
+        try:
+            win = LayerShellWindow(size=size, alpha=alpha, click_through=click_through,
+                                   on_drag_end=on_drag_end)
+        except Exception as exc:  # noqa: BLE001 —— 构造异常也走回落，不冒给界面
+            print(f"[desktop] ⚠️ 建原生 Wayland 窗异常（回落 Tk）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            continue
+        if not win.available:
+            win.close()
+            continue
+        return win
+    return None
