@@ -125,11 +125,7 @@ jobs:
           # ⚠️ 关掉自动附加的「What's Changed / New Contributors」（用户 2026-09 明确要求）：
           #    说明**只留「这版有什么」**这一段，自动附的那两节与 Full Changelog 都不要。
           #    所以每个版本都必须手写上面这段 body —— 别指望 GitHub 替你列 PR。
-          # ⚠️ 本分支（房间/测试线）的发布一律标 prerelease：/releases/latest 天然排除预发布，
-          #    测试版不会被推送给稳定版用户；转正式版时再改回 false。
-          prerelease: true
           generate_release_notes: false
-          # ⚠️ TODO(房间 beta 发布时)：下面这段是 v0.5.1 的说明，发房间测试版前必须重写成本版内容。
           body: |
             ### 这版有什么
 
