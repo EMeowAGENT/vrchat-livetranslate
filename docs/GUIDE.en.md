@@ -317,10 +317,13 @@ as SteamVR's `setOverlayAlpha` on Windows.
 * **Config**: the `desktop_overlay:` section of `config.yaml` (`mode: latest` turns it into a
   lyric-style single line). Visual parameters (font / size / colours / lines / show-source)
   **inherit from `overlay:`** by default; override any of them in `desktop_overlay:`.
-* **Linux**: on an **X11 session** it matches Windows (window search / follow / click-through /
-  drag persistence / opacity); on a **Wayland session** (niri etc., the GUI runs through XWayland)
-  window placement and opacity are decided by the compositor and following will not work — see the
-  "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for the exact boundaries.
+* **Linux**: on a **Wayland session** (niri / sway / Hyprland / KDE — compositors implementing
+  layer-shell) the caption runs as a **native overlay window**: per-pixel transparency (real
+  rounded corners, translucent plate), topmost, follows the game window, protocol-level
+  click-through, drag persistence — the same as Windows. X11 sessions and compositors without
+  layer-shell (GNOME/Weston) fall back to a Tk window (a per-pixel-transparent native X11 window
+  is not implemented yet). `desktop_overlay.backend` forces a specific path (handy when debugging
+  rendering) — see the "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for boundaries.
 
 > ⚠️ VRChat must be in **windowed / borderless** mode (Unity `Fullscreen mode = 3`, the VRChat default).
 > In exclusive fullscreen any third-party topmost window gets covered — that's not a bug of this app.
