@@ -868,6 +868,7 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 #     被 WM 管理的窗口则是 WM 框（用于「排除自己」时同样正确）。
 
 _MAX_SEARCH_DEPTH = 6         # find_window_by_title 的树深上限（帧/客户一层就够，留余量）
+_SHAPE_BOUNDING = 0           # SHAPE_KIND：0=Bounding 1=Clip 2=Input
 _SHAPE_INPUT = 2              # SHAPE_KIND：0=Bounding 1=Clip 2=Input
 _SHAPE_SET = 0                # SHAPE_OP：0=Set
 _IS_VIEWABLE = 2              # XWindowAttributes.map_state
@@ -990,6 +991,12 @@ def _load_x11() -> tuple[Any, Any, Any] | None:
         xext.XShapeCombineMask.argtypes = [
             ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_int]
+        x11.XCreateBitmapFromData.restype = ctypes.c_ulong
+        x11.XCreateBitmapFromData.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+            ctypes.c_uint, ctypes.c_uint]
+        x11.XFreePixmap.restype = ctypes.c_int
+        x11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
         dpy = x11.XOpenDisplay(None)
         if not dpy:
             _X11_DEAD = True
@@ -1246,6 +1253,45 @@ def set_click_through(hwnd: int, on: bool) -> bool:
         return True
 
     return _guarded(x11, dpy, call) is not None
+
+
+def set_window_shape(hwnd: int, mask: bytes, width: int, height: int) -> bool:
+    """给窗口设/换 1 位**形状蒙版**（X Shape Bounding）；蒙版外的像素不画、点击也不收。
+
+    `mask` 口径：每行 `ceil(width/8)` 字节、**LSB-first**（最左像素 = 最低位）、行序
+    自上而下 —— 即 `np.packbits(..., bitorder="little")` / XBM 的打包方式
+    （`vlt/output/desktop_overlay.py:alpha_mask_bits()` 产的就是它）。Tk 回落路径用它
+    抠掉面板外的键色底（Windows 的 Tk 有色键，Linux 只能靠蒙版）。
+
+    ⚠️ 尺寸变了要**重设**（形状不会跟着窗口缩放）；尺寸对不上的蒙版比不设更糟（窗口
+    会被裁成花形），所以字节数不够直接拒绝。
+    """
+    loaded = _load_x11()
+    if not loaded:
+        return False
+    x11, xext, dpy = loaded
+    wid = int(hwnd)
+    w, h = int(width), int(height)
+    if w <= 0 or h <= 0 or not mask or len(mask) < ((w + 7) // 8) * h:
+        return False
+    if _attrs(x11, dpy, wid) is None:      # 句柄已失效：别喂 Xlib 出错误日志
+        return False
+    buf = ctypes.create_string_buffer(bytes(mask), len(mask))   # 保活到请求吐给服务器
+
+    def call() -> bool:
+        pix = x11.XCreateBitmapFromData(dpy, ctypes.c_ulong(wid),
+                                        ctypes.cast(buf, ctypes.c_void_p),
+                                        ctypes.c_uint(w), ctypes.c_uint(h))
+        if not pix:
+            return False
+        try:
+            xext.XShapeCombineMask(dpy, ctypes.c_ulong(wid), _SHAPE_BOUNDING,
+                                   0, 0, ctypes.c_ulong(pix), _SHAPE_SET)
+        finally:
+            x11.XFreePixmap(dpy, ctypes.c_ulong(pix))
+        return True
+
+    return _guarded(x11, dpy, call) is True
 
 
 def set_tool_window(hwnd: int) -> bool:

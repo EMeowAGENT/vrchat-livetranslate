@@ -170,6 +170,28 @@ def test_clamp_alpha_bounds() -> None:
 
 
 # ---------------------------------------------------------------- 5. from_dict
+def test_alpha_mask_bits() -> None:
+    """形状蒙版字节口径：LSB-first、行末补零、阈值 128、只看面板自身 alpha。"""
+    from PIL import Image
+
+    from vlt.output.desktop_overlay import alpha_mask_bits
+    # 9 像素宽（跨字节边界）2 行：第一行前 4 个实心，第二行全空
+    img = Image.new("RGBA", (9, 2), (0, 0, 0, 0))
+    for x in range(4):
+        img.putpixel((x, 0), (255, 0, 0, 255))
+    bits = alpha_mask_bits(img)
+    assert bits == b"\x0f\x00\x00\x00", bits     # LSB-first：0b0000_1111 → 0x0f
+    # 阈值：127 不算、128 算
+    img2 = Image.new("RGBA", (8, 1), (0, 0, 0, 0))
+    img2.putpixel((0, 0), (0, 0, 0, 127))
+    img2.putpixel((7, 0), (0, 0, 0, 128))
+    assert alpha_mask_bits(img2) == b"\x80", alpha_mask_bits(img2)
+    # 宽度不是 8 的倍数也照打包（行末补零）
+    img3 = Image.new("RGBA", (3, 1), (0, 0, 0, 255))
+    assert alpha_mask_bits(img3) == b"\x07", alpha_mask_bits(img3)
+    print("  alpha_mask_bits（LSB-first / 行补零 / 阈值 128）OK")
+
+
 def test_from_dict_defaults_inherit_and_override() -> None:
     # a) 缺段 → 全默认
     c = DesktopOverlayConfig.from_dict({})
@@ -681,6 +703,7 @@ def test_facade_safe_defaults_without_backend() -> None:
         assert platform.is_window(1234) is False
         assert platform.set_click_through(1234, True) is False
         assert platform.set_tool_window(1234) is False
+        assert platform.set_window_shape(1234, b"\x00" * 25, 200, 100) is False   # 蒙版同样兜底
         assert platform.top_level_hwnd(4321) == 4321
         assert platform.screen_work_area() == (0, 0, 1920, 1080)
         assert platform.monitor_work_area(1234) == (0, 0, 1920, 1080)
@@ -755,7 +778,7 @@ def test_shared_module_stays_platform_clean() -> None:
                 "libwayland", "libX11", "zwlr_"):     # 原生后端只能走门面
         assert bad not in src, f"desktop_overlay.py 里出现了平台独占字样：{bad!r}"
     for name in ("desktop_window_backend", "find_game_window", "window_client_rect",
-                 "is_window", "set_click_through", "set_tool_window",
+                 "is_window", "set_click_through", "set_tool_window", "set_window_shape",
                  "top_level_hwnd", "screen_work_area", "monitor_work_area",
                  "create_desktop_window"):
         assert callable(getattr(platform, name, None)), f"platform 门面缺 {name}"
@@ -1282,6 +1305,7 @@ if __name__ == "__main__":
     test_clamp_stays_on_secondary_monitor()
     test_resolve_position_falls_back_to_cfg_pos()
     test_clamp_alpha_bounds()
+    test_alpha_mask_bits()
     test_from_dict_defaults_inherit_and_override()
     test_backend_config()
     test_native_window_wiring()

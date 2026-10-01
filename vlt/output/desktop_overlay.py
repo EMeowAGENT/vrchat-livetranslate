@@ -13,8 +13,10 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
     `create_desktop_window` 拿窗口对象，此后只按窗口契约调用
     （`vlt/platform/base.py:DesktopWindow`）；
   * **Tk 回落**（Windows 色键 / 原生窗用不了的会话）：
-    `overrideredirect` 无边框 + `-topmost` + `-alpha`；`-transparentcolor` 色键把
-    RGBA 面板外的圆角抠掉（Windows 专属属性）；
+    `overrideredirect` 无边框 + `-topmost` + `-alpha`；Windows 用 `-transparentcolor`
+    色键、Linux 用 1 位**形状蒙版**（`alpha_mask_bits()` → `set_window_shape`）把
+    RGBA 面板外的键色底抠掉（圆角是 1 位的、会有锯齿；逐像素半透明做不到 ——
+    那是原生窗的事）；
 * **平台能力一律走 `vlt.platform` 门面**（找窗口 / 客户区 / 鼠标穿透 / 工作区 / 原生窗）：
   本文件里不许出现 Win32 调用，也不许直接 import 平台独占模块 —— 那是红灯门禁
   （`tests/test_desktop_overlay.py::test_shared_module_stays_platform_clean`；
@@ -25,6 +27,7 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
 """
 from __future__ import annotations
 
+import numpy as np
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -240,6 +243,23 @@ def clamp_alpha(a: Any) -> float:
     return max(ALPHA_MIN, min(ALPHA_MAX, v))
 
 
+def alpha_mask_bits(image: Image.Image, threshold: int = 128) -> bytes:
+    """RGBA 面板 → **1 位形状蒙版**的 LSB-first 打包字节（X11 `XCreateBitmapFromData` 口径）。
+
+    口径：`alpha >= threshold` 的像素算「实心」；每行按 8 像素一字节、**最左像素 = 最低位**、
+    行末补 0 到字节边界、行序自上而下 —— 与 `np.packbits(..., bitorder="little")` / XBM
+    完全一致。Tk 回落路径在 Linux 上用它把面板圆角外的键色底抠掉（`-transparentcolor`
+    是 Windows 专属属性，Linux 的 Tk 根本没有）。
+
+    ⚠️ 用**面板自己的 alpha**，不乘整层 `cfg.alpha`：整层透明度由 Tk 的 `-alpha`
+    （`_NET_WM_WINDOW_OPACITY`）统一做 —— 乘进来的话 `alpha=0.3` 时没有像素过得了
+    128/0.3 的阈值，整个窗口会被蒙版裁没。形状与透明度是两件事。
+    """
+    rgba = np.asarray(image.convert("RGBA"))
+    solid = (rgba[..., 3] >= int(threshold)).astype(np.uint8)
+    return np.packbits(solid, axis=1, bitorder="little").tobytes()
+
+
 def _clamp_into_area(x: int, y: int, w: int, h: int,
                      area: tuple[int, int, int, int]) -> tuple[int, int]:
     """把 (x, y) 夹进可用屏幕区域。面板比区域还大时贴区域左上角（至少看得见）。"""
@@ -361,6 +381,8 @@ class DesktopOverlay:
         self._area_fallback_logged = False
         self._rect_missing_logged = False
         self._exstyles_dirty = False
+        self._need_shape_mask = False     # Tk 回落 + 没色键（Linux）→ 每帧用形状蒙版抠底
+        self._shape_warned = False
 
     # ---------- 生命周期 ----------
     def start(self) -> bool:
@@ -470,8 +492,12 @@ class DesktopOverlay:
             try:
                 win.attributes(name, value)
             except tk.TclError as exc:
-                hint = ("底板会是不透明的一块" if name == "-transparentcolor"
-                        else "这一项按系统默认")
+                if name == "-transparentcolor":
+                    # Linux 的 Tk 没有色键 → 记下来，之后每帧用 1 位形状蒙版抠底
+                    self._need_shape_mask = True
+                    hint = "改用 1 位形状蒙版抠底（不行的话底板会是不透明的一块）"
+                else:
+                    hint = "这一项按系统默认"
                 print(f"[desktop] ⚠️ 窗口属性 {name} 没吃下（{exc}）→ {hint}，字幕仍可用")
         label = tk.Label(win, bd=0, highlightthickness=0, bg=TRANSPARENT_KEY)
         label.pack(fill="both", expand=True)
@@ -648,6 +674,33 @@ class DesktopOverlay:
             return
         if self._blit(frame):
             self._frames += 1
+            if self._need_shape_mask:
+                self._apply_shape_mask(panel)
+
+    def _apply_shape_mask(self, panel: Image.Image) -> None:
+        """Tk 回落路径的 Linux 补丁：把面板 alpha 转 1 位形状蒙版，抠掉键色底。
+
+        Windows 的 Tk 有 `-transparentcolor` 色键；Linux 的 Tk 没有 → 每帧用 X Shape
+        抠形（面板圆角外那圈键色底不再是不透明矩形；圆角本身是 1 位的、会有锯齿）。
+        **逐像素半透明做不到** —— 那是原生窗（Wayland layer-shell / X11 ARGB）的事。
+        尺寸变了蒙版要跟着重设 —— 每帧都重设，天然覆盖（set_window_shape 口径见此）。
+        """
+        if not self._hwnd or self._win is None:
+            return
+        from ..platform import set_window_shape
+        try:
+            mask = alpha_mask_bits(panel)
+            ok = set_window_shape(self._hwnd, mask, panel.size[0], panel.size[1])
+        except Exception as exc:  # noqa: BLE001 — 抠形失败不许打断出图
+            if not self._shape_warned:
+                self._shape_warned = True
+                print(f"[desktop] ⚠️ 形状蒙版失败（字幕仍可用，圆角外会是不透明底）："
+                      f"{type(exc).__name__}: {exc}")
+            return
+        if not ok and not self._shape_warned:
+            self._shape_warned = True
+            print("[desktop] ⚠️ 形状蒙版没设上（本平台可能不支持）"
+                  " → 圆角外会是不透明键色底")
 
     def _blit(self, frame: Image.Image) -> bool:
         if self._win is None or self._label is None:

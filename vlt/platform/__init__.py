@@ -28,7 +28,8 @@ __all__ = [
     "open_path", "find_cjk_font", "detect_ui_language",
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
-    "set_click_through", "set_tool_window", "top_level_hwnd", "screen_work_area",
+    "set_click_through", "set_tool_window", "set_window_shape",
+    "top_level_hwnd", "screen_work_area",
     "monitor_work_area", "create_desktop_window",
 ]
 
@@ -248,6 +249,17 @@ def set_click_through(hwnd: int, on: bool) -> bool:
 def set_tool_window(hwnd: int) -> bool:
     """标记为「不抢焦点 + 不进 alt-tab」的工具窗。返回是否设上了。"""
     return bool(_desktop_call("set_tool_window", False, hwnd))
+
+
+def set_window_shape(hwnd: int, mask: bytes, width: int, height: int) -> bool:
+    """给窗口设/换 1 位形状蒙版（蒙版外的像素不画、也不吃鼠标）。返回是否设上了。
+
+    Linux 的 **Tk 回落路径**用它抠掉面板外的键色底（Tk 没有 Windows 那种
+    `-transparentcolor`）：每帧把 RGBA 面板转成蒙版字节（口径见 `linux.set_window_shape`
+    与 `desktop_overlay.alpha_mask_bits`），尺寸对不上/句柄失效会被后端拒绝 → False，
+    调用方降级（留一行日志，不再重试刷屏）。本平台没实现（Windows）→ 同样 False。
+    """
+    return bool(_desktop_call("set_window_shape", False, hwnd, mask, width, height))
 
 
 def top_level_hwnd(widget_id: int) -> int:
