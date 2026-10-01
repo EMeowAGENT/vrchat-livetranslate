@@ -89,6 +89,7 @@ STRINGS: dict[str, str] = {
     "正在启动…": "Starting…",
     "已停止": "Stopped",
     "正在停止…": "Stopping…",
+    "已停止（上一次会话仍在收尾）": "Stopped (previous session still wrapping up)",
     "已切换为{target} → 中文": "Switched to {target} → Chinese",
 
     # ---- 设备扫描 / 选择 ----
