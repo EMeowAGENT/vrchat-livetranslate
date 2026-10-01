@@ -4037,11 +4037,15 @@ class TranslationGUI:
             btn.configure(text=t("解锁拖动"))
 
     def _push_desktop(self, force: bool = False) -> None:
-        """把聊天区最近几条推给桌面字幕（与手腕屏同一份内容）。"""
+        """把聊天区最近几条推给桌面字幕（与手腕屏同一份内容）。
+
+        ⚠️ 条目形状必须与 `_push_overlay` 一致（4 元组，带说话人昵称）：桌面字幕与手腕屏
+        共用 `overlay.render_conversation`，房间里的成员靠这个 label 才显示得出昵称。
+        """
         if self._desktop_out is None:
             return
         try:
-            entries = [(b.who, b.source, b.text) for b in self._bubbles[-8:]]
+            entries = [(b.who, b.source, b.text, b.label) for b in self._bubbles[-8:]]
             self._desktop_out.update_entries(entries, force=force)
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] 桌面字幕刷新失败：{type(exc).__name__}: {exc}", flush=True)
