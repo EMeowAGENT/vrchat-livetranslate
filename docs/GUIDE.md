@@ -442,9 +442,10 @@ Nekoya=猫屋
   「只显示最新一句」的歌词式）。视觉参数（字体 / 字号 / 配色 / 行数 / 是否显示原文）
   默认**继承 `overlay:` 段**，想单独给桌面字幕一套配色就在 `desktop_overlay:` 里覆写同名键。
 * **Linux**：**Wayland 会话**（niri / sway / Hyprland / KDE 等实现了 layer-shell 的合成器）
-  走**原生叠加窗**——逐像素透明（真圆角、底板半透明）、置顶跟随、协议级鼠标穿透、拖动落盘，
-  与 Windows 同款；X11 会话、以及没有 layer-shell 的合成器（GNOME/Weston）自动回落到 Tk 窗
-  （逐像素透明的原生 X11 窗待接入）。`desktop_overlay.backend` 可强制某条腿（排查渲染问题时
+  走**原生 layer-shell 窗**；**X11 会话**（含带 XWayland 的 GNOME/Weston）走**原生 ARGB
+  覆盖窗**——都是逐像素透明（真圆角、底板半透明）、置顶跟随、协议级鼠标穿透、拖动落盘，
+  与 Windows 同款（X11 的透明需要合成器，如 picom；没有时透明区显示为黑，日志有提醒）。
+  两条原生腿都建不起来时回落 Tk 窗。`desktop_overlay.backend` 可强制某条腿（排查渲染问题时
   很有用）——边界与排查见 [GUIDE.linux.md](GUIDE.linux.md) 的「桌面字幕」一节。
 
 > ⚠️ VRChat 必须是**窗口化 / 无边框窗口**（Unity 的 `Fullscreen mode = 3`，VRChat 默认就是）。

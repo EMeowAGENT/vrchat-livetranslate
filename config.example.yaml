@@ -224,10 +224,10 @@ overlay:
 # 「解锁拖动 / 锁定位置」——鼠标穿透是默认开的（不挡你点 VRChat），要拖动得先解锁。
 #
 # 后端（`backend`）：Wayland 会话（niri / sway / Hyprland / KDE 等实现了 layer-shell 的
-# 合成器）自动用**原生 layer-shell 窗**——逐像素透明（真圆角、底板半透明）、overlay 层
-# 置顶、协议级鼠标穿透；GNOME(Mutter) 等没有 layer-shell 的合成器、以及 X11 会话自动
-# 回落到 Tk 窗（Windows 靠色键透明；X11 会话与没有 layer-shell 的合成器也走 Tk ——
-# 逐像素透明的原生 X11 窗待接入）。
+# 合成器）自动用**原生 layer-shell 窗**；X11 会话（含带 XWayland 的 GNOME/Weston）用
+# **原生 ARGB 覆盖窗**——两者都是逐像素透明（真圆角、底板半透明）、置顶、协议级鼠标穿透。
+# X11 的透明需要合成器（picom 等）：没检测到时启动日志会提醒，透明区显示为黑。
+# 两条原生腿都建不起来时回落到 Tk 窗（Windows 靠色键透明；Linux 上无逐像素透明）。
 desktop_overlay:
   enabled: false             # 总开关（界面上的勾选状态存在 ui.desktop_overlay，两边都认）
   mode: conversation         # conversation=镜像聊天区（最近几条，带说话人侧边条）
