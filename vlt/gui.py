@@ -619,7 +619,7 @@ class TranslationGUI:
         # 低频设置（API key、音频设备）收进「⚙ 设置」弹窗 —— 见 _build_settings_dialog。
         self._build_controls()       # 第一行：开/停 + 方向 + 语言对（会话控制）
         self._build_output_row()     # 第二行：输出勾选 + 手腕屏微调 + key 状态入口
-        self._build_room_row()       # 第三行：房间文本中继（多人互相看字幕，默认关；独立一行防裁切）
+        self._build_room_row()       # 第三行：房间文本中继的连接/断开动作 + 状态（房间码在「设置 → 房间」）
         self._divider()
         self._build_chat()
         self._divider()
@@ -977,39 +977,30 @@ class TranslationGUI:
     # ================================================================ 房间文本中继
 
     def _build_room_row(self) -> None:
-        """独立一行：`[☐ 房间] 房间码[___] 昵称[___] 状态：未连接 · 0 人`。
+        """独立一行，只留**高频**操作：`[连接房间] 状态：未连接 · 0 人`。
 
-        ⚠️ 必须**单独一行**：Tk 空间不足时从最后打包的控件开始裁，塞进已经拥挤的
-        输出行会让「房间」勾选框在小屏上凭空消失（用户实测过的坑）。
-        控件一律左对齐、不给标签写死宽度；窗口宽度由 `_fit_window_width` 统一实测。
+        为什么是按钮不是勾选框：勾选框表达的是「这功能开不开」，而用户在这一行要做的
+        是**一个动作** —— 连上去 / 断开；而且这个动作随连接态反过来变（连上之后同一个
+        位置就该写着「断开连接」）。文案/可用态由 `_refresh_room_btn` 按连接态刷。
+        房间码、昵称是「填一次就不动」的低频输入，搬进「设置 → 房间」页
+        （见 `_build_settings_room`）—— 这一行不再有 Checkbutton / Entry。
+
+        ⚠️ 仍然必须**单独一行**：Tk 空间不足时从最后打包的控件开始裁，塞进已经拥挤的
+        输出行会让它在小屏上凭空消失（用户实测过的坑）。控件一律左对齐、不给标签写死
+        宽度；窗口宽度由 `_fit_window_width` 统一实测。
         """
         row = ttk.Frame(self._root, padding=(14, 0, 14, 10))
         row.pack(fill=tk.X)
         self._room_row = row
 
+        # 连接意图（不再绑任何控件，但与 config 的 room.enabled 同义）
         self._room_var = tk.BooleanVar(value=bool(self._room_cfg.enabled))
-        tk.Checkbutton(row, text=t("房间"), variable=self._room_var,
-                       command=self._on_room_toggle,
-                       **self._indicator_kw()).pack(side=tk.LEFT)
-
-        ttk.Label(row, text=t("房间码:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(12, 4))
-        self._room_code_var = tk.StringVar(value=self._room_cfg.room_code)
-        code_entry = ttk.Entry(row, textvariable=self._room_code_var, width=12,
-                               style="Key.TEntry", font=FONT_UI)
-        code_entry.pack(side=tk.LEFT)
-        code_entry.bind("<Return>", lambda _e: self._on_room_field_change())
-        code_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
-
-        ttk.Label(row, text=t("昵称:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(12, 4))
-        self._room_nick_var = tk.StringVar(value=self._room_cfg.nickname)
-        nick_entry = ttk.Entry(row, textvariable=self._room_nick_var, width=12,
-                               style="Key.TEntry", font=FONT_UI)
-        nick_entry.pack(side=tk.LEFT)
-        nick_entry.bind("<Return>", lambda _e: self._on_room_field_change())
-        nick_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
-
+        self._room_btn = ttk.Button(row, text=t("连接房间"), style="Accent.TButton",
+                                    command=self._on_room_button)
+        self._room_btn.pack(side=tk.LEFT)
         self._room_status = ttk.Label(row, text=self._room_status_text(), style="Muted.TLabel")
         self._room_status.pack(side=tk.LEFT, padx=(14, 0))
+        self._refresh_room_btn()          # 首屏就把按钮文案/可用态定对
 
     def _room_status_text(self) -> str:
         """房间行右侧的状态文案：连接态 + 在线人数，全部走 t()（界面禁技术词）。"""
@@ -1038,9 +1029,57 @@ class TranslationGUI:
             self._room_status.configure(text=self._room_status_text())
         except Exception:                       # noqa: BLE001  文案刷新失败不值得惊动用户
             pass
+        self._refresh_room_btn()   # 按钮文案与状态同一口径，跟着一起刷（_poll 已每 0.5s 调这里）
+
+    def _refresh_room_btn(self) -> None:
+        """按连接态刷新按钮：未连接→「连接房间」；连接中→「连接中」且禁用；在线/重连→「断开连接」。
+
+        判定口径与 `_room_status_text` 完全一致（`self._room is None` → 未连接；
+        `room.state()` 抛异常也按未连接处理）。client 还在但已是 IDLE / STOPPED / ERROR
+        时同样给「断开连接」—— 点一下就 `_stop_room()` 回到未连接，比让用户猜怎么复位强。
+        """
+        btn = getattr(self, "_room_btn", None)
+        if btn is None:
+            return                              # 无头模式 / 控件还没建：什么都不做
+        st = None
+        if self._room is not None:
+            try:
+                st = self._room.state()
+            except Exception:                   # noqa: BLE001  取快照失败就按未连接处理
+                st = None
+        if st is None:
+            text, state = t("连接房间"), tk.NORMAL
+        elif st.conn is ConnectionState.CONNECTING:
+            text, state = t("连接中"), tk.DISABLED
+        else:
+            text, state = t("断开连接"), tk.NORMAL
+        try:
+            btn.configure(text=text, state=state)
+        except Exception:                       # noqa: BLE001  按钮刷新失败不值得惊动用户
+            pass
+
+    def _on_room_button(self) -> None:
+        """点按钮：已连上/正在连 → 断开；否则先校验房间码再连。"""
+        if self._room is not None:
+            self._room_var.set(False)
+            self._on_room_toggle()
+            return
+        self._sync_room_cfg_from_fields()
+        if not self._room_cfg.room_code:
+            # 空房间码：不起连接，明确提示并跳到设置页（禁静默）
+            self._set_status("warn", t("先在「设置 → 房间」里填房间码"))
+            print("[room] 没填房间码，已取消连接并打开「设置 → 房间」页", flush=True)
+            self._open_settings(page="room")
+            return
+        self._room_var.set(True)
+        self._on_room_toggle()
 
     def _on_room_toggle(self) -> None:
-        """勾选/取消房间：即时写回 config.yaml，并起停 RoomClient。"""
+        """按连接意图（`_room_var`）起停 RoomClient，并即时写回 config.yaml。
+
+        语义与「勾选框时代」一致，只是不再被控件直接绑定 —— 唯一入口是
+        `_on_room_button`（它负责先把 `_room_var` 设成用户真正想要的值）。
+        """
         self._sync_room_cfg_from_fields()
         self._save_room_cfg()
         if self._room_var.get():
@@ -1383,7 +1422,7 @@ class TranslationGUI:
 
     # ---------------------------------------------------------------- 设置弹窗（低频设置）
     def _build_settings_dialog(self) -> None:
-        """低频设置收进弹窗：**分页**（常规 / 音频 / 词库 / 关于）+ 固定尺寸 + 每页可滚。
+        """低频设置收进弹窗：**分页**（常规 / 音频 / 词库 / 房间 / 关于）+ 固定尺寸 + 每页可滚。
 
         为什么不在主界面：这些是「装好一次、几乎不动」的设置，常驻只会让主界面变成
         4 行控件堆叠（改造前的样子）。
@@ -1394,9 +1433,9 @@ class TranslationGUI:
         所以不是「难找」，是**真的够不着**（1080p 屏只会更糟）。分页后每页最高约 400px，
         整窗按内容实测 + 两道上限（SETTINGS_MAX_H / 屏高-90）定高，真装不下时页面能滚。
 
-        弹窗**先建好再 withdraw**，且四页的控件**一次性全建齐**（不做「切到那页才建」的
-        懒加载）：控件属性（_key_entry / _mic_combo / _glossary_text …）必须在弹窗不可见时
-        也随即可用 —— 设备扫描、更新检查回填和自动化测试都直接访问它们。
+        弹窗**先建好再 withdraw**，且各页的控件**一次性全建齐**（不做「切到那页才建」的
+        懒加载）：控件属性（_key_entry / _mic_combo / _glossary_text / _room_code_var …）
+        必须在弹窗不可见时也随即可用 —— 设备扫描、更新检查回填和自动化测试都直接访问它们。
         """
         win = tk.Toplevel(self._root)
         win.title(t("设置"))
@@ -1416,12 +1455,18 @@ class TranslationGUI:
         nb.pack(fill=tk.BOTH, expand=True)
         self._settings_nb = nb
 
+        # 标题 → tab 本体：`_settings_page` 只返回**内容 frame**，而 `nb.select()` 要的是
+        # tab，所以在这里登记一份（_open_settings(page=…) 靠它直接跳到某一页）
+        self._settings_tabs: dict[str, ttk.Frame] = {}
+
         # 分页口径 = 「我要改什么」→ 去哪页：
         #   常规 = 填 key / 换界面语言；音频 = 声音的进出（设备 · 门限 · 音色）；
-        #   词库 = 专有名词怎么译；关于 = 版本与日志（出问题时给维护者的东西）
+        #   词库 = 专有名词怎么译；房间 = 多人互看字幕的房间码/昵称；
+        #   关于 = 版本与日志（出问题时给维护者的东西）
         self._build_settings_general(self._settings_page(nb, t("常规")))
         self._build_settings_audio(self._settings_page(nb, t("音频")))
         self._build_settings_glossary(self._settings_page(nb, t("词库")))
+        self._build_settings_room(self._settings_page(nb, t("房间")))
         self._build_settings_about(self._settings_page(nb, t("关于")))
         self._size_settings_window()
 
@@ -1434,6 +1479,7 @@ class TranslationGUI:
         """
         tab = ttk.Frame(nb)
         nb.add(tab, text=title)
+        self._settings_tabs[title] = tab    # 只返回 inner，tab 本体在这里登记（供 select）
         canvas = tk.Canvas(tab, bg=PANEL, highlightthickness=0, bd=0)
         sb = ttk.Scrollbar(tab, orient=tk.VERTICAL, style="Vertical.TScrollbar",
                            command=canvas.yview)
@@ -1804,6 +1850,45 @@ class TranslationGUI:
         # 这样「打开设置 → 已经是磁盘上的最新内容」这条保证在首屏也成立）
         self._refresh_glossary_box()
 
+    # ---------------------------------------------------------------- 设置弹窗 · 房间页
+    def _build_settings_room(self, body: ttk.Frame) -> None:
+        """「房间」页：房间码 / 昵称（多人互看字幕要填的两项）。
+
+        这两项从主界面第三行搬来这里：它们是「填一次就不动」的低频输入，常驻主界面
+        只会把那一行挤爆（而主界面那一行只该留「连接房间 / 断开连接」这个动作）。
+        变量名 `_room_code_var` / `_room_nick_var` 保持不变 —— `_sync_room_cfg_from_fields`
+        与回归测试都按这两个名字读写。
+        """
+        ttk.Label(body, text=t("房间"), style="Section.TLabel").pack(anchor=tk.W)
+
+        # 两个输入框用 grid 同一列 → 标签长度随语言不同（"Код комнаты:" / "Ник:"）时
+        # 输入框左缘也照样对齐；列宽由最长的标签自己撑，不写死宽度（俄语会超）。
+        form = ttk.Frame(body)
+        form.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(form, text=t("房间码:"), style="Dim.TLabel").grid(row=0, column=0, sticky="w")
+        self._room_code_var = tk.StringVar(value=self._room_cfg.room_code)
+        code_entry = ttk.Entry(form, textvariable=self._room_code_var, width=12,
+                               style="Key.TEntry", font=FONT_UI)
+        code_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        code_entry.bind("<Return>", lambda _e: self._on_room_field_change())
+        code_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+
+        ttk.Label(form, text=t("昵称:"), style="Dim.TLabel").grid(row=1, column=0,
+                                                                  sticky="w", pady=(6, 0))
+        self._room_nick_var = tk.StringVar(value=self._room_cfg.nickname)
+        nick_entry = ttk.Entry(form, textvariable=self._room_nick_var, width=12,
+                               style="Key.TEntry", font=FONT_UI)
+        nick_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        nick_entry.bind("<Return>", lambda _e: self._on_room_field_change())
+        nick_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+
+        ttk.Label(body, text=t("和填了同一个房间码的人互相看到对方说的话；只有你自己说的话会被发出去。"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(body, text=t("改动会即时保存；已连接时按新设置重连。"),
+                  style="Muted.TLabel", justify=tk.LEFT,
+                  wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(4, 0))
+
     # ---------------------------------------------------------------- 设置弹窗 · 关于页
     def _build_settings_about(self, body: ttk.Frame) -> None:
         """「关于」页：软件更新 + 日志（出问题时要交给维护者的东西）+ 开发者署名。
@@ -1929,8 +2014,12 @@ class TranslationGUI:
             return
         print(f"[gui] 已打开日志文件夹：{d}", flush=True)
 
-    def _open_settings(self) -> None:
-        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近且**整窗都在屏幕内**。"""
+    def _open_settings(self, page: str | None = None) -> None:
+        """打开设置弹窗（已建好，只是显示出来），定位到主窗口附近且**整窗都在屏幕内**。
+
+        `page`：打开后停在哪一页（目前只用 `"room"`）。点「连接房间」却没填房间码时，
+        光弹一句提示等于让用户自己去找那个输入框 —— 直接把他送到该填的那一页。
+        """
         win = self._settings_win
         self._refresh_key_status()          # 每次打开都刷新来源/打码显示
         self._refresh_glossary_box()        # 手改过 config.yaml 的话，别让旧内容把它覆盖回去
@@ -1951,6 +2040,14 @@ class TranslationGUI:
         win.deiconify()
         win.lift()
         win.focus_set()
+        if page == "room":
+            try:
+                tab = self._settings_tabs.get(t("房间"))
+                if tab is not None and self._settings_nb is not None:
+                    self._settings_nb.select(tab)
+            except Exception as exc:  # noqa: BLE001 — 切页失败不该拦住弹窗打开
+                print(f"[ui] ⚠️ 设置弹窗切到「房间」页失败（不影响使用）："
+                      f"{type(exc).__name__}: {exc}", flush=True)
         # 建窗时它处于 withdraw 状态，那时调 DWM 拿不到有效 hwnd、会静默失败
         # （实测弹窗标题栏仍是浅色、跟主窗口不一致）。显示出来之后再设一次。
         self._apply_dark_titlebar(win)
@@ -3546,7 +3643,7 @@ class TranslationGUI:
         self._pending_starts = len(specs)
         # 手腕屏由界面持有，内容镜像聊天区（两个方向都进同一块屏）
         self._start_overlay()
-        # 房间勾着就确保它在跑（_stop() 会连房间一起停；_start_room 幂等，已在跑则无操作）
+        # 连接意图开着就确保房间在跑（_stop() 会连房间一起停；_start_room 幂等，已在跑则无操作）
         if getattr(self, "_room_var", None) is not None and self._room_var.get():
             self._start_room()
         self._start_engine(0)

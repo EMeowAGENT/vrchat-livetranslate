@@ -1,9 +1,17 @@
-"""界面气泡回归测试：流式增量不能把每句话变成两条气泡。
+"""界面回归测试：流式气泡不重复 + 房间行（连接按钮）的排布与守卫。
+
+## 气泡（原始用例）
 
 背景（真实踩过的坑）：终版事件到来时，界面若"先把当前气泡封顶、再新插一条"，
 每句话都会出现两条内容相同的相邻气泡。修法是让终版**就地更新当前气泡并封口**。
 
 规则：气泡数 == 终版事件数；且不存在内容完全相同的相邻气泡。
+
+## 房间行
+
+第三行只留**高频**动作：一个「连接房间 / 断开连接」按钮 + 状态文案；房间码、昵称
+这类「填一次就不动」的输入搬进了「设置 → 房间」页。这里钉住三件事：行没被裁、
+按钮文案随连接态变、空房间码不许静默起连接。
 
 需要 Tk（Windows 上标准库自带）。若在无显示环境跑会跳过。
 """
@@ -14,6 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# 界面文案跟随系统语言，钉死成中文保证可复现（CI 是英文系统，不钉会红）。
+# 必须在构造 TranslationGUI 之前打上 —— 界面文案在建窗时就按当时的语言取词。
+import vlt.i18n as _i18n  # noqa: E402
+
+_i18n.detect_system_language = lambda: "zh"
 
 
 def check(events: list[tuple], expect_finals: int) -> bool:
@@ -86,11 +100,14 @@ def test_growing_bubble_shifts_later_bubbles() -> bool:
 
 
 def test_room_row_present_and_not_clipped() -> bool:
-    """★ 房间行（批次 2b）：独立成行、控件齐全，且没被窗口裁掉。
+    """★ 房间行：独立成行、只留「连接房间」按钮 + 状态，且没被窗口裁掉。
 
-    真实坑（BRIEF 反复强调）：Tk 空间不足时**从最后打包的控件开始裁**，把新勾选框
-    塞进已经拥挤的行 → 用户报「我没看到那个勾选框」。所以房间必须**独立成行**，
+    真实坑（BRIEF 反复强调）：Tk 空间不足时**从最后打包的控件开始裁**，把它塞进
+    已经拥挤的行 → 用户报「我没看到那个按钮」。所以房间必须**独立成行**，
     并按既有方式断言 `winfo_reqwidth() <= winfo_width()`（装得下、没被裁）。
+
+    这一行**不该再有**勾选框和房间码/昵称输入框 —— 那些是「填一次就不动」的低频输入，
+    已搬进「设置 → 房间」页（见 test_room_button_text_and_empty_code_guard）。
     """
     from vlt.gui import TranslationGUI
 
@@ -104,12 +121,11 @@ def test_room_row_present_and_not_clipped() -> bool:
         assert row is not None, "没有房间行（_room_row 不存在）"
         assert row.winfo_manager() == "pack", \
             f"房间行没有被 pack（manager={row.winfo_manager()!r}）"
-        for attr in ("_room_var", "_room_code_var", "_room_nick_var", "_room_status"):
+        for attr in ("_room_var", "_room_btn", "_room_status"):
             assert hasattr(gui, attr), f"房间行缺控件/变量：{attr}"
         classes = {w.winfo_class() for w in row.winfo_children()}
-        assert "Checkbutton" in classes, f"房间行里没有「房间」勾选框：{classes}"
-        assert "TEntry" in classes, f"房间行里没有输入框（房间码/昵称）：{classes}"
-        assert "TLabel" in classes, f"房间行里没有标签：{classes}"
+        assert "TButton" in classes, f"房间行里没有「连接房间」按钮：{classes}"
+        assert "TLabel" in classes, f"房间行里没有状态标签：{classes}"
         assert str(gui._room_status.cget("text")).strip(), "房间状态标签是空的"
 
         # ② 没被裁：需求宽度 <= 实际宽度（屏幕本身更窄时属物理限制，放行——与 test_i18n 同口径）
@@ -119,7 +135,8 @@ def test_room_row_present_and_not_clipped() -> bool:
         fits = need <= have + 1 or (screen and win_have >= screen - 32)
         assert fits, (f"房间行被裁：需求 {need}px，实际只有 {have}px"
                       f"（窗口 {win_have}px / 屏宽 {screen}px）")
-        print(f"  ✓ 房间行独立存在、控件齐全、未被裁（req {need} <= width {have}；"
+        print(f"  ✓ 房间行独立存在、按钮+状态齐全、未被裁（req {need} <= width {have}；"
+              f"按钮 {str(gui._room_btn.cget('text'))!r}，"
               f"状态文案 {str(gui._room_status.cget('text'))!r}）")
         return True
     finally:
@@ -130,7 +147,7 @@ def test_room_row_present_and_not_clipped() -> bool:
 
 
 def test_room_first_toggle_after_section_created() -> bool:
-    """★ 回归：老 config.yaml 没有 `room:` 段时，勾选房间必须**当场**就能连（不该要求重启）。
+    """★ 回归：老 config.yaml 没有 `room:` 段时，点「连接房间」必须**当场**就能连（不该要求重启）。
 
     真实事故（用户日志 2026-09-28）：
 
@@ -139,7 +156,7 @@ def test_room_first_toggle_after_section_created() -> bool:
 
     而那个 config.yaml 里**有** server_url：补建的只是**文件**，内存里的 `RoomConfig`
     还是「配置里没有 room 段」时的默认值（server_url 为空）→ 启动校验直接拒 →
-    用户看到「勾了房间没反应」，重启一次才好。
+    用户看到「点了连接房间没反应」，重启一次才好。
     """
     import tempfile
 
@@ -157,9 +174,13 @@ def test_room_first_toggle_after_section_created() -> bool:
         gui._room_cfg = RoomConfig.from_dict({})       # = 启动时读到「没有 room 段」的状态
         assert not gui._room_cfg.server_url, "前置条件：此时内存里的 server_url 应为空"
 
-        gui._room_var.set(True)                        # 勾上「房间」
+        # 打桩：本用例要验的是「补建 room 段 + 回读内存」，不是真去连线上房间服务器
+        started: list[str] = []
+        gui._start_room = lambda: started.append(gui._room_cfg.server_url)
+
         gui._room_code_var.set("testtest")
         gui._room_nick_var.set("sand")
+        gui._on_room_button()                          # = 原来的「勾上房间」，现在走按钮路径
         gui._sync_room_cfg_from_fields()
         gui._save_room_cfg()
 
@@ -167,13 +188,72 @@ def test_room_first_toggle_after_section_created() -> bool:
         file_ok = "room:" in text and "vlt-room.kcm-nixi.cn" in text
         mem_ok = bool(gui._room_cfg.server_url)
         print(f"  补建后 server_url：文件={file_ok}，内存={gui._room_cfg.server_url!r}"
-              f"（房间码 {gui._room_cfg.room_code!r}）  {'OK' if file_ok and mem_ok else '✗'}")
+              f"（房间码 {gui._room_cfg.room_code!r}，_start_room 被调 {len(started)} 次）  "
+              f"{'OK' if file_ok and mem_ok else '✗'}")
         assert file_ok, "room 段没有被补建进 config.yaml"
-        assert mem_ok, ("内存里的 server_url 仍为空 → 首次勾选还是会报「没填 server_url」，"
+        assert mem_ok, ("内存里的 server_url 仍为空 → 首次点「连接房间」还是会报「没填 server_url」，"
                         "用户必须重启一次（这正是本用例防的回归）")
+        assert started and started[0], ("按钮路径没走到 _start_room，或走到时 server_url 还是空的："
+                                        f"{started!r}")
         return True
     finally:
         gui_mod.DEFAULT_CONFIG = real_default
+        try:
+            gui._root.destroy()
+        except Exception:
+            pass
+
+
+def test_room_button_text_and_empty_code_guard() -> bool:
+    """★ 房间按钮：文案随连接态变；空房间码不许静默起连接。
+
+    改造把勾选框换成了按钮，于是「按钮上写的是什么」成了唯一的操作提示 ——
+    写错就等于让用户点一个会做反事情的按钮。三件事：
+      ① 没连上 → 「连接房间」（可点）；
+      ② 房间码为空 → **不建连接** + 状态栏明确提示 + 弹窗直接停在「房间」页
+         （「点了什么都没发生」是最坏的失败模式，禁静默）；
+      ③ 已连上 → 「断开连接」。用最小替身，绝不真联网。
+    """
+    from types import SimpleNamespace
+
+    from vlt.gui import TranslationGUI
+    from vlt.room.model import ConnectionState
+
+    t = _i18n.t
+    gui = TranslationGUI()
+    try:
+        # ① 初始没有 client → 「连接房间」，且可点
+        assert gui._room is None, "前置条件：初始不该有房间连接"
+        text = str(gui._room_btn.cget("text"))
+        assert text == t("连接房间"), f"初始按钮文案应是「连接房间」，实际 {text!r}"
+        assert str(gui._room_btn.cget("state")) == "normal", "初始按钮不该是禁用态"
+        print(f"  ✓ ① 未连接 → 按钮 {text!r}（可点）")
+
+        # ② 房间码为空 → 不起连接 + 状态栏提示 + 弹窗停在「房间」页
+        gui._room_code_var.set("")
+        gui._on_room_button()
+        assert gui._room is None, "★ 房间码为空却建了连接（应该先拦住）"
+        warn = t("先在「设置 → 房间」里填房间码")
+        got = str(gui._status_label.cget("text"))
+        assert warn in got, f"状态栏没出现空房间码提示：{got!r}"
+        nb = gui._settings_nb
+        assert nb.index(nb.select()) == nb.index(gui._settings_tabs[t("房间")]), \
+            "设置弹窗没有停在「房间」页（提示了却没把人送到该填的地方）"
+        print(f"  ✓ ② 空房间码 → 没建连接，状态栏 {got!r}，弹窗已停在「房间」页")
+        gui._close_settings()
+
+        # ③ 最小替身模拟「已连接」：_refresh_room_btn 只调 room.state()
+        gui._room = SimpleNamespace(
+            stop=lambda timeout=5.0: None,     # _stop_room 只会这么调它
+            state=lambda: SimpleNamespace(conn=ConnectionState.ONLINE, peer_count=2))
+        gui._refresh_room_btn()
+        text = str(gui._room_btn.cget("text"))
+        assert text == t("断开连接"), f"已连接时按钮文案应是「断开连接」，实际 {text!r}"
+        assert str(gui._room_btn.cget("state")) == "normal", "已连接时按钮该可点（点了就断开）"
+        print(f"  ✓ ③ 已连接（替身 ONLINE · 2 人）→ 按钮 {text!r}")
+        return True
+    finally:
+        gui._room = None      # 替身不是真 client：别让任何收尾路径去 stop 它
         try:
             gui._root.destroy()
         except Exception:
@@ -206,7 +286,7 @@ def main() -> int:
           ("Hi there, friend", "嗨，朋友", True, "theirs")], 2),
     ]
 
-    print("界面气泡回归测试：")
+    print("界面回归测试（流式气泡 + 房间行）：")
     all_ok = True
     try:
         all_ok &= test_growing_bubble_shifts_later_bubbles()
@@ -221,7 +301,12 @@ def main() -> int:
     try:
         all_ok &= test_room_first_toggle_after_section_created()
     except AssertionError as exc:
-        print(f"  ❌ 首次勾选房间失败：{exc}")
+        print(f"  ❌ 首次点「连接房间」失败：{exc}")
+        all_ok = False
+    try:
+        all_ok &= test_room_button_text_and_empty_code_guard()
+    except AssertionError as exc:
+        print(f"  ❌ 房间按钮文案/空房间码守卫失败：{exc}")
         all_ok = False
     for i, (events, expect) in enumerate(cases, 1):
         print(f"用例 {i}:")
@@ -229,7 +314,8 @@ def main() -> int:
 
     print()
     if all_ok:
-        print("✅ 全部通过（终版不重复插气泡）")
+        print("✅ 全部通过（终版不重复插气泡 · 房间行按钮化）")
+        print("ALL PASSED")
         return 0
     print("❌ 有失败用例")
     return 1
