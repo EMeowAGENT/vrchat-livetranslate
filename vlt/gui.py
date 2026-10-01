@@ -1660,12 +1660,14 @@ class TranslationGUI:
         """打开日志文件夹 —— 与「导出日志压缩包」看到的是同一个目录（_log_dir 单一真相，
         源码运行 = 仓库 logs/，打包后 = %APPDATA%\\vrchat-livetranslate\\logs，绿色版 = exe 旁）。
 
-        本软件只发 Windows 版，直接 os.startfile；打不开**不许静默**：状态栏 + 日志都留痕。
+        走跨平台封装 `platform.open_path`（Windows = `os.startfile`，Linux = `xdg-open`）——
+        以前这里直接调 `os.startfile`，Linux 上没有该属性会抛 AttributeError，必开必败。
+        打不开**不许静默**：状态栏 + 日志都留痕。
         """
         d = self._log_dir()
         try:
             d.mkdir(parents=True, exist_ok=True)   # 还没写过日志时也能打开（空目录）
-            os.startfile(str(d))
+            platform.open_path(str(d))
         except Exception as exc:  # noqa: BLE001
             print(f"[gui] ⚠️ 打不开日志文件夹（{d}）：{type(exc).__name__}: {exc}", flush=True)
             self._set_status("error", t("打不开日志文件夹：{msg}", msg=exc))
