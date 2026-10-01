@@ -258,6 +258,11 @@ merger:
 overlay:
   interval_s: 0               # 0 = 有更新立刻上屏（本地显示不受 chatbox 限流约束）
   anchor: right_hand          # left_hand | right_hand | tracker | hmd
+  offsets:                    # ★ 每个锚点各存一套位姿（切锚点自动载入，互不覆盖）
+    right_hand: {pos: [0.0, 0.06, 0.02], rot: [-47, -16, 0]}
+    left_hand:  {pos: [0.0, 0.06, 0.02], rot: [-47, 16, 0]}   # 左手 = 右手镜像
+  offset:                     # 兜底：某锚点没单独存过时用这一份（面板属性也在这里）
+    width_m: 0.23
   size_px: [1024, 320]
   font_size: 42               # 译文字号
   source_font_size: 30        # 原文字号
@@ -279,7 +284,11 @@ output:
 | Source font size | 14 ~ 48, 1 | Panel height | 240 ~ 560 px, 10 |
 | Plate opacity | 0 ~ 255, 5 | Source opacity | 0 ~ 255, 5 |
 
-Plus an **anchor** dropdown (right hand / left hand / forearm tracker / fixed in front of the HMD) and a **tracker index** (0–3).
+Plus an **anchor** dropdown (right hand / left hand / external tracker / fixed in front of the HMD) and a **tracker index** (0–7).
+**Each anchor keeps its own offset** (`overlay.offsets.<anchor>`): switching the dropdown loads that anchor's
+pose, so tuning one never overwrites another. `overlay.offset` is only the fallback for anchors you haven't
+stored yet. Left and right hand grip frames are mirrored along X, so the left-hand pose is *not* a copy of
+the right-hand one (`rx` unchanged, `ry`/`rz` negated, and the same for the position's `x`).
 Changes are written to disk with 200 ms debounce; **translation font size / source font size / panel height /
 plate opacity / source opacity** trigger a one-frame texture re-render, the rest only re-apply the transform.
 **Plate opacity** is the translucent backdrop (lower = you see more of the scene; 255 = fully opaque);
@@ -288,6 +297,34 @@ The top-level **opacity** is a whole-layer multiplier (fades plate and text toge
 as SteamVR's `setOverlayAlpha` on Windows.
 
 > Measured reference: 42/30 font sizes + a 320 px panel fits **2 rounds** of dialogue; 36/24 + 420 px fits **3 rounds, 6 lines**.
+
+---
+
+### Desktop subtitle (a caption window pinned to VRChat — no headset needed)
+
+**For PC desktop-mode players** (issue #11): tick "Desktop subtitle" in the output row and a
+**borderless, always-on-top, click-through** caption window appears, showing the latest chat lines
+(others on the left, you on the right).
+
+* **Pinning**: by default it sits at the **bottom centre of the VRChat window** and follows it
+  (moves and resolution changes included). If the VRChat window isn't found it falls back to fixed
+  coordinates and logs one line.
+* **Position**: `Fine-tune ▸` → the "Desktop subtitle" row → "Unlock drag" → drag it where you want →
+  "Lock position" (the drop point is converted back to "which anchor + offset against the game
+  window" and written to `config.yaml`, so the caption keeps hugging the same edge when VRChat moves).
+  Click-through is on by default (so it never blocks clicks into VRChat); dragging requires unlocking.
+* **Opacity**: the slider in the same row, 0.20–1.00, applied live and persisted on release.
+* **Config**: the `desktop_overlay:` section of `config.yaml` (`mode: latest` turns it into a
+  lyric-style single line). Visual parameters (font / size / colours / lines / show-source)
+  **inherit from `overlay:`** by default; override any of them in `desktop_overlay:`.
+* **Linux**: on an **X11 session** it matches Windows (window search / follow / click-through /
+  drag persistence / opacity); on a **Wayland session** (niri etc., the GUI runs through XWayland)
+  window placement and opacity are decided by the compositor and following will not work — see the
+  "Desktop subtitle" section of [GUIDE.linux.md](GUIDE.linux.md) for the exact boundaries.
+
+> ⚠️ VRChat must be in **windowed / borderless** mode (Unity `Fullscreen mode = 3`, the VRChat default).
+> In exclusive fullscreen any third-party topmost window gets covered — that's not a bug of this app.
+> Preview the rendering offline: `python -m vlt.output.desktop_overlay --demo --out out/desktop_frames`.
 
 ---
 

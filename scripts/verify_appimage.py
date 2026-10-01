@@ -5,6 +5,7 @@
     python scripts/verify_appimage.py dist/VRChatLiveTranslate-x86_64.AppImage
     python scripts/verify_appimage.py <img> --no-render      # 跳过离线渲染
     python scripts/verify_appimage.py <img> --no-font        # 跳过 Tk 字体检查
+    python scripts/verify_appimage.py <img> --allow-fat      # 允许未瘦身（构建脚本 --no-slim 时）
 
 退出码：0 = 全过；1 = 有检查没过；2 = 用法/产物问题。
 
@@ -18,20 +19,23 @@
 1. **平台纯度** —— 转调 `scripts/check_platform_purity.py --platform linux`：
    模块级（不许有 `vlt.platform.win` / openvr 后端 / Windows 依赖）+ 实现字样级。
    这是「Linux 上只用 OpenXR、Windows 上只用 SteamVR」这条假设的**红灯门禁**。
-2. **包内导入 + 反向排除 + xr 瘦身** —— 用**包内那份解释器**（不是宿主的）导入核心模块，
-   断言 Windows 独占模块**不在**包里；并断言 pyopenxr 只剩**当前平台**的目录
-   （保留集由包内 pyopenxr 自己报出，不硬编码 —— 见该段注释）。
-3. **离线渲染一帧** —— `python -m vlt.output.overlay --out <png>`：验证 Pillow + 字体
-   链路真的能出图，并断言「边距全透明 + 底板半透明」（这两条坏了，手腕屏上就是
-   蓝框外面一圈黑边）。不需要显示器。第 ② 步还会断言图层 alpha 的 flag 在包里。
-4. **Tk 中日韩字体可见** —— 只有**有显示器**时才跑（无显示器 → 明确提示「跳过 = 未验证」）。
-   CI 里用 xvfb-run 让它真的跑起来；本地不想开显示就不跑。构建脚本换的那份 Xft 版 Tk
-   对不对，只有这一步能验。
+2. **包内导入 + 反向排除 + xr 瘦身** —— AppImage 换成 PyInstaller 布局后，包里**没有
+   独立解释器**了，所以这些探针做在产物内部（`vlt/selfcheck.py`，入口
+   `--verify-imports`），由本脚本以子进程方式调用。断言：核心模块导入正常、
+   图层 alpha flag 正确、Windows 独占模块不在包里、pyopenxr 只留当前平台目录、
+   调试层已清（保留集由**包内 pyopenxr 自己报**，不硬编码 —— 见 selfcheck 注释）。
+3. **离线渲染一帧** —— 产物自带 `--verify-render <png>`：验证 Pillow + 字体链路真的
+   能出图，并断言「边距全透明 + 底板半透明」（这两条坏了，手腕屏上就是蓝框外面一圈黑边）。
+   不需要显示器。
+4. **Tk 中日韩字体可见** —— 只有**有显示器**时才跑（产物自带 `--verify-tk-fonts`，
+   无显示器时它返回 2、本脚本标「跳过 = 未验证」）。CI 里用 xvfb-run 让它真的跑起来；
+   本地不想开显示就不跑。
    ⚠️ **AppImage 自 2026-10 起不再自带字体**：这一步验的是「宿主机 fontconfig 里的中日韩
    字体，Tk 看得见吗」。若宿主机压根没装中日韩字体（`fc-list :lang=zh` 为空），属环境问题、
    **跳过 = 未验证**，不判红；只有「宿主机有、Tk 却看不见」才是产物（Xft 版 Tk）坏了。
 
-⚠️ 全程只读：解包到临时目录、跑完即删。
+⚠️ 全程只读：解包到临时目录、跑完即删；产物进程不写配置/日志（verify 开关在崩溃日志
+   安装之前就被拦截，见 run_gui.py）。
 """
 from __future__ import annotations
 
@@ -67,6 +71,15 @@ def _find(root: Path, pattern: str) -> Path | None:
     return hits[0] if hits else None
 
 
+def _find_frozen_exe(root: Path) -> Path | None:
+    """PyInstaller onedir 布局：`usr/bin/<名字>/<名字>` 与它同级的 `_internal/`。"""
+    for internal in sorted(root.glob("usr/bin/*/_internal")):
+        exe = internal.parent / internal.parent.name
+        if exe.is_file():
+            return exe
+    return None
+
+
 def _host_has_cjk_font() -> bool | None:
     """宿主机 fontconfig 里有没有中日韩字体。
 
@@ -93,69 +106,27 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
         FAILED.append("平台纯度检查未通过")
 
     with appdir(img) as root:
-        py = _find(root, "usr/python/bin/python3.*")
-        app = root / "usr" / "app"
-        site = _find(root, "usr/python/lib/python*/site-packages")
-        if py is None or site is None or not app.is_dir():
-            _fail(f"AppDir 结构不符合预期（py={py}, app={app}, site={site}）")
+        exe = _find_frozen_exe(root)
+        if exe is None:
+            _fail("AppDir 结构不符合预期：找不到 PyInstaller onedir 产物 "
+                  "（usr/bin/*/_internal 同级应有同名可执行文件）")
             return False
-        env = dict(os.environ, PYTHONPATH=f"{app}:{site}", PYTHONUTF8="1")
+
+        env = dict(os.environ, PYTHONUTF8="1")
 
         def _run(args: list[str], timeout: int = 240) -> subprocess.CompletedProcess:
-            # ⚠️ `-P` + cwd=AppDir 都是必须的：`python -c/-m` 会把**当前目录**放在
-            #    sys.path 最前，而 PYTHONPATH 排在它后面 —— 从仓库里跑本脚本时，
-            #    `import vlt` 会解析到**仓库源码**而不是包内代码，检查等于白做
-            #    （这个坑真踩过：② 一直报「包里还有 vlt.platform.win」，
-            #     其实是它读的是仓库里那份）。
-            return subprocess.run([str(py), "-P", *args], env=env, cwd=str(root),
+            return subprocess.run([str(exe), *args], env=env, cwd=str(exe.parent),
                                   capture_output=True, text=True, timeout=timeout)
 
-        # ② 包内导入 + 反向排除 + 瘦身
-        _step("② 包内导入 + 反向排除 + xr 瘦身（用包内解释器）")
-        # ★ 瘦身判据**不能硬编码平台目录名**：pyopenxr 1.1.6302 把目录改了名
-        #   （win32→windows_x86_64 / aarch64→linux_aarch64 / x86_64→linux_x86_64 /
-        #   android→android_arm_v8a）。硬编码的黑名单会与 build_appimage.sh 的 rm
-        #   **一起**静默失效（v0.5.0 就是这样把 ~13MB 的其他平台层发出去的，CI 全绿）。
-        #   所以改成：让包内 pyopenxr 自己说「当前平台要哪个目录」，再断言除它以外一个不剩，
-        #   并加一条体积上限兜底。
-        slim_probe = (
-            "import os, sysconfig\n"
-            "from pathlib import Path\n"
-            "import xr.api_layer, xr.library\n"
-            "from xr.api_layer.layer_path import py_layer_library_path\n"
-            "site = Path(sysconfig.get_paths()['purelib'])\n"
-            "want = {'api_layer': {Path(py_layer_library_path()).parent.name},\n"
-            "        'library':   {Path(xr.library.openxr_loader_library._name).parent.name}}\n"
-            "for _p in os.environ.get('XR_API_LAYER_PATH', '').split(os.pathsep):\n"
-            "    if _p.strip():\n"
-            "        want['api_layer'].add(Path(_p).name)\n"
-            "for sub, keep in want.items():\n"
-            "    base = site/'xr'/sub\n"
-            "    have = {p.name for p in base.iterdir() if p.is_dir() and p.name != '__pycache__'}\n"
-            "    extra = have - keep\n"
-            "    assert not extra, f'xr/{sub} 残留其他平台目录（瘦身没生效）：{sorted(extra)}'\n"
-            "    assert keep & have, f'xr/{sub} 缺当前平台目录：{sorted(keep)}'\n"
-            "size = sum(f.stat().st_size for f in (site/'xr').rglob('*') if f.is_file())\n"
-            "assert size <= 60 * 1024 * 1024, f'xr 瘦身后仍有 {size // 1024 // 1024}MB（上限 60MB）'\n"
-            "print(f'xr 只留当前平台：{sorted(want[\"api_layer\"])}')\n"
-        ) if expect_slim else ""
-        probe = (
-            "import importlib.util as u, sysconfig\n"
-            "from pathlib import Path\n"
-            "import vlt.gui, vlt.engine, vlt.output.openxr_overlay, vlt.platform\n"
-            "from vlt.output.openxr_overlay import layer_alpha_flags\n"
-            # ★ 图层 alpha 的开关必须在**打进包里的那份代码**里：少了它，面板会整层
-            #   按不透明合成 = 蓝框外面一圈黑边（贴图侧的透明边距被当实心黑画出来）
-            "flags = int(layer_alpha_flags())\n"
-            "assert flags & 0x2 and flags & 0x4, f'图层 alpha flag 不对：0x{flags:x}'\n"
-            "for bad in ('vlt.platform.win', 'vlt.output.openvr_overlay'):\n"
-            "    assert u.find_spec(bad) is None, f'Linux 产物里不该有 {bad}'\n"
-            + slim_probe +
-            "print('OK')\n"
-        )
-        res = _run(["-c", probe])
+        # ② 包内导入 + 反向排除 + 瘦身（探针在产物里，见 vlt/selfcheck.py）
+        _step("② 包内导入 + 反向排除 + xr 瘦身（用冻结产物自己的探针）")
+        probe_args = ["--verify-imports"] + ([] if expect_slim else ["--allow-fat"])
+        res = _run(probe_args)
         if res.returncode == 0:
             tail = "，且 Windows 独占模块不在包里" + ("，xr 只留当前平台" if expect_slim else "")
+            detail = (res.stdout or "").strip().splitlines()
+            if detail:
+                print(f"    （产物探针：{detail[-1]}）")
             _ok("核心模块导入正常" + tail)
         else:
             _fail(f"包内导入/反向排除/瘦身检查失败：{(res.stderr or res.stdout).strip()[:400]}")
@@ -164,7 +135,7 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
         if do_render:
             _step("③ 离线渲染一帧（不需要显示器）")
             out = Path(tempfile.mkdtemp(prefix="vlt-verify-render-")) / "panel.png"
-            res = _run(["-m", "vlt.output.overlay", "--out", str(out)])
+            res = _run(["--verify-render", str(out)])
             if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
                 _ok(f"渲染成功（{out.stat().st_size} 字节）")
                 # 顺带钉住「边距全透明 + 底板半透明」：这一条坏了，手腕屏上就是
@@ -189,19 +160,7 @@ def verify(img: Path, *, do_render: bool = True, do_font: bool = True,
         # ④ Tk 字体（需要显示器；没有就明确「跳过 = 未验证」）
         if do_font:
             _step("④ Tk 中日韩字体可见（需要显示器）")
-            font_probe = (
-                "import sys\n"
-                "try:\n"
-                "    import tkinter as tk, tkinter.font as tkfont\n"
-                "    root = tk.Tk(); root.withdraw()\n"
-                "except Exception as exc:\n"
-                "    print(f'SKIP:{type(exc).__name__}'); sys.exit(2)\n"
-                "fams = list(tkfont.families(root)); root.destroy()\n"
-                "cjk = [f for f in fams if any(k in f for k in ('CJK','Source Han','Noto Sans SC','WenQuanYi'))]\n"
-                "print(f'FAMS:{len(fams)} CJK:{len(cjk)}' + (f' FIRST:{cjk[0]}' if cjk else ''))\n"
-                "sys.exit(0 if cjk else 1)\n"
-            )
-            res = _run(["-c", font_probe])
+            res = _run(["--verify-tk-fonts"])
             line = (res.stdout or "").strip().splitlines()[-1] if res.stdout.strip() else ""
             if res.returncode == 0:
                 _ok(f"中日韩字体正常（{line}）")

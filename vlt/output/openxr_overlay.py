@@ -8,7 +8,7 @@
 
 | 结论 | 依据 |
 |---|---|
-| 图形绑定只能用 **`XR_MNDX_egl_enable` + `GraphicsBindingEGLMNDX`** | Monado 的 `oxr_session.c` 只分发 XLIB/WIN32/ES_ANDROID/VULKAN/**EGL_MNDX**/D3D，**没有 `OPENGL_WAYLAND_KHR`** |
+| 图形绑定**按会话类型二选一**：Wayland → `XR_MNDX_egl_enable` + `GraphicsBindingEGLMNDX`；X11 → `XR_KHR_opengl_enable` + `GraphicsBindingOpenGLXlibKHR` | Monado 的 `oxr_session.c` 只分发 XLIB/WIN32/ES_ANDROID/VULKAN/**EGL_MNDX**/D3D，**没有 `OPENGL_WAYLAND_KHR`**；XLIB 与 EGL_MNDX 两条路 WiVRn/Monado 都支持 |
 | 会话链 = `SessionCreateInfo → GraphicsBindingEGLMNDX → SessionCreateInfoOverlayEXTX` | `createFlags` 必须为 0（规范要求） |
 | 建 session **前**必须调 `xrGetOpenGLGraphicsRequirementsKHR` | Monado 检查 `sys->gotten_requirements`，否则 `GRAPHICS_REQUIREMENTS_CALL_MISSING` |
 | 建完 session **必须泵事件到 READY 再 `xrBeginSession`** | `oxr_session_begin()` 首句就要求 `XR_SESSION_STATE_READY`，否则 `SESSION_NOT_RUNNING` |
@@ -21,9 +21,15 @@
 1. **`xrPollEvent` 的结果要从缓冲区起始强转**，不能从 `varying[]` 起 ——
    `EventDataBuffer{type(0),next(8),varying(16)}` vs `EventDataSessionStateChanged{type(0),next(8),session(16),state(24)}`，从 varying 读会偏 16 字节、读到垃圾 0。
 2. **必须调 `xrSyncActions`**，否则动作状态永远不更新（pose 读不到）。
-3. **X11/GLX 走不通**：niri 下 X11 是精简的 `xwayland-satellite`，
-   `glXChooseFBConfig`/`glXCreatePbuffer` 能过但**所有** context 创建方式都被拒。
-   所以走 libwayland-client + libEGL。
+3. **niri 下 X11/GLX 走不通 —— 但真正的 Xorg 没这个问题**：niri 的 X11 是精简的
+   `xwayland-satellite`，`glXChooseFBConfig`/`glXCreatePbuffer` 能过但**所有**
+   context 创建方式都被拒（`GLXBadFBConfig` / `BadValue`）。所以 GL 后端按会话类型选：
+   有 Wayland 优先走 libwayland-client + libEGL（niri 的常规路径），否则走 X11/GLX
+   （`XlibGlxContext`，pbuffer context + XLIB 图形绑定）。
+   ⚠️ **X11 路径的真机验证仍是待办**（2026-10：开发机上没有「X11 显示 + 同一环境跑
+      运行时」的验证环境）。离线覆盖到：Xvfb+GLX 下真实建上下文、binding 结构体、
+      按后端的扩展清单（`tests/test_overlay_glx.py` / `tests/test_openxr_overlay.py`）。
+   强制指定后端可用环境变量 `VLT_OVERLAY_GL=wayland|x11`（排查用）。
 4. 建议**多个** interaction profile，别只给一个。
 5. `xrWaitFrame` 没有超时参数。
 """
@@ -202,6 +208,12 @@ def layer_geometry(width_m: float, aspect: float, curvature: float) -> dict:
 # 拿不到就退回平面层，并在调用点留一行 `[overlay:xr]`（降级不许静默）。
 CYLINDER_EXT = "XR_KHR_composition_layer_cylinder"
 
+# HTC Vive Tracker 的交互 profile 是**扩展**（`XR_HTCX_vive_tracker_interaction`）：
+# `/user/vive_tracker_htcx/role/...` 这族路径只有在该扩展启用时才存在，否则
+# `xrStringToPath` 直接 `XR_ERROR_PATH_UNSUPPORTED`（实测：没接 tracker 的 WiVRn/Monado
+# 就是这样）。所以「要不要建 tracker 锚点」按**启用的扩展**判断，而不是撞上去看报错。
+TRACKER_EXT = "XR_HTCX_vive_tracker_interaction"
+
 
 def effective_curvature(curvature: float, extensions: list[str]) -> float:
     """按**运行时实际启用**的扩展决定这一帧用不用柱面层。
@@ -258,18 +270,103 @@ GL_TEXTURE_2D, GL_RGBA, GL_UNSIGNED_BYTE = 0x0DE1, 0x1908, 0x1401
 GL_VENDOR, GL_RENDERER, GL_VERSION = 0x1F00, 0x1F01, 0x1F02
 
 
-class EglGlContext:
-    """Wayland + EGL 的 surfaceless GL context（纯 ctypes，不引 PyOpenGL/glfw 做 GL 调用）。
+# GLX 属性（取值与 /usr/include/GL/glx.h、glxext.h 一致；不要手写魔数到调用点）
+GLX_RED_SIZE, GLX_GREEN_SIZE, GLX_BLUE_SIZE, GLX_ALPHA_SIZE = 8, 9, 10, 11
+GLX_DRAWABLE_TYPE, GLX_RENDER_TYPE, GLX_X_RENDERABLE = 0x8010, 0x8011, 0x8012
+GLX_RGBA_BIT, GLX_PBUFFER_BIT = 0x00000001, 0x00000004
+GLX_VISUAL_ID, GLX_RGBA_TYPE = 0x800B, 0x8014
+GLX_PBUFFER_WIDTH, GLX_PBUFFER_HEIGHT = 0x8041, 0x8040
+GLX_CONTEXT_MAJOR_VERSION_ARB, GLX_CONTEXT_MINOR_VERSION_ARB = 0x2091, 0x2092
+GLX_CONTEXT_PROFILE_MASK_ARB, GLX_CONTEXT_CORE_PROFILE_BIT_ARB = 0x9126, 0x00000001
+
+
+class _GlBackend:
+    """GL 后端的公共部分（纯 ctypes，不引 PyOpenGL/glfw 做 GL 调用）。
+
+    两个后端（Wayland-EGL / X11-GLX）只差两件事：**怎么建 current context**
+    （子类 `__init__`）与**给 xrCreateSession 的图形绑定结构**（子类 `binding()`）；
+    贴图上传、字符串查询走同一份 libGL，完全共用。
 
     ⚠️ 每个 extern 函数都要写全 `argtypes`/`restype` —— 不写的话 ctypes 把 64 位指针
     当 32 位 int 传，直接段错误（spike 阶段实测崩过一次）。
     """
 
+    name = "?"
+    #: 建 session 需要运行时提供的**实例扩展**。后端不同、清单不同：
+    #: Wayland 要 `XR_MNDX_egl_enable`；X11 的 XLIB 绑定本身在 `XR_KHR_opengl_enable` 里。
+    REQUIRED_EXTENSIONS: tuple[str, ...] = ("XR_EXTX_overlay", "XR_KHR_opengl_enable")
+
     def __init__(self) -> None:
+        self.gl = ctypes.CDLL("libGL.so.1")
+        self._bind_gl()
+
+    def _bind_gl(self) -> None:
+        self.gl.glBindTexture.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        self.gl.glBindTexture.restype = None
+        self.gl.glTexImage2D.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        self.gl.glTexImage2D.restype = None
+        self.gl.glTexSubImage2D.argtypes = [ctypes.c_uint, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        self.gl.glTexSubImage2D.restype = None
+        self.gl.glGetString.argtypes = [ctypes.c_uint]
+        self.gl.glGetString.restype = ctypes.c_char_p
+        self.gl.glGetError.argtypes = []
+        self.gl.glGetError.restype = ctypes.c_uint
+        self.gl.glFinish.argtypes = []
+        self.gl.glFinish.restype = None
+
+    def binding(self) -> Any:
+        """xrCreateSession 链上的图形绑定结构（`create()` 返回前不得释放）。"""
+        raise NotImplementedError
+
+    def gl_string(self, which: int) -> str:
+        p = self.gl.glGetString(which)
+        return p.decode() if p else "?"
+
+    def upload(self, texture_id: int, width: int, height: int, rgba: bytes) -> None:
+        """把一张 RGBA 贴图写进 swapchain 给我们的 GL 纹理。
+
+        ⚠️ 必须用 `glTexSubImage2D`，**不能**用 `glTexImage2D`：swapchain 的纹理是运行时
+        已经完整分配的（immutable），重新 `glTexImage2D` 会返回 `GL_INVALID_OPERATION
+        (0x502)` —— 上传静默失败、纹理保持初始黑色。实测现象就是「面板纯黑、没有任何文字」。
+
+        ⚠️ 还要按行倒序：OpenGL 纹理原点在**左下**，而 PIL 图像是**自上而下**，
+        不翻转的话面板内容整体倒置。
+        """
+        import numpy as np
+        arr = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[::-1]
+        buf = ctypes.create_string_buffer(arr.tobytes(), len(rgba))
+        self.gl.glBindTexture(GL_TEXTURE_2D, texture_id)
+        self.gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, buf)
+        err = self.gl.glGetError()
+        if err:
+            log.warning("[overlay:xr] GL 上传出错 glGetError=0x%x（texture=%s %dx%d）",
+                        err, texture_id, width, height)
+        self.gl.glFinish()
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class EglGlContext(_GlBackend):
+    """Wayland + EGL 的 **surfaceless** context（`XR_MNDX_egl_enable` 图形绑定）。
+
+    这是 niri / KDE / GNOME 等 Wayland 会话的常规路径（本机实测通过）。
+    """
+
+    name = "wayland-egl"
+    REQUIRED_EXTENSIONS = ("XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable")
+
+    def __init__(self) -> None:
+        super().__init__()
         self.wl = ctypes.CDLL("libwayland-client.so.0")
         self.egl = ctypes.CDLL("libEGL.so.1")
-        self.gl = ctypes.CDLL("libGL.so.1")
-        self._bind()
+        self._bind_egl()
 
         self.wl_display = self.wl.wl_display_connect(None)
         if not self.wl_display:
@@ -305,7 +402,7 @@ class EglGlContext:
                                        self.egl_context):
             raise RuntimeError(f"eglMakeCurrent(surfaceless) 失败 0x{self.egl.eglGetError():x}")
 
-    def _bind(self) -> None:
+    def _bind_egl(self) -> None:
         self.wl.wl_display_connect.argtypes = [ctypes.c_char_p]
         self.wl.wl_display_connect.restype = ctypes.c_void_p
         self.wl.wl_display_disconnect.argtypes = [ctypes.c_void_p]
@@ -330,53 +427,24 @@ class EglGlContext:
         self.egl.eglGetError.restype = ctypes.c_uint
         self.egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
         self.egl.eglGetProcAddress.restype = ctypes.c_void_p
-        self.gl.glBindTexture.argtypes = [ctypes.c_uint, ctypes.c_uint]
-        self.gl.glBindTexture.restype = None
-        self.gl.glTexImage2D.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int,
-                                         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                         ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
-        self.gl.glTexImage2D.restype = None
-        self.gl.glTexSubImage2D.argtypes = [ctypes.c_uint, ctypes.c_int,
-                                            ctypes.c_int, ctypes.c_int,
-                                            ctypes.c_int, ctypes.c_int,
-                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
-        self.gl.glTexSubImage2D.restype = None
-        self.gl.glGetString.argtypes = [ctypes.c_uint]
-        self.gl.glGetString.restype = ctypes.c_char_p
-        self.gl.glGetError.argtypes = []
-        self.gl.glGetError.restype = ctypes.c_uint
-        self.gl.glFinish.argtypes = []
-        self.gl.glFinish.restype = None
 
     def get_proc_address_addr(self) -> int:
         """Monado 会**真的调用**我们提供的 `getProcAddress`。"""
         return ctypes.cast(self.egl.eglGetProcAddress, ctypes.c_void_p).value
 
-    def gl_string(self, which: int) -> str:
-        p = self.gl.glGetString(which)
-        return p.decode() if p else "?"
+    def binding(self) -> Any:
+        """构造 `GraphicsBindingEGLMNDX`（三个指针字段的类型来自 PyOpenGL）。
 
-    def upload(self, texture_id: int, width: int, height: int, rgba: bytes) -> None:
-        """把一张 RGBA 贴图写进 swapchain 给我们的 GL 纹理。
-
-        ⚠️ 必须用 `glTexSubImage2D`，**不能**用 `glTexImage2D`：swapchain 的纹理是运行时
-        已经完整分配的（immutable），重新 `glTexImage2D` 会返回 `GL_INVALID_OPERATION
-        (0x502)` —— 上传静默失败、纹理保持初始黑色。实测现象就是「面板纯黑、没有任何文字」。
-
-        ⚠️ 还要按行倒序：OpenGL 纹理原点在**左下**，而 PIL 图像是**自上而下**，
-        不翻转的话面板内容整体倒置。
+        ⚠️ 不能给 int / c_void_p，必须 `ctypes.cast(c_void_p(addr), 该类型)`，
+            否则报 "expected EGLDisplay instead of int"。
         """
-        import numpy as np
-        arr = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[::-1]
-        buf = ctypes.create_string_buffer(arr.tobytes(), len(rgba))
-        self.gl.glBindTexture(GL_TEXTURE_2D, texture_id)
-        self.gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
-                                GL_RGBA, GL_UNSIGNED_BYTE, buf)
-        err = self.gl.glGetError()
-        if err:
-            log.warning("[overlay:xr] GL 上传出错 glGetError=0x%x（texture=%s %dx%d）",
-                        err, texture_id, width, height)
-        self.gl.glFinish()
+        import xr
+        t = {n: tp for n, tp in xr.GraphicsBindingEGLMNDX._fields_}
+        return xr.GraphicsBindingEGLMNDX(
+            get_proc_address=t["get_proc_address"](self.get_proc_address_addr()),
+            display=ctypes.cast(ctypes.c_void_p(self.egl_display), t["display"]),
+            config=ctypes.cast(ctypes.c_void_p(self.egl_config.value), t["config"]),
+            context=ctypes.cast(ctypes.c_void_p(self.egl_context), t["context"]))
 
     def close(self) -> None:
         for fn, args in ((self.egl.eglMakeCurrent,
@@ -386,6 +454,243 @@ class EglGlContext:
                 fn(*args)
             except Exception:  # noqa: BLE001
                 pass
+
+
+# Xlib 错误处理回调签名：int handler(Display*, XErrorEvent*)
+_X_ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+
+class XlibGlxContext(_GlBackend):
+    """X11 + GLX 的 **pbuffer** context（`GraphicsBindingOpenGLXlibKHR` 图形绑定）。
+
+    用在真正的 Xorg 会话（或带完整 XWayland/GLX 的桌面）。
+    ⚠️ niri 的精简 `xwayland-satellite` 没有可用的 GLX 渲染 —— 那条路上会建不起来，
+       但这没关系：niri 是 Wayland 会话，走上面的 EGL 后端（`create_gl_context()` 选择）。
+
+    为什么用 pbuffer 而不是窗口：贴图只是上传到 swapchain 的纹理，不需要可见窗口；
+    pbuffer 不需要窗口管理器配合，Xvfb/无头环境也能建起来（离线测试就靠这条）。
+
+    ⚠️⚠️ **建上下文期间必须接管 Xlib 的错误处理器**：GLX 的失败（比如
+    `glXCreateContextAttribsARB` 在不支持 GLX 渲染的 X server 上）走的是 Xlib
+    **异步错误**通道，而 Xlib 默认处理器会把**整个进程**杀掉（打印一行
+    `X Error of failed request: GLXBadFBConfig` 然后 exit）—— 实测踩过：
+    在 niri 的 `xwayland-satellite` 上只是建 overlay 的 GL context，却把整个应用带走了。
+    这里在作用域内装自己的处理器（吞掉 + 记账），`XSync` 把异步错误冲出来，
+    然后还原原处理器；有错就抛 RuntimeError 交给 `create_gl_context()` 回退。
+    （处理器是 Xlib 进程级全局的，窗口期只有毫秒级；期间别的线程的 X 错误会被
+      一并吞掉——但那本来会导致 exit，吞掉反而是更安全的偏置。）
+    """
+
+    name = "x11-glx"
+    REQUIRED_EXTENSIONS = ("XR_EXTX_overlay", "XR_KHR_opengl_enable")
+
+    def __init__(self, width: int = 64, height: int = 64) -> None:
+        super().__init__()
+        self.x = ctypes.CDLL("libX11.so.6")
+        self.glx = ctypes.CDLL("libGL.so.1")     # GLX 符号在 libGL 里
+        self._bind_x()
+
+        self.display = self.x.XOpenDisplay(None)
+        if not self.display:
+            raise RuntimeError("XOpenDisplay 失败（DISPLAY 没设或 X server 连不上？）")
+        self._fbconfigs_raw = None
+        self.pbuffer = 0
+        self.context = None
+        self._xerror_hits: list[int] = []
+
+        def _on_xerror(_display, _event):          # noqa: ANN001 — ctypes 回调
+            self._xerror_hits.append(1)
+            return 0                                # 忽略（默认处理器会 exit，绝不能走它）
+
+        self._xerror_cb = _X_ERROR_HANDLER(_on_xerror)   # 必须留引用：GC 掉就是野指针
+        old_handler = self.x.XSetErrorHandler(self._xerror_cb)
+        try:
+            try:
+                err_base = ctypes.c_int(0)
+                evt_base = ctypes.c_int(0)
+                if not self.glx.glXQueryExtension(self.display, ctypes.byref(err_base),
+                                                  ctypes.byref(evt_base)):
+                    raise RuntimeError("X server 没有 GLX 扩展")
+
+                screen = self.x.XDefaultScreen(self.display)
+                attribs = (ctypes.c_int * 15)(
+                    GLX_X_RENDERABLE, 1,
+                    GLX_DRAWABLE_TYPE, GLX_PBUFFER_BIT,
+                    GLX_RENDER_TYPE, GLX_RGBA_BIT,
+                    GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8,
+                    GLX_BLUE_SIZE, 8, GLX_ALPHA_SIZE, 8, 0)
+                nelem = ctypes.c_int(0)
+                raw = self.glx.glXChooseFBConfig(self.display, screen, attribs,
+                                                 ctypes.byref(nelem))
+                if not raw or nelem.value == 0:
+                    raise RuntimeError("glXChooseFBConfig 没找到可用配置")
+                self._fbconfigs_raw = raw
+                fbconfig = ctypes.cast(raw, ctypes.POINTER(ctypes.c_void_p))[0]
+                self.fbconfig = fbconfig
+                vid = ctypes.c_int(0)
+                self.glx.glXGetFBConfigAttrib(self.display, ctypes.c_void_p(fbconfig),
+                                              GLX_VISUAL_ID, ctypes.byref(vid))
+                self.visualid = vid.value
+
+                pb_attribs = (ctypes.c_int * 5)(GLX_PBUFFER_WIDTH, width,
+                                                GLX_PBUFFER_HEIGHT, height, 0)
+                self.pbuffer = self.glx.glXCreatePbuffer(self.display,
+                                                         ctypes.c_void_p(fbconfig), pb_attribs)
+                if not self.pbuffer:
+                    raise RuntimeError("glXCreatePbuffer 失败")
+                self.context = self._create_context(fbconfig)
+                if not self.context:
+                    raise RuntimeError("glXCreate*Context 全部失败")
+                if not self.glx.glXMakeCurrent(self.display, self.pbuffer, self.context):
+                    raise RuntimeError("glXMakeCurrent 失败")
+
+                # 把异步 X 错误冲出来：没这一步错误会「迟到」到处理器还原之后
+                self.x.XSync(self.display, 0)
+                if self._xerror_hits:
+                    raise RuntimeError("GLX 建上下文收到 X 错误"
+                                       "（这个 X server 不支持 GLX 渲染？）")
+            except Exception:
+                self.close()          # 建到一半失败也要把 X 连接/上下文收干净
+                raise
+        finally:
+            self.x.XSetErrorHandler(old_handler)
+
+    def _create_context(self, fbconfig: int) -> int | None:
+        """先试 3.3 core（与 EGL 后端同口径），不行退回兼容 profile。"""
+        try:
+            proc = self.glx.glXGetProcAddressARB(b"glXCreateContextAttribsARB")
+            if proc:
+                fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                      ctypes.c_void_p, ctypes.c_int,
+                                      ctypes.POINTER(ctypes.c_int))(proc)
+                attribs = (ctypes.c_int * 7)(
+                    GLX_CONTEXT_MAJOR_VERSION_ARB, 3,
+                    GLX_CONTEXT_MINOR_VERSION_ARB, 3,
+                    GLX_CONTEXT_PROFILE_MASK_ARB, GLX_CONTEXT_CORE_PROFILE_BIT_ARB, 0)
+                ctx = fn(self.display, ctypes.c_void_p(fbconfig), None, 1, attribs)
+                if ctx:
+                    return ctx
+        except Exception:  # noqa: BLE001 — 拿不到 ARB 入口就退回老接口
+            pass
+        return self.glx.glXCreateNewContext(self.display, ctypes.c_void_p(fbconfig),
+                                            GLX_RGBA_TYPE, None, 1)
+
+    def _bind_x(self) -> None:
+        self.x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self.x.XOpenDisplay.restype = ctypes.c_void_p
+        self.x.XDefaultScreen.argtypes = [ctypes.c_void_p]
+        self.x.XDefaultScreen.restype = ctypes.c_int
+        self.x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        self.x.XCloseDisplay.restype = ctypes.c_int
+        self.x.XFree.argtypes = [ctypes.c_void_p]
+        self.x.XFree.restype = ctypes.c_int
+        # ⚠️ 建上下文期间要接管错误处理器 + 主动 XSync（见 __init__ 的说明）
+        self.x.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        self.x.XSetErrorHandler.restype = ctypes.c_void_p
+        self.x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.x.XSync.restype = ctypes.c_int
+        self.glx.glXQueryExtension.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+                                               ctypes.POINTER(ctypes.c_int)]
+        self.glx.glXQueryExtension.restype = ctypes.c_int
+        self.glx.glXChooseFBConfig.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                               ctypes.POINTER(ctypes.c_int),
+                                               ctypes.POINTER(ctypes.c_int)]
+        self.glx.glXChooseFBConfig.restype = ctypes.c_void_p
+        self.glx.glXGetFBConfigAttrib.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                  ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+        self.glx.glXGetFBConfigAttrib.restype = ctypes.c_int
+        self.glx.glXCreatePbuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                              ctypes.POINTER(ctypes.c_int)]
+        self.glx.glXCreatePbuffer.restype = ctypes.c_ulong
+        self.glx.glXCreateNewContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                 ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        self.glx.glXCreateNewContext.restype = ctypes.c_void_p
+        self.glx.glXMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]
+        self.glx.glXMakeCurrent.restype = ctypes.c_int
+        self.glx.glXGetProcAddressARB.argtypes = [ctypes.c_char_p]
+        self.glx.glXGetProcAddressARB.restype = ctypes.c_void_p
+        self.glx.glXDestroyContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.glx.glXDestroyContext.restype = None
+        self.glx.glXDestroyPbuffer.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        self.glx.glXDestroyPbuffer.restype = None
+
+    def binding(self) -> Any:
+        """构造 `GraphicsBindingOpenGLXlibKHR`（字段类型来自 PyOpenGL 的 GLX 实现）。
+
+        ⚠️ 与 EGL 那条一样：指针字段必须 cast 成 PyOpenGL 声明的类型，不能给裸 int。
+        """
+        import xr
+        t = {n: tp for n, tp in xr.GraphicsBindingOpenGLXlibKHR._fields_}
+        return xr.GraphicsBindingOpenGLXlibKHR(
+            x_display=ctypes.cast(ctypes.c_void_p(self.display), t["x_display"]),
+            visualid=int(self.visualid),
+            glx_fbconfig=ctypes.cast(ctypes.c_void_p(self.fbconfig), t["glx_fbconfig"]),
+            glx_drawable=int(self.pbuffer),
+            glx_context=ctypes.cast(ctypes.c_void_p(self.context), t["glx_context"]))
+
+    def close(self) -> None:
+        display = getattr(self, "display", None)
+        if not display:
+            return
+        try:
+            if self.context:
+                self.glx.glXMakeCurrent(display, 0, None)
+                self.glx.glXDestroyContext(display, self.context)
+                self.context = None
+            if self.pbuffer:
+                self.glx.glXDestroyPbuffer(display, self.pbuffer)
+                self.pbuffer = 0
+            if self._fbconfigs_raw:
+                self.x.XFree(self._fbconfigs_raw)
+                self._fbconfigs_raw = None
+        finally:
+            self.display = None
+            try:
+                self.x.XCloseDisplay(display)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_GL_BACKENDS: dict[str, type[_GlBackend]] = {"wayland": EglGlContext, "x11": XlibGlxContext}
+
+
+def create_gl_context() -> _GlBackend:
+    """挑一个能建起来的 GL 后端并返回（Wayland 优先，失败回退 X11）。
+
+    选择顺序：
+      * 环境里**两个**都设了（Wayland 会话带 XWayland）→ 先试 Wayland（niri 的
+        xwayland-satellite 没有 GLX，Wayland 才是主路）；
+      * 只有 DISPLAY（Xorg 会话）→ 走 X11/GLX；
+      * 两个都没有 → 两条都试一遍，把两边的错误都报出来（便于排查）。
+    可用 `VLT_OVERLAY_GL=wayland|x11` 强制指定（只试那一条，失败直接抛）。
+    """
+    import os
+    forced = (os.environ.get("VLT_OVERLAY_GL") or "").strip().lower()
+    if forced and forced not in _GL_BACKENDS:
+        log.warning("[overlay:xr] VLT_OVERLAY_GL=%r 不认识（只认 wayland/x11）→ 忽略", forced)
+        forced = ""
+    if forced:
+        order = [forced]
+    else:
+        order = []
+        if os.environ.get("WAYLAND_DISPLAY"):
+            order.append("wayland")
+        if os.environ.get("DISPLAY"):
+            order.append("x11")
+        if not order:
+            order = ["wayland", "x11"]
+
+    errors: list[str] = []
+    for kind in order:
+        try:
+            backend = _GL_BACKENDS[kind]()
+        except Exception as exc:  # noqa: BLE001 — 换下一个后端；全失败时统一报
+            errors.append(f"{kind}: {type(exc).__name__}: {exc}")
+            log.warning("[overlay:xr] GL 后端 %s 建不起来（%s）→ 试下一个", kind, exc)
+            continue
+        log.info("[overlay:xr] GL 后端：%s", backend.name)
+        return backend
+    raise RuntimeError("GL 后端都建不起来：" + "；".join(errors))
 
 
 # ================================================================ OpenXR 会话
@@ -423,7 +728,7 @@ class XrOverlaySession:
     （渲染、热重载、自愈），两层职责分明。
     """
 
-    def __init__(self, gl: "EglGlContext", size_px: tuple[int, int]) -> None:
+    def __init__(self, gl: "_GlBackend", size_px: tuple[int, int]) -> None:
         self._gl = gl
         self.size_px = size_px
         self.instance: Any = None
@@ -435,7 +740,13 @@ class XrOverlaySession:
         self.ref_space: Any = None          # LOCAL
         self.view_space: Any = None         # VIEW（anchor=hmd 用）
         self.action_set: Any = None
-        self._action_map: dict[str, Any] = {}     # anchor_key → (action, space)
+        # 锚点 → 动作/空间。**一次建全**：动作集一旦 attach 就变成 immutable，
+        # 之后 `xrCreateAction` / `xrSuggestInteractionProfileBindings` /
+        # `xrAttachSessionActionSets` 一律返回 XR_ERROR_ACTIONSETS_ALREADY_ATTACHED
+        # （规范原文见 `_ensure_actions`）。所以切锚点**不能**再建动作，只能换用哪个 space。
+        self._actions: dict[tuple[str, int], Any] = {}
+        self._spaces: dict[tuple[str, int], Any] = {}
+        self._actions_ready = False
         self._anchor_key: tuple[str, int] | None = None
         self._frame_state: Any = None
         # 「整层 alpha + 转字节」的记忆化缓存：(帧, alpha, bytes)。
@@ -474,7 +785,7 @@ class XrOverlaySession:
         overlay_info = xr.SessionCreateInfoOverlayEXTX(
             create_flags=xr.OverlaySessionCreateFlagsEXTX(0),   # 规范要求必须 0
             session_layers_placement=100)
-        binding = self._egl_binding()
+        binding = self._gl.binding()
         # 链顺序：SessionCreateInfo → GraphicsBinding → Overlay（顺序不能反）
         binding.next = ctypes.cast(ctypes.pointer(overlay_info), ctypes.c_void_p)
         create_info = xr.SessionCreateInfo(system_id=self.system_id)
@@ -506,21 +817,6 @@ class XrOverlaySession:
         for _ in range(50):
             self.pump_events()
             time.sleep(0.01)
-
-    def _egl_binding(self) -> Any:
-        """构造 `GraphicsBindingEGLMNDX`（三个指针字段的类型来自 PyOpenGL）。
-
-        ⚠️ 不能给 int / c_void_p，必须 `ctypes.cast(c_void_p(addr), 该类型)`，
-            否则报 "expected EGLDisplay instead of int"。
-        """
-        import xr
-        f = xr.GraphicsBindingEGLMNDX._fields_
-        pfn_t, disp_t, cfg_t, ctx_t = f[0][1], f[1][1], f[2][1], f[3][1]
-        return xr.GraphicsBindingEGLMNDX(
-            get_proc_address=pfn_t(self._gl.get_proc_address_addr()),
-            display=ctypes.cast(ctypes.c_void_p(self._gl.egl_display), disp_t),
-            config=ctypes.cast(ctypes.c_void_p(self._gl.egl_config.value), cfg_t),
-            context=ctypes.cast(ctypes.c_void_p(self._gl.egl_context), ctx_t))
 
     def _create_ref_spaces(self) -> None:
         # ⚠️ `create_reference_space` 的第一个参数是 **session**，不是 instance。
@@ -556,50 +852,144 @@ class XrOverlaySession:
         self._create_swapchain()
 
     # ---------- 锚点 ----------
-    def ensure_anchor(self, anchor: str, tracker_index: int) -> None:
-        """确保配置要求的锚点空间已建立（改锚点时重建）。"""
-        key = (anchor, int(tracker_index))
-        if key == self._anchor_key:
+
+    # 手部锚点建议绑定的交互 profile。只给一个的话，控制器型号对不上就完全没有 pose。
+    HAND_PROFILES = (
+        "/interaction_profiles/khr/simple_controller",
+        "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/valve/index_controller",
+        "/interaction_profiles/microsoft/motion_controller",
+        "/interaction_profiles/htc/vive_controller",
+    )
+    # tracker 走 **HTC Vive Tracker 专用 profile**（`/user/vive_tracker_htcx/role/...`
+    # 是它的子动作路径）。拿控制器 profile 去绑 tracker 路径会被运行时判成无效绑定。
+    TRACKER_PROFILE = "/interaction_profiles/htc/vive_tracker_htcx"
+
+    @staticmethod
+    def _anchor_keys() -> list[tuple[str, int]]:
+        """开局就把这些锚点的动作全建出来（attach 之后就再也不能建了）。"""
+        return ([("left_hand", 0), ("right_hand", 0)]
+                + [("tracker", i) for i in range(len(TRACKER_ROLES))])
+
+    def _ensure_actions(self) -> None:
+        """建好全部锚点动作 + 建议绑定 + attach —— **整个会话只做一次**。
+
+        规范（OpenXR `input.adoc`）写得没有余地：
+          * `xrAttachSessionActionSets`「**must** return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED
+            if called more than once for a given session」；
+          * `xrCreateAction` / `xrSuggestInteractionProfileBindings`：「If `actionSet` has been
+            included in a call to `xrAttachSessionActionSets`, the implementation **must**
+            return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED」——「When an action set is attached
+            to a session, that action set becomes **immutable**」。
+
+        老代码是「按需建动作」：每换一次锚点就 `create_action` + `attach` 一次，于是从
+        第二次起必然抛 `ActionsetsAlreadyAttachedError`，被热重载的 `except` 吃掉 ——
+        **面板压根没换过挂点**（用户实测日志：切左手/切 tracker 各报一次这条错）。
+        所以这里改成「一次建全、之后只换 space」。
+
+        ⚠️ 建议绑定**必须按 interaction profile 聚合，每个 profile 只调一次**。规范同一节：
+        「If the application successfully calls xrSuggestInteractionProfileBindings more than
+        once for an interaction profile, the runtime **must discard the previous suggested
+        bindings and replace them** with the new suggested bindings」。逐个动作各调一次的话，
+        每个 profile 上只剩**最后一个动作**的绑定 —— 实测踩过：修好右手之后，右手那条把
+        左手那条覆盖掉，左手锚点就永远 untracked、静默退回 VIEW（面板跟着头）。
+        这个 API 收的就是一张绑定**表**，一次给全才是它的用法。
+        """
+        if self._actions_ready:
             return
         import xr
-        full, top = anchor_paths(anchor, tracker_index)
-        if full is None:
-            self._anchor_key = key          # hmd → 直接用 view_space
-            return
         if self.action_set is None:
             self.action_set = xr.create_action_set(self.instance, xr.ActionSetCreateInfo(
                 action_set_name="vlt_wrist", localized_action_set_name="VLT Wrist Panel",
                 priority=0))
-        name = f"pose_{anchor}_{tracker_index}"
-        act = xr.create_action(self.action_set, xr.ActionCreateInfo(
-            action_name=name, action_type=xr.ActionType.POSE_INPUT,
-            localized_action_name="Wrist Anchor",
-            subaction_paths=[xr.string_to_path(self.instance, top)]))
-        # 建议多个 profile —— 只给一个的话，控制器型号对不上就完全没有 pose
-        for profile in ("/interaction_profiles/khr/simple_controller",
-                        "/interaction_profiles/oculus/touch_controller",
-                        "/interaction_profiles/valve/index_controller",
-                        "/interaction_profiles/microsoft/motion_controller",
-                        "/interaction_profiles/htc/vive_controller"):
+        # tracker 整族的可用性：HTC tracker 的 role 路径属于扩展
+        # `XR_HTCX_vive_tracker_interaction`，运行时不支持（没接 tracker 的 WiVRn/Monado 就是）
+        # 就**整族跳过** —— 否则每开一次程序对着 8 个 role 各报一次错，真正的故障反而被淹。
+        tracker_ok = TRACKER_EXT in self.extensions
+        if not tracker_ok:
+            log.info("[overlay:xr] 本运行时没启用 %s → 跳过 tracker 动作（左右手锚点不受影响；"
+                     "要用 tracker 锚点得先在运行时里接上 tracker）", TRACKER_EXT)
+        skip_tracker = not tracker_ok
+        for anchor, idx in self._anchor_keys():
+            # ★ 逐个锚点降级：某个运行时（或某版 Monado）不认 tracker 的 role 路径时，
+            #   只该让**那一个锚点**不可用，绝不能把整条手腕屏拖死 —— 现在开局就会建
+            #   全部 8 个 tracker role 的动作，一个不认就整条腿没了（老实现只建当前
+            #   锚点，所以踩不到，改成「一次建全」之后这层兜底是必须的）。
+            if anchor == "tracker" and skip_tracker:
+                continue
+            try:
+                full, top = anchor_paths(anchor, idx)
+                if full is None:                 # hmd → 用 VIEW 参考空间，不需要动作
+                    continue
+                act = xr.create_action(self.action_set, xr.ActionCreateInfo(
+                    action_name=f"pose_{anchor}_{idx}", action_type=xr.ActionType.POSE_INPUT,
+                    # ⚠️ `localizedActionName` 在**同一个动作集内必须唯一**（规范：
+                    #    duplicates of the corresponding field for any existing action in
+                    #    the specified action set → **must** XR_ERROR_LOCALIZED_NAME_DUPLICATED）。
+                    #    实测踩过：10 个动作共用 "Wrist Anchor" → 只有第一个建得出来，
+                    #    右边/左手那个建不出来 → 查不到 space → 面板静默回退到 VIEW（跟着头）。
+                    localized_action_name=f"Wrist Anchor {anchor} {idx}",
+                    subaction_paths=[xr.string_to_path(self.instance, top)]))
+                self._actions[(anchor, idx)] = act
+            except Exception as exc:  # noqa: BLE001
+                if anchor == "tracker":
+                    skip_tracker = True          # 一个 role 建不出来 → 整族跳过（同一扩展管）
+                    log.warning("[overlay:xr] ⚠️ tracker 的 role 路径用不了 → tracker 锚点整族跳过"
+                                "（左右手不受影响）：%s: %s", type(exc).__name__, exc)
+                else:
+                    log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的动作建不出来，该锚点退回 VIEW 空间"
+                                "（其它锚点不受影响）：%s: %s", anchor, idx, type(exc).__name__, exc)
+
+        # 按 interaction profile 聚合绑定：**每个 profile 一次性给全**（见上面的规范引用）。
+        # 左右手可以放同一次调用：控制器 profile 的 allowlist 对 /user/hand/left 与
+        # /user/hand/right 都有效且都定义了 /input/grip/pose。
+        by_profile: dict[str, list[tuple[Any, str]]] = {}
+        for (anchor, idx), act in self._actions.items():
+            full, _ = anchor_paths(anchor, idx)
+            profiles = ((self.TRACKER_PROFILE,) if anchor == "tracker" else self.HAND_PROFILES)
+            for profile in profiles:
+                by_profile.setdefault(profile, []).append((act, full))
+        for profile, pairs in by_profile.items():
             try:
                 xr.suggest_interaction_profile_bindings(
                     self.instance, xr.InteractionProfileSuggestedBinding(
                         interaction_profile=xr.string_to_path(self.instance, profile),
                         suggested_bindings=[xr.ActionSuggestedBinding(
-                            action=act, binding=xr.string_to_path(self.instance, full))]))
-            except Exception:  # noqa: BLE001 — 运行时不认的 profile 跳过
-                pass
+                            action=act, binding=xr.string_to_path(self.instance, full))
+                            for act, full in pairs]))
+            except Exception as exc:  # noqa: BLE001 — 运行时不认的 profile 整组跳过
+                log.info("[overlay:xr] 交互 profile %s 的绑定建议被运行时拒绝（该 profile 上的"
+                         "锚点会退回 VIEW 空间）：%s", profile, exc)
+
+        # ★ 唯一的 attach 机会
         xr.attach_session_action_sets(self.session, xr.SessionActionSetsAttachInfo(
             action_sets=[self.action_set]))
-        space = xr.create_action_space(self.session, xr.ActionSpaceCreateInfo(
-            action=act, subaction_path=xr.string_to_path(self.instance, top),
-            pose_in_action_space=xr.Posef(
-                orientation=xr.Quaternionf(0.0, 0.0, 0.0, 1.0),
-                position=xr.Vector3f(0.0, 0.0, 0.0))))
-        self._action_map = {name: (act, space)}
-        self._anchor_key = key
+        # 空间可以在 attach 之后再建（它不改动作集）。全部建好，切锚点就只是查表。
+        for (anchor, idx), act in self._actions.items():
+            try:
+                _, top = anchor_paths(anchor, idx)
+                self._spaces[(anchor, idx)] = xr.create_action_space(
+                    self.session, xr.ActionSpaceCreateInfo(
+                        action=act, subaction_path=xr.string_to_path(self.instance, top),
+                        pose_in_action_space=xr.Posef(
+                            orientation=xr.Quaternionf(0.0, 0.0, 0.0, 1.0),
+                            position=xr.Vector3f(0.0, 0.0, 0.0))))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[overlay:xr] ⚠️ 锚点 %s#%d 的空间建不出来，退回 VIEW 空间：%s: %s",
+                            anchor, idx, type(exc).__name__, exc)
+        self._actions_ready = True
 
-    def anchor_space(self, anchor: str) -> Any:
+    def ensure_anchor(self, anchor: str, tracker_index: int) -> None:
+        """切到某个锚点：确保动作都已建好（只建一次），然后记下当前用哪一个 space。
+
+        ⚠️ 这里**不做任何会改动动作集的 XR 调用** —— 换了锚点只是换 `anchor_space()`
+        返回哪个 space（以及 `sync_actions` 照旧每帧跑）。重建动作集/重新 attach 在
+        OpenXR 里是被规范明确禁止的（见 `_ensure_actions`）。
+        """
+        self._ensure_actions()
+        self._anchor_key = (anchor, int(tracker_index))
+
+    def anchor_space(self, anchor: str, tracker_index: int = 0) -> Any:
         """层要挂到哪个 space。
 
         ⚠️ action space 在动作同步生效前是**未追踪**的，层会落到 LOCAL 原点 ——
@@ -608,11 +998,9 @@ class XrOverlaySession:
         """
         if anchor == "hmd":
             return self.view_space
-        if self._action_map:
-            space = next(iter(self._action_map.values()))[1]
-            if self._space_tracked(space):
-                return space
-            return self.view_space
+        space = self._spaces.get((anchor, int(tracker_index)))
+        if space is not None and self._space_tracked(space):
+            return space
         return self.view_space
 
     def _space_tracked(self, space: Any) -> bool:
@@ -627,12 +1015,14 @@ class XrOverlaySession:
         except Exception:  # noqa: BLE001
             return False
 
-    def anchor_tracked(self, anchor: str) -> bool | None:
+    def anchor_tracked(self, anchor: str, tracker_index: int = 0) -> bool | None:
         """锚点是否被追踪（诊断用；拿不到返回 None）。"""
         import xr
-        if anchor == "hmd" or not self._action_map:
+        if anchor == "hmd":
             return None
-        space = next(iter(self._action_map.values()))[1]
+        space = self._spaces.get((anchor, int(tracker_index)))
+        if space is None:
+            return None
         try:
             self._frame_state = self._frame_state or xr.wait_frame(self.session)
             loc = xr.locate_space(space, self.ref_space,
@@ -731,7 +1121,7 @@ class XrOverlaySession:
         pose = xr.Posef(
             orientation=xr.Quaternionf(*euler_to_quaternion(cfg.rot)),
             position=xr.Vector3f(*pos))
-        space = self.anchor_space(cfg.anchor)
+        space = self.anchor_space(cfg.anchor, cfg.tracker_index)
         # ★ 两个 flag 缺一不可：BLEND 让贴图的 alpha 真的生效（否则整层不透明 →
         #   蓝框外一圈黑边），UNPREMULTIPLIED 声明我们给的是未预乘 alpha
         #   （PIL 的语义，与 Windows 侧给 SteamVR 的一致）。见 layer_alpha_flags()。
@@ -808,7 +1198,7 @@ class OpenXrOverlay:
         self.dry_run = dry_run
         self.available = False
         self.frames_updated = 0
-        self._gl: EglGlContext | None = None
+        self._gl: _GlBackend | None = None
         self._sess: XrOverlaySession | None = None
         self._last_render: tuple[str, str] | None = None
         self._last_entries: tuple | None = None
@@ -871,7 +1261,7 @@ class OpenXrOverlay:
     def _xr_main(self) -> None:
         """XR 主循环：建 GL/session → 帧循环 → 清理，**全在这一个线程里**。"""
         try:
-            self._gl = EglGlContext()
+            self._gl = create_gl_context()
             self._bring_up(rebuild_gl=False)
         except Exception as exc:  # noqa: BLE001
             log.warning("[overlay:xr] ⚠️ 建立 overlay 会话失败：%s: %s"
@@ -966,9 +1356,9 @@ class OpenXrOverlay:
         if rebuild_gl or self._gl is None:
             if self._gl is not None:
                 self._gl.close()
-            self._gl = EglGlContext()
+            self._gl = create_gl_context()
         self._sess = XrOverlaySession(self._gl, self.cfg.size_px)
-        self._sess.create(self._extensions())
+        self._sess.create(self._extensions(self._gl.REQUIRED_EXTENSIONS))
         self._sess.ensure_anchor(self.cfg.anchor, self.cfg.tracker_index)
         # 先记下「当前内容」，重建后要照原样画回去（否则自愈后屏幕是空的）
         cached_entries, cached_render = self._last_entries_cached, self._last_render_cached
@@ -980,24 +1370,32 @@ class OpenXrOverlay:
             self.update(*cached_render, force=True)
 
     @staticmethod
-    def _extensions() -> list[str]:
+    def _extensions(required: tuple[str, ...] = (
+            "XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable")) -> list[str]:
         """挑出可用的扩展（运行时不支持的就不启用，免得 create_instance 直接失败）。
+
+        `required` 由 GL 后端声明（`_GlBackend.REQUIRED_EXTENSIONS`）：Wayland 的
+        EGL_MNDX 要 `XR_MNDX_egl_enable`，X11 的 XLIB 绑定只要 `XR_KHR_opengl_enable`。
+        默认值保持 Wayland 那套（旧调用口径不变）。
 
         ⚠️ 枚举失败时**不猜**：只请求「没有它这条腿根本起不来」的必需项，不把可选的
         柱面扩展（`CYLINDER_EXT`）算进去。请求一个运行时没有的扩展会让 `create_instance`
         直接失败 —— 那是**整条手腕屏消失**，比「不弯」严重得多。柱面的能力判定改由
         `submit()` 按实际启用的扩展做，拿不到就退回平面（`effective_curvature()`）。
+
+        `TRACKER_EXT` 同理：有就启用（tracker 锚点才有可能可用），没有就不请求 ——
+        反正那族路径不存在，`_ensure_actions()` 会按启用列表把 tracker 整族跳过。
         """
         import xr
-        required = ["XR_EXTX_overlay", "XR_KHR_opengl_enable", "XR_MNDX_egl_enable"]
+        required = list(required)
         try:
             have = set()
             for e in xr.enumerate_instance_extension_properties():
                 n = e.extension_name
                 have.add(n.decode() if isinstance(n, bytes) else str(n))
         except Exception:  # noqa: BLE001
-            return list(required)            # 枚举不出来就只赌必需项，不赌柱面
-        want = required + [CYLINDER_EXT]
+            return list(required)            # 枚举不出来就只赌必需项，不赌柱面/tracker
+        want = required + [CYLINDER_EXT, TRACKER_EXT]
         return [e for e in want if e in have]
 
     def close(self) -> None:
@@ -1256,7 +1654,8 @@ def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
         ov.update("你好，我是逆袭。这句话正在被实时翻译，看看贴在你手腕上是什么效果。",
                   "Hello! I'm Nixi. This sentence is being translated in real time.")
         print(f"✅ 会话已建立，接下来 {seconds:.0f}s 内会持续重提交这一帧（你会看到这块面板）。"
-              f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offset，存盘即热重载。",
+              f"\n   想调位置/角度：改 config.yaml 的 overlay.anchor / offsets（每个锚点各一份），"
+              f"存盘即热重载。",
               flush=True)
     t0 = time.monotonic()
     seen_states: list[str] = []
@@ -1274,12 +1673,13 @@ def _smoke(seconds: float = 15.0, alpha_test: bool = False) -> int:
                 print(f"    [{time.monotonic()-t0:4.1f}s] 会话状态={st} "
                       f"已提交={ov.frames_updated} 帧 "
                       f"整层 alpha={ov._layer_alpha():.2f} "
-                      f"锚点追踪={ov._sess.anchor_tracked(cfg.anchor)}", flush=True)
+                      f"锚点追踪={ov._sess.anchor_tracked(cfg.anchor, cfg.tracker_index)}", flush=True)
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     print(f"共提交 {ov.frames_updated} 帧；会话状态序列 {'→'.join(seen_states)}；"
-          f"锚点 {cfg.anchor} 追踪={ov._sess.anchor_tracked(cfg.anchor) if ov._sess else None}",
+          f"锚点 {cfg.anchor} 追踪="
+          f"{ov._sess.anchor_tracked(cfg.anchor, cfg.tracker_index) if ov._sess else None}",
           flush=True)
     if ov.frames_updated == 0:
         print("⚠️ 一帧都没提交成功。看上面的失败原因；若是会话一直没到 FOCUSED，"

@@ -40,6 +40,13 @@ ROOT = Path(__file__).resolve().parent.parent
 CHUNK_BYTES = 3200          # 100ms @16kHz s16le mono
 # 音频流静默超过这个时长 = 上一句说完了（给虚拟麦打句尾标记的兜底触发）
 SENTENCE_GAP_S = 0.6
+# 收尾时排空 chatbox 的**墙钟**预算（不是「轮数」）。为什么不写轮数：排空速度由令牌桶的
+# min_gap_s 决定（默认 0.4s 才放一条），轮数和它一耦合，改限流就等于改停止耗时 ——
+# 上一版把 12 轮收成 4 轮后，积压里**最新那条**（用户刚说完的那句）连发都发不出去
+# 就被 close() 掐掉了。现在总耗时有硬上限，且最新一条优先发（见 _drain_chatbox）。
+CHATBOX_DRAIN_BUDGET_S = 2.0
+CHATBOX_DRAIN_TICK_S = 0.05     # 隔一会儿再问一次令牌桶；刻意不与 min_gap_s 耦合
+
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
@@ -509,15 +516,40 @@ class Engine:
         self._thread = t
         t.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        if self._thread is None:
-            return
+    def request_stop(self) -> None:
+        """只**发**停止信号，不等收尾（幂等、线程安全、立即返回）。
+
+        为什么要有这个入口：`stop()` 会在**调用方线程**上等引擎收尾（本仓库停止时
+        实测 ~10s，见下），而界面要停的不止一个引擎 —— 顺序调用就等于让第二个引擎
+        在前一个收尾期间继续采集/上送（用户真机日志：点停止后 loopback 腿又跑了 10s）。
+        界面现在先对所有引擎 `request_stop()`（并发下发，采集立刻停），收尾交给后台线程。
+        """
         self._stopping = True
         self._stop_event.set()          # 直接置位（线程安全）：采集循环下个周期就退出
         if self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._schedule_stop)
-        self._stopped.wait(timeout)
-        self._thread.join(timeout)
+
+    def wait_stopped(self, timeout: float = 5.0) -> bool:
+        """等本引擎**真正收尾完**（线程退出）。返回 False = 超时（线程可能还在跑）。
+
+        只等收尾、不发信号 —— 与 `request_stop()` 配对给界面用。
+        """
+        ok = self._stopped.wait(timeout)
+        if ok and self._thread is not None:
+            self._thread.join(0.5)
+            self._thread = None
+        return ok
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """阻塞版停止（CLI / 测试 / 关窗收尾用）：发信号后等收尾，最多 timeout 秒。
+
+        界面按钮**不要**直接用它 —— 它在调用方线程上等，正是「停止翻译后窗口无响应」
+        的来源（实测双向下 20.04s 无响应）。界面走 `request_stop()` + 后台 `wait_stopped()`。
+        """
+        if self._thread is None:
+            return
+        self.request_stop()
+        self.wait_stopped(timeout)
         self._thread = None
 
     def join(self, timeout: float | None = None) -> None:
@@ -688,12 +720,7 @@ class Engine:
         except Exception:
             pass
         try:
-            if self._chatbox is not None:
-                for _ in range(12):
-                    if self._chatbox.pending_count == 0:
-                        break
-                    self._chatbox.flush_pending()
-                    await asyncio.sleep(0.5)
+            await self._drain_chatbox()
         except Exception:
             pass
         try:
@@ -717,6 +744,39 @@ class Engine:
                 self._chatbox.close()
         except Exception:
             pass
+
+    async def _drain_chatbox(self) -> None:
+        """停止收尾时排空 chatbox：**最新一条优先** + 墙钟有界 + 丢弃留痕。
+
+        三个约束互相拉扯，少一个都不行：
+        ① 有界 —— 排空就卡在收尾路径上，白等就是「点了停止还要卡好几秒」；
+        ② 不丢最新一条 —— 积压里最值钱的恰是**最后**那句（用户刚说完、正等着上屏），
+           按 FIFO 从最旧的开始发，预算一到就把最新那条挤掉了（上一版正是如此）；
+        ③ 丢了要看得见 —— 本仓库禁静默丢弃，否则「译文少了一条」根本无从查起。
+        """
+        cb = self._chatbox
+        if cb is None:
+            return
+        backlog = cb.pending_count
+        if not backlog:
+            return
+        deadline = time.monotonic() + CHATBOX_DRAIN_BUDGET_S
+        newest_sent = False
+        while time.monotonic() < deadline:      # 至少跑一轮 ⇒ 最新一条必有一次机会
+            if not newest_sent:
+                newest_sent = cb.flush_pending(newest_first=True) > 0
+            else:
+                cb.flush_pending()              # 剩下的按原顺序补发，能发几条是几条
+            if cb.pending_count == 0:
+                break
+            await asyncio.sleep(CHATBOX_DRAIN_TICK_S)
+        left = cb.pending_count
+        if left:
+            why = ("最新一条也没排上（限流窗口整段都满）" if not newest_sent
+                   else "最新一条已优先发出")
+            print(f"[chatbox] 停止时放弃 {left}/{backlog} 条未发完的译文（{why}；"
+                  f"排空预算 {CHATBOX_DRAIN_BUDGET_S:.1f}s，限流窗口内排不完，不会重发）",
+                  flush=True)
 
     async def _build_and_run(self) -> None:
         scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
