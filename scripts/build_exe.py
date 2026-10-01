@@ -74,6 +74,7 @@ COLLECT_ALL = ["pyaudiowpatch", "sounddevice", "openvr", "pythonosc"]
 EXCLUDE_WIN = [
     "vlt.platform.linux",
     "vlt.platform.wayland",    # 原生 layer-shell 桌面叠加窗（libwayland-client）
+    "vlt.platform.x11",        # 原生 ARGB 桌面叠加窗（libX11）
     "vlt.output.openxr_overlay",
     "xr",                      # pyopenxr
 ]

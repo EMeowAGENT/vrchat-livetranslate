@@ -855,8 +855,10 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
 #   3. **Tk 回落路径**（Wayland 会话里 Tk 走 XWayland）下这组调用仍可用（能找到窗口、
 #      能读几何），但窗口位置 / 置顶 / 透明度由合成器决定：niri 实测忽略位置请求（按
 #      平铺管理）、忽略 `_NET_WM_WINDOW_OPACITY`（属性写进去了、像素扫描仍不透明）。
-#      ⚠️ 字幕窗现在**优先走原生 layer-shell**（`vlt/platform/wayland.py`），本组 X11
-#      调用只用于「找 VRChat 窗口、读几何」；只有原生窗建不起来时才回落 Tk。
+#      ⚠️ 字幕窗现在**优先走两条原生腿**：Wayland 会话走 layer-shell
+#      （`vlt/platform/wayland.py`）、X11 会话（含 XWayland）走 32 位 ARGB 覆盖窗
+#      （`vlt/platform/x11.py`）；本组 X11 调用用于「找 VRChat 窗口、读几何」，
+#      以及被两个原生后端复用（穿透 / 不抢焦点）。只有原生窗都建不起来时才回落 Tk。
 #      首次用到本组能力时打印一行说明；边界见 `docs/GUIDE.linux.md` 的「桌面字幕」。
 #
 # 语义与 Windows 侧对齐（facade 的文档就是契约）：
@@ -1031,9 +1033,10 @@ def _wayland_note() -> None:
         return
     _WAYLAND_NOTE_DONE = True
     if os.environ.get("WAYLAND_DISPLAY"):
-        print("[desktop] ℹ️ 检测到 Wayland 会话：字幕窗优先走原生 layer-shell 后端；"
-              "本组 X11 调用只用来找 VRChat 窗口、读几何。若回落到 Tk（合成器不支持 "
-              "layer-shell），位置/透明度由合成器决定（niri 实测按平铺管理、忽略透明度）；"
+        print("[desktop] ℹ️ 检测到 Wayland 会话：字幕窗优先走原生 layer-shell 后端"
+              "（本组 X11 调用只用来找 VRChat 窗口、读几何）；没有 layer-shell 的合成器"
+              "（GNOME/Weston）只要有 XWayland 会走原生 ARGB 覆盖窗。两条原生腿都建不起来"
+              "才回落 Tk（位置/透明度由合成器决定：niri 实测按平铺管理、忽略透明度）；"
               "边界见 docs/GUIDE.linux.md「桌面字幕」")
 
 
@@ -1312,15 +1315,15 @@ def screen_work_area() -> tuple[int, int, int, int]:
 def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
                           click_through: bool = True,
                           on_drag_end: Any = None, backend: str = "auto") -> Any:
-    """给桌面字幕开一个**原生窗**（Wayland：layer-shell + wl_shm，逐像素透明）。
+    """给桌面字幕开一个**原生窗**（Wayland：layer-shell；X11：32 位 ARGB 覆盖窗）。
 
     返回 `None` 表示「本会话用不了原生窗」，调用方（`desktop_overlay`）回落 Tk：
       * `backend="tk"`：显式要求 Tk；
-      * 没有 `WAYLAND_DISPLAY`（X11 会话）/ 合成器没有 layer-shell（GNOME/Weston）
-        / libwayland 不可用 / 建窗失败 → 也回落。
+      * `auto`/`native` 的候选顺序：有 `WAYLAND_DISPLAY` → 原生 Wayland
+        （没有 layer-shell 的合成器由后端自己失败）→ 有 `DISPLAY` → 原生 X11
+        （纯 Xorg 会话、以及带 XWayland 的 GNOME/Weston 都吃这条腿）；
+      * 建窗失败 / 没有 32 位 visual / 缺库 → 继续/回落。
     每一步的**原因**都在这里/后端模块里打出来（门面与共享模块不吭声）。
-
-    X11 原生窗（ARGB visual）还没接入 —— 在那之前 X11 会话继续走 Tk。
     """
     if backend == "tk":
         return None
@@ -1333,27 +1336,26 @@ def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
     if backend in ("auto", "native"):
         if os.environ.get("WAYLAND_DISPLAY"):
             order.append("wayland")
-        # （X11 原生窗待接入：`vlt/platform/x11.py`；在那之前 X11 会话保持 Tk 行为）
-    elif backend == "wayland":
-        order.append("wayland")
-    elif backend == "x11":
-        print("[desktop] ⚠️ backend=x11：X11 原生窗尚未接入 → 本次回落 Tk", flush=True)
-        return None
+        if os.environ.get("DISPLAY"):
+            order.append("x11")
+    else:
+        order.append(backend)
 
     for kind in order:
-        if kind != "wayland":  # pragma: no cover —— 目前只有这一条原生腿
+        if kind == "wayland":
+            from .wayland import LayerShellWindow as cls      # noqa: PLC0415
+            label = "Wayland"
+        elif kind == "x11":
+            from .x11 import ArgbWindow as cls                # noqa: PLC0415
+            label = "X11"
+        else:  # pragma: no cover —— BACKENDS 已挡掉未知值，兜底不崩
+            print(f"[desktop] ⚠️ backend={kind!r} 不认识 → 跳过", flush=True)
             continue
         try:
-            from .wayland import LayerShellWindow
-        except Exception as exc:  # noqa: BLE001 —— 缺库/缺文件都不该带崩进程
-            print(f"[desktop] ⚠️ 加载原生 Wayland 后端失败（回落 Tk）："
-                  f"{type(exc).__name__}: {exc}", flush=True)
-            continue
-        try:
-            win = LayerShellWindow(size=size, alpha=alpha, click_through=click_through,
-                                   on_drag_end=on_drag_end)
-        except Exception as exc:  # noqa: BLE001 —— 构造异常也走回落，不冒给界面
-            print(f"[desktop] ⚠️ 建原生 Wayland 窗异常（回落 Tk）："
+            win = cls(size=size, alpha=alpha, click_through=click_through,
+                      on_drag_end=on_drag_end)
+        except Exception as exc:  # noqa: BLE001 —— 缺库/构造异常都不该带崩进程
+            print(f"[desktop] ⚠️ 建原生 {label} 窗异常（继续/回落 Tk）："
                   f"{type(exc).__name__}: {exc}", flush=True)
             continue
         if not win.available:

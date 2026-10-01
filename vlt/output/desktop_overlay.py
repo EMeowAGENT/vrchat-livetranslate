@@ -8,10 +8,11 @@ PC 端（不戴头显）用户的诉求原话是「译文像歌词一样贴在�
 * **渲染复用** `vlt/output/overlay.py` 的 `render_conversation` / `render_panel`：
   桌面字幕与手腕屏长一个样，这里不另写一套画字逻辑；
 * **出图口有两条腿**（`desktop_overlay.backend` 选择，见 :data:`BACKENDS`）：
-  * **原生窗**（Linux：Wayland layer-shell + wl_shm，逐像素透明 / 协议级鼠标穿透 /
-    overlay 层置顶；X11 原生 ARGB 窗待接入）——经门面 `create_desktop_window` 拿窗口对象，
-    此后只按窗口契约调用（`vlt/platform/base.py:DesktopWindow`）；
-  * **Tk 回落**（Windows 色键 / 没有 layer-shell 的合成器 / X11 会话）：
+  * **原生窗**（Linux：Wayland 走 layer-shell + wl_shm；X11 走 32 位 ARGB 覆盖窗 +
+    XPutImage —— 都是逐像素透明 / 协议级鼠标穿透 / 置顶）——经门面
+    `create_desktop_window` 拿窗口对象，此后只按窗口契约调用
+    （`vlt/platform/base.py:DesktopWindow`）；
+  * **Tk 回落**（Windows 色键 / 原生窗用不了的会话）：
     `overrideredirect` 无边框 + `-topmost` + `-alpha`；`-transparentcolor` 色键把
     RGBA 面板外的圆角抠掉（Windows 专属属性）；
 * **平台能力一律走 `vlt.platform` 门面**（找窗口 / 客户区 / 鼠标穿透 / 工作区 / 原生窗）：
@@ -369,8 +370,8 @@ class DesktopOverlay:
         照样能用来练手/摆位置）；只有窗口根本建不起来这类硬失败才返回 False。
 
         窗口后端的选择：`backend=native/wayland/x11` 或 `auto` 且门面能给出原生窗
-        （Wayland layer-shell，逐像素透明）→ 用它；否则回落 Tk（Windows 色键 /
-        GNOME 等没有 layer-shell 的合成器；X11 原生 ARGB 窗待接入）。
+        （Wayland layer-shell / X11 ARGB 覆盖窗，逐像素透明）→ 用它；否则回落 Tk
+        （Windows 色键 / 没有 layer-shell 且没有 X11 的会话）。
         """
         if self._started:
             return True
@@ -427,7 +428,7 @@ class DesktopOverlay:
         return True
 
     def _create_native_window(self) -> Any:
-        """问门面要原生叠加窗（Linux：Wayland layer-shell；X11 ARGB 待接入）；拿不到返回 None。
+        """问门面要原生叠加窗（Linux：Wayland layer-shell / X11 ARGB 覆盖窗）；拿不到返回 None。
 
         建不起来的原因由后端自己打日志（`vlt/platform/linux.py`）；这里只兜异常。
         """

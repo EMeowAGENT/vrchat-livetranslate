@@ -299,7 +299,7 @@ def monitor_work_area(hwnd: int) -> tuple[int, int, int, int]:
 def create_desktop_window(size: tuple[int, int], alpha: float = 1.0,
                           click_through: bool = True, on_drag_end: Any = None,
                           backend: str = "auto") -> Any:
-    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell；X11 ARGB 待接入）。
+    """本平台的**原生桌面叠加窗**（Linux：Wayland layer-shell / X11 ARGB 覆盖窗）。
 
     返回 `None` = 本平台/本会话没有原生实现（Windows、没有 layer-shell 的合成器、
     强制 `backend=tk` 等），调用方（`vlt/output/desktop_overlay.py`）回落 Tk 那条腿。
