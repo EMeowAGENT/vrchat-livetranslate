@@ -43,6 +43,7 @@ manually in **⚙ Settings**. **A restart is required for the change to take eff
 | ② Others speak → **VR wrist display** | ✅ Implemented | Captures VRChat's playback output (WASAPI loopback) → translates into Chinese → renders to a SteamVR overlay, **pushed to the screen as soon as there's an update** |
 | ③ I speak → **translated voice into their ears** | ✅ Implemented, off by default | The model outputs translated audio directly → resampled to 48 kHz → written to a virtual sound card → picked up as your VRChat microphone. Requires your own virtual sound card (VoiceMeeter / VB-Cable etc.) |
 | ④ I speak → **type instead of talking** | ✅ Implemented, on by default | Input box in the bottom bar, **Enter sends**: use the keyboard instead of the microphone when you don't want to talk. The translation goes through the **exact same** downstream as ① (bubble / wrist display); with "Audio output" ticked it also **speaks the translation via TTS** into the virtual sound card (the other person hears it) |
+| ⑤ A few people → **see each other's subtitles (room)** | ✅ Done, off by default | Everyone runs their own copy and enters the **same room code** to see **what the others are saying** on their own wrist overlay / desktop subtitles. Only your own speech is broadcast (game audio is never relayed). Entry: `⚙ Settings → Room` |
 
 
 ### Platform support
@@ -53,6 +54,7 @@ manually in **⚙ Settings**. **A restart is required for the change to take eff
 | ② VR wrist display | ✅ SteamVR overlay | ✅ Built-in OpenXR overlay (Monado / WiVRn) |
 | ③ Translated voice into their ears | ✅ Needs your own virtual sound card (VoiceMeeter / VB-Cable) | ✅ **None needed** — the app declares a virtual mic at runtime |
 | ④ Type instead of talking (with TTS) | ✅ | ✅ |
+| ⑤ Room (see each other's subtitles) | ✅ | ✅ |
 
 Linux install & usage: **[GUIDE.linux.md](GUIDE.linux.md)** ·
 Design rationale and dead ends: **[docs/平台约束记录.md](平台约束记录.md)** (Chinese)
