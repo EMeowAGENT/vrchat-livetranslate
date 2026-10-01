@@ -132,6 +132,23 @@ def buffer_dims(physical: tuple[int, int], scale: int) -> tuple[int, int]:
     return (-(-int(physical[0]) // s) * s, -(-int(physical[1]) // s) * s)
 
 
+def drag_target(anchor_pos: tuple[int, int],
+                anchor_local: tuple[float, float],
+                local: tuple[float, float]) -> tuple[int, int]:
+    """「本地坐标法」的拖动目标位置 = 锚点位置 + 本地坐标差。
+
+    **为什么本地坐标差能当位移用**：niri 系的 click-grab 在按下时**冻结焦点坐标**
+    （niri 的 `ClickGrab` 有意不更新 grab location，见其源码注释），所以
+    `wl_pointer.motion` 的 surface-local 坐标始终是「全局指针 − 按下时的面原点」，
+    两次相减就是真实位移。相对指针（sway/wlroots 系）则直接给位移增量 ——
+    两条源由 `_make_pointer` 里的状态机选择，这里只做数学。
+
+    坐标用 float（协议里是 wl_fixed，1/256 像素），结果四舍五入到整数像素。
+    """
+    return (int(round(anchor_pos[0] + local[0] - anchor_local[0])),
+            int(round(anchor_pos[1] + local[1] - anchor_local[1])))
+
+
 # ================================================================ 协议常量（对照 XML）
 
 # --- 核心协议（wayland.xml / wayland-client-protocol.h）
@@ -184,6 +201,10 @@ _LAYER_SHELL_VERSION = 4
 #: 建窗时等 configure 的上限（正常合成器毫秒级）
 _CONFIGURE_TIMEOUT_S = 1.0
 _PUMP_SLEEP_S = 0.002
+#: 拖动源选择的观察窗：按下后给它一点时间等 relative-pointer 事件（sway/wlroots 系第一帧就有）。
+#: 等不到就切「本地坐标法」——niri 系只发 wl_pointer.motion（实测：全程 0 条 relative_motion），
+#: 而它的 click-grab 冻结了焦点坐标，本地差 = 真实位移（见 `drag_target`）。
+_RELATIVE_GRACE_S = 0.08
 
 
 # ================================================================ ctypes 基础设施
@@ -565,6 +586,12 @@ class LayerShellWindow:
         self._buf_dims = (0, 0)
 
         self._drag_active = False
+        # 拖动源状态机："" = 观察中（等 relative-pointer）/ "relative" = 用相对增量 /
+        # "local" = 用 wl_pointer.motion 的本地坐标差（niri 系没有 relative 事件）
+        self._drag_mode = ""
+        self._drag_anchor_pos: tuple[int, int] = (0, 0)
+        self._drag_anchor_local: tuple[float, float] | None = None
+        self._drag_started = 0.0
         self._buttons_seen = 0        # 收到的指针按键总数（穿透验证 / 排障用）
 
         self._listeners: list[Any] = []                  # listener 结构 + 回调的引用池
@@ -1058,6 +1085,27 @@ class LayerShellWindow:
             return
         self._pointer = pointer
 
+        def on_motion(_d: Any, _p: Any, _t: int, fx: int, fy: int) -> None:
+            """本地坐标法（第二拖动源）：niri 系合成器只发 motion、不发 relative。
+
+            实测（niri 26.04 + 本机 `WAYLAND_DEBUG`）：按下拖动期间 `wl_pointer.motion`
+            持续送达（含拖出面板后的坐标），而 `relative_motion` **全程 0 条**。
+            niri 的 click-grab 又把焦点坐标冻结在按下那一刻，所以本地坐标差 = 真实位移。
+            """
+            if not self._drag_active or self._drag_mode == "relative":
+                return
+            local = (_fixed_to_float(fx), _fixed_to_float(fy))
+            if self._drag_mode == "":
+                if time.monotonic() - self._drag_started < _RELATIVE_GRACE_S:
+                    return
+                self._drag_mode = "local"
+                self._drag_anchor_pos = self._pos
+                self._drag_anchor_local = local
+                return
+            if self._drag_anchor_local is None:
+                return
+            self.move(*drag_target(self._drag_anchor_pos, self._drag_anchor_local, local))
+
         def on_button(_d: Any, _p: Any, _serial: int, _t: int, button: int,
                       state: int) -> None:
             self._buttons_seen += 1
@@ -1066,10 +1114,16 @@ class LayerShellWindow:
             if int(state) == _WL_POINTER_STATE_PRESSED:
                 if self._draggable:
                     self._drag_active = True
+                    self._drag_mode = ""
+                    self._drag_anchor_pos = self._pos
+                    self._drag_anchor_local = None
+                    self._drag_started = time.monotonic()
                     print(f"{_LOG} 已抓住面板（拖动中，放开结束）", flush=True)
             else:
                 if self._drag_active:
                     self._drag_active = False
+                    self._drag_mode = ""
+                    self._drag_anchor_local = None
                     if self._on_drag_end is not None:
                         try:
                             self._on_drag_end(self._pos[0], self._pos[1])
@@ -1084,7 +1138,7 @@ class LayerShellWindow:
             _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
                 ctypes.c_void_p)(lambda *a: None),
             _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
-                ctypes.c_int32, ctypes.c_int32)(lambda *a: None),
+                ctypes.c_int32, ctypes.c_int32)(on_motion),
             _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
                 ctypes.c_uint32, ctypes.c_uint32)(on_button),
             _cb(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
@@ -1093,7 +1147,9 @@ class LayerShellWindow:
         self._listeners.append(listener)
         self._attach_listener(pointer, listener)
 
-        if self._rel_manager is not None:
+        # 测试钩子：跳过 relative-pointer 对象，强制走「本地坐标法」
+        # （用于在嵌套合成器里模拟 niri 那类不发 relative_motion 的会话）。
+        if self._rel_manager is not None and not os.environ.get("VLT_WAYLAND_NO_RELATIVE"):
             rel = self._req(self._rel_manager, _REL_MANAGER_GET,
                             [("n", None), ("o", pointer)],
                             interface=ctypes.addressof(iface_rel_pointer), version=1)
@@ -1103,8 +1159,9 @@ class LayerShellWindow:
 
             def on_rel(_d: Any, _p: Any, _hi: int, _lo: int, dx: int, dy: int,
                        _dxu: int, _dyu: int) -> None:
-                if not self._drag_active:
-                    return
+                if not self._drag_active or self._drag_mode == "local":
+                    return                       # 已切本地坐标法：别两个源都算
+                self._drag_mode = "relative"
                 nx = self._pos[0] + int(round(_fixed_to_float(dx)))
                 ny = self._pos[1] + int(round(_fixed_to_float(dy)))
                 self.move(nx, ny)
@@ -1182,6 +1239,8 @@ class LayerShellWindow:
         self._draggable = on
         if not on:
             self._drag_active = False
+            self._drag_mode = ""
+            self._drag_anchor_local = None
         self._apply_input_region(commit=True)
 
     def tick(self) -> None:

@@ -11,7 +11,9 @@
    - sway 会忽略传入的 `WAYLAND_DISPLAY`、自行回落 `wayland-N` → 用「启动前后
      socket 差集」认新会话；
    - `grim` 截图验：面板画出来了 / 透明处透出背景 / 50% 混色正确 / move 生效 / 改尺寸生效；
-   - `zwlr_virtual_pointer_v1` 注入指针：穿透时收不到点击、解锁后能拖动（relative-pointer 位移）。
+   - `zwlr_virtual_pointer_v1` 注入指针：穿透时收不到点击、解锁后能拖动；
+     两种拖动源都验：relative-pointer（sway 系）+ 本地坐标法（niri 系，
+     `VLT_WAYLAND_NO_RELATIVE=1` 模拟「不发 relative_motion」的合成器）。
 
 缺 sway / grim / 起不来时**跳过**第 3 层（不判红，但会在输出里说清原因）。
 
@@ -38,6 +40,7 @@ from vlt.platform import wayland as W  # noqa: E402
 from vlt.platform.wayland import (  # noqa: E402
     OutputInfo,
     buffer_dims,
+    drag_target,
     layer_margins,
     logical_size,
     pick_output,
@@ -76,7 +79,13 @@ def test_pure_logic() -> None:
     assert logical_size((1025, 441), 2) == (513, 221)
     assert buffer_dims((1024, 440), 1) == (1024, 440)
     assert buffer_dims((1025, 441), 2) == (1026, 442)
-    print("  纯逻辑：输出选择（命中/跨屏/最近/空表/负坐标）+ 边距 + 尺寸取整 OK")
+
+    # 拖动公式（本地坐标法）：锚点 + 本地差。用用户实机抓包的真实数据验证：
+    # 按下时本地 (635.63, 292.26)、松开前 (1696.40, -154.91) → (2158,930) 应移动到 (3219,483)
+    assert drag_target((2158, 930), (635.63, 292.26), (1696.40, -154.91)) == (3219, 483)
+    assert drag_target((100, 200), (10.0, 10.0), (10.0, 10.0)) == (100, 200)    # 没动
+    assert drag_target((0, 0), (0.0, 0.0), (-5.2, 7.6)) == (-5, 8)              # 负向 + 四舍五入
+    print("  纯逻辑：输出选择（命中/跨屏/最近/空表/负坐标）+ 边距 + 尺寸取整 + 拖动公式 OK")
 
 
 # ---------------------------------------------------------------- 2. 接口签名
@@ -427,7 +436,50 @@ def test_live_window() -> None:
         end = drag_ends[-1]
         assert abs(end[0] - (before[0] + 80)) <= 4 and abs(end[1] - (before[1] + 40)) <= 4, \
             f"拖动位移不对：落点 {end}，起点 {before}（期望 +80,+40）"
-        print(f"  真协议：画图/透明/50% 混色/move/改尺寸/穿透/拖动位移（落点 {end}）OK")
+
+        # ⑧ 本地坐标法（模拟 niri：niri 全程不发 relative_motion，只发 wl_pointer.motion）。
+        # 用 VLT_WAYLAND_NO_RELATIVE=1 让窗口不建 relative-pointer 对象，强制走本地坐标差。
+        win.close()
+        os.environ["VLT_WAYLAND_NO_RELATIVE"] = "1"
+        try:
+            drag_ends2: list[tuple[int, int]] = []
+            win = W.LayerShellWindow(size=size, alpha=1.0, click_through=True,
+                                     on_drag_end=lambda x, y: drag_ends2.append((x, y)))
+            assert win.available, "本地坐标法：窗口建不起来"
+            win.move(300, 120)
+            win.set_panel(_make_panel(size))
+            win.set_draggable(True)
+            _pump(win, 0.3)
+            start2 = win.position
+            vp.motion_abs(start2[0] + 100, start2[1] + 20, out.width, out.height)
+            vp.frame()
+            vp.sync()
+            _pump(win, 0.2)
+            vp.button(1)
+            vp.frame()
+            vp.sync()
+            _pump(win, 0.15)                      # 等过 80ms 观察窗（第一条 motion 才设锚点）
+            vp.motion(30, 0)
+            vp.frame()
+            vp.sync()
+            _pump(win, 0.1)
+            vp.motion(30, 25)
+            vp.frame()
+            vp.sync()
+            _pump(win, 0.2)
+            vp.button(0)
+            vp.frame()
+            vp.sync()
+            _pump(win, 0.2)
+            assert drag_ends2, "本地坐标法：拖动结束回调没触发"
+            end2 = drag_ends2[-1]
+            assert abs(end2[0] - (start2[0] + 30)) <= 4 \
+                and abs(end2[1] - (start2[1] + 25)) <= 4, \
+                f"本地坐标法位移不对：落点 {end2}，起点 {start2}（期望 +30,+25）"
+        finally:
+            os.environ.pop("VLT_WAYLAND_NO_RELATIVE", None)
+        print(f"  真协议：画图/透明/50% 混色/move/改尺寸/穿透/拖动 OK"
+              f"（相对指针 落点 {end}；本地坐标法 落点 {drag_ends2[-1]}）")
     finally:
         if win is not None:
             try:
