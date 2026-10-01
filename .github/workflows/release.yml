@@ -1,8 +1,8 @@
 name: Release
 
-# 打 v* 标签 → 在 Windows 上真打包一次单文件 exe → 建 Release 并把 exe 当附件传上去。
-# 为什么放 CI 而不是本机手工传：手工那次没人能复现「这个 exe 到底是哪个 commit 打的」，
-# 而这里 tag 与包内 __version__ 会先对一次账，产物还带 SHA256。
+# 打 v* 标签 → 真打包一次（Windows 单文件 exe + Linux AppImage）→ 建 Release 把两个附件都传上去。
+# 为什么放 CI 而不是本机手工传：手工那次没人能复现「这个 exe / AppImage 到底是哪个 commit 打的」，
+# 而这里 tag 与包内 __version__ 会先对一次账，产物还带 GitHub 服务端算的 SHA256。
 on:
   push:
     tags: ["v*"]
@@ -17,7 +17,22 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  # ① Linux：AppImage（构建 + 独立验收）。
+  #
+  # 步骤本体在 `.github/workflows/appimage.yml` —— 与 CI 用的是**同一份**（系统依赖清单、
+  # Tcl/Tk 版本进 cache key、构建→验收的顺序都只写一处；抄一遍迟早只改一处，#12 的教训）。
+  # 这里拿到的 artifact 会在下面 `build` 里取回来，和 exe 一起当 Release 附件发出去。
+  appimage:
+    uses: ./.github/workflows/appimage.yml
+
+  # ② Windows：单文件 exe + 组装 Release。
+  #
+  # ⚠️ `needs: appimage` 是**故意的**：宁可整体红，也不要静默发一个「只有 exe」的版本 ——
+  #    Linux 用户照指南去附件里找 AppImage 却找不到，而这种「少了一半」不会有人报错。
+  #    （仓库里同口径：发布路径上缺 Windows 独占依赖也要红灯，见下面的依赖门禁。）
+  #    真要接受「AppImage 挂了也照发 exe」，把这个 needs 删掉即可。
   build:
+    needs: appimage
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -44,14 +59,31 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-windows.txt
           python -m pip install "pyinstaller>=6.6"
+
+      # ★ 依赖门禁：这是**真正发布**的路径，缺了 openvr / pyaudiowpatch
+      #   会静默产出「没有 SteamVR 手腕屏、没有 VRChat 音频下拉」的 exe。
+      - name: 断言 Windows 独占依赖可导入
+        run: python -c "import openvr, pyaudiowpatch; print('Windows 独占依赖 OK')"
 
       - name: 打包单文件 exe
         # --no-verify：打完自带的自检要真 API key + 联网，CI 里没有 → 跳过
         run: python scripts/build_exe.py --no-verify
 
-      - name: 自检产物（存在性 / 大小 / 图标资源）
+      # Linux 附件来自上面 `appimage` job（可复用 workflow 的产物）。
+      # 单个文件的 artifact 里存的就是文件名本身 → 下到 dist/ 即 dist/xxx.AppImage。
+      # ⚠️ 必须放在下面「自检产物」**之前**：那一步会断言 AppImage 已经在 dist/ 里
+      #    （第一次跑就是顺序错了，在 fork 上实测到「没找到 Linux 附件」→ 这一步炸）。
+      # ⚠️ `download-artifact` 的 major 要与 appimage.yml 里 `upload-artifact` 的 major 配对
+      #    （现在两边都是 v4）：跨 major 取不到东西，而这一步只在打 tag 时才跑，容易没人发现。
+      - name: 取回 AppImage 产物（Linux 附件）
+        uses: actions/download-artifact@v4
+        with:
+          name: VRChatLiveTranslate-AppImage
+          path: dist
+
+      - name: 自检产物（存在性 / 大小）
         shell: pwsh
         run: |
           $exe = "dist/VRChatLiveTranslate.exe"
@@ -63,8 +95,18 @@ jobs:
           # ⚠️ 过渡期必须继续产出 SHA256SUMS.txt：**≤ v0.2.0 的老客户端把「exe + SHA256SUMS.txt
           #    两个附件」写死在更新检查里**，缺一个就静默地永远查不到新版本（v0.2.0 → v0.2.1 实测踩到）。
           #    新客户端优先用 GitHub 的 asset digest，这个文件纯粹给老客户端兜底。
+          #    ★ 只写 exe 一行：老客户端是拿 exe 的名字去这个文件里找校验值的；往里塞 AppImage
+          #      没有好处还有风险。AppImage 的校验值看 GitHub 附件旁的 digest（点一下即可复制）。
           "$hash  VRChatLiveTranslate.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Write-Host ("sha256：{0}" -f $hash)
+
+          # Linux 附件必须**真的在这儿**：`needs: appimage` 只保证那个 job 成功，
+          # 取回来这一步要是没落进 dist/，就得在这里炸掉，而不是发一个只有 exe 的 Release。
+          $img = "dist/VRChatLiveTranslate-x86_64.AppImage"
+          if (-not (Test-Path $img)) { Write-Error "没找到 Linux 附件 $img（appimage job 的产物没取回来？）"; exit 1 }
+          $i = Get-Item $img
+          Write-Host ("产物：{0}  {1:N1} MB" -f $i.Name, ($i.Length / 1MB))
+          if ($i.Length -lt 40MB) { Write-Error "AppImage 体积异常（<40MB），大概率没打全"; exit 1 }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
@@ -75,54 +117,39 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: 建 Release 并附上 exe
+      - name: 建 Release 并附上 exe + AppImage
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
-          # ⚠️ 这一条只存在于「房间/测试」分支：把发布标成 pre-release，
-          #    否则 GitHub 的 /releases/latest 会把它当成最新正式版推给所有稳定版用户
-          #    （客户端的更新检查用的就是 /releases/latest，它天然排除 prerelease）。
-          #    这个分支将来转正式版时，把 prerelease 改回 false。
+          # ⚠️ 关掉自动附加的「What's Changed / New Contributors」（用户 2026-09 明确要求）：
+          #    说明**只留「这版有什么」**这一段，自动附的那两节与 Full Changelog 都不要。
+          #    所以每个版本都必须手写上面这段 body —— 别指望 GitHub 替你列 PR。
+          # ⚠️ 本分支（房间/测试线）的发布一律标 prerelease：/releases/latest 天然排除预发布，
+          #    测试版不会被推送给稳定版用户；转正式版时再改回 false。
           prerelease: true
-          # 自动附加「本版更新」：把上个 tag 以来的提交按分类列出来，
-          # 免得每次发版的说明都是同一段静态文案（v0.0.1 → v0.0.2 实测过这个坑）。
-          generate_release_notes: true
+          generate_release_notes: false
+          # ⚠️ TODO(房间 beta 发布时)：下面这段是 v0.5.1 的说明，发房间测试版前必须重写成本版内容。
           body: |
-            ## VRChat 实时同传 ${{ github.ref_name }}（测试版）
+            ### 这版有什么
 
-            > ⚠️ **这是测试版，不是正式版。** 它带一个还在验证中的新功能（多人房间 · 文字中继），
-            > 跨机/跨网络的实测数据还不完整。只想稳定用的话请装正式版 **v0.3.0**。
-            > 测试版的发布**不会被客户端自动更新推送给别人**（pre-release 不参与「最新版」判断）。
+            **1. Linux 包体积回落：AppImage 从 83.7 MB 收到 ~58 MB**（Linux 侧由 @EMeowAGENT 负责）
 
-            **下载附件里的 `VRChatLiveTranslate.exe`（单文件、免安装、无控制台），双击即用。**
-            校验值看附件旁的 `sha256:`；`SHA256SUMS.txt` 是给老客户端识别更新用的，手动下载不需要它。
+            - 上一版包体比 v0.4.1 大了约 13 MB：根因是 `pyopenxr` 在 1.1.6302 里**改了平台目录名**，而构建脚本里「删掉其它平台」的那份黑名单还是旧名字 —— 一个都没匹配上，瘦身静默变成空操作，把 android / arm64 / windows 的整套 OpenXR 层都打进了 Linux x86_64 的包（未压缩多 101 MB）。
+            - 更隐蔽的是：**验收脚本用的是同一批旧名字**，所以这件事在 CI 上全绿、没人发现。
+            - 现在改成**不硬编码目录名**：由包内 pyopenxr 自己报出当前平台该留哪个目录，只保留它、其余全删；并加了一条**体积上限**兜底 —— 这类「静默失效」以后会直接红灯，而不是悄悄发出去。
 
-            ### 用它之前需要什么
-            - Windows 10/11
-            - **一个阿里云百炼 API key**（自备，按量计费）：界面「⚙ 设置」粘贴保存，或设环境变量 `DASHSCOPE_API_KEY`
-            - VRChat 设置里打开 **OSC**（`OSC enabled: True`）、chat bubble visibility 设为 **Everyone**
+            **2. Linux 包不再附带中日韩字体**
 
-            ### 这版新增：多人房间（文字中继）
+            - 字体一份约 19 MB 未压缩（压缩后约 12 MB），而系统普遍自带 —— 为少数没装的机器让所有人多背十几 MB 不划算。
+            - ⚠️ **运行机需要自带一套中日韩字体**（如 `noto-fonts-cjk` / `fonts-noto-cjk`），否则界面与手腕屏会缺字。包内**仍然带 Xft 版 Tk** —— 「能不能看见系统字体」和「带不带字体」是两件事。
+            - 验收里加了对应断言：宿主机没装中日韩字体时标「跳过 = 未验证」，只有「宿主机有、Tk 却看不见」才判红。
 
-            **几个都装了这个版本的人，进同一个「房间」，就能在各自的手腕屏上看到彼此说的话。**
-            适合「语音频道被本地玩家语言占掉、几个人之间不方便说话」的场合。
+            **3. Windows 侧无改动**
 
-            - 主界面多了第三行「房间」：勾上、填**同一个房间码**（8 位，不含容易念错的 `I/L/O/U`）、填个昵称即可；勾选与填写会即时存进 `config.yaml`
-            - **只广播你自己说的话**（本机识别出的原文）。采集游戏声音那条腿（loopback）被显式排除，
-              不会把别人说话的声音二次转播出去，也不会形成回环
-            - 手腕屏上**按人分色 + 显示昵称**，几个人同时说话也能一眼分清谁在说；聊天区同样显示
-            - **默认只显示文字、不出声**：TTS 回灌的接口已经预留，本版未开放
-            - 服务端是 Cloudflare Worker + 每房间一个 Durable Object，**只搬文字**：不翻译、不落库、房间空了自动回收
-
-            ### 怎么用
-            - 我说 → **chatbox 气泡** / 房间里其他人的手腕屏
-            - 别人说 → **VR 手腕屏**
-            - 打字 → 不想开麦时用键盘代替麦克风
-            - 未配置 API key 时，主界面右上角会变成「一键开通百炼」的入口
-
-            完整说明见仓库 [README](https://github.com/nixi-agent/vrchat-livetranslate#readme)。
+            - 本次只动 Linux 打包链路（AppImage 构建脚本、AppImage 验收脚本、两份 Linux 文档），exe 与上一版同源。
           files: |
             dist/VRChatLiveTranslate.exe
             dist/SHA256SUMS.txt
+            dist/VRChatLiveTranslate-x86_64.AppImage
           fail_on_unmatched_files: true
