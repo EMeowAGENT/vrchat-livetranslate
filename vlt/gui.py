@@ -56,6 +56,7 @@ from .engine import (
 from .level_probe import LevelProbe
 from .room.client import RoomClient
 from .room.model import ConnectionState, RoomConfig, RoomMessage
+from .room.protocol import new_room_code
 from .room.publisher import SourcePublisher, should_publish
 from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
@@ -146,6 +147,12 @@ BORDER        = "#2e333d"   # 边框 / 分割线
 ACCENT        = "#2f6fd0"   # 主色蓝（与"我说的"气泡同色）
 ACCENT_HOVER  = "#3a7de0"
 ACCENT_ACTIVE = "#2559a8"   # 按下
+# 「反向动作」按钮（房间的「断开连接」）：红棕一档，明显区别于蓝色的「连接房间」。
+# 刻意压暗、不用 COLOR_ERROR 那种亮红 —— 断开不是危险操作，只是"往回走"，
+# 亮红会让人以为点了会出大事；跟着面板的明度体系走才不会在深色界面里跳出来。
+DANGER        = "#a8443f"
+DANGER_HOVER  = "#bf4f49"
+DANGER_ACTIVE = "#8a3733"
 TEXT          = "#e8eaee"   # 主文字
 TEXT_DIM      = "#9aa1ad"   # 次要文字
 TEXT_MUTED    = "#6f7480"   # 时间戳 / 占位
@@ -729,6 +736,16 @@ class TranslationGUI:
                   background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
                               ("disabled", "#22374f")],
                   foreground=[("disabled", "#6b87ab")])
+        # 反向动作按钮（房间的「断开连接」）：与「连接房间」同形状、**不同颜色** ——
+        # 同一个位置在不同连接态下写着相反的动作，只靠文字区分容易点错，
+        # 颜色是比文字快得多的提示（用户明确要求「断开用个别的颜色」）。
+        style.configure("Danger.TButton", background=DANGER, foreground="#ffffff",
+                        borderwidth=0, focusthickness=0, focuscolor=DANGER,
+                        padding=(14, 6))
+        style.map("Danger.TButton",
+                  background=[("pressed", DANGER_ACTIVE), ("active", DANGER_HOVER),
+                              ("disabled", "#3a2726")],
+                  foreground=[("disabled", "#9c7a78")])
 
         # API key 输入行：不加这条会沿用 clam 的浅色默认底 —— 深色界面里出现一块白，很扎眼
         # （截图复核时发现的）。字段底/文字/插入符/边框全部对齐 SURFACE/TEXT/BORDER 体系。
@@ -1037,6 +1054,9 @@ class TranslationGUI:
         判定口径与 `_room_status_text` 完全一致（`self._room is None` → 未连接；
         `room.state()` 抛异常也按未连接处理）。client 还在但已是 IDLE / STOPPED / ERROR
         时同样给「断开连接」—— 点一下就 `_stop_room()` 回到未连接，比让用户猜怎么复位强。
+
+        颜色也跟着态走：「连接房间」用蓝色强调，「断开连接」用 `Danger.TButton` 的红棕 ——
+        同一个位置在不同态下写着相反的动作，颜色是比文字快得多的提示。
         """
         btn = getattr(self, "_room_btn", None)
         if btn is None:
@@ -1048,13 +1068,13 @@ class TranslationGUI:
             except Exception:                   # noqa: BLE001  取快照失败就按未连接处理
                 st = None
         if st is None:
-            text, state = t("连接房间"), tk.NORMAL
+            text, state, style = t("连接房间"), tk.NORMAL, "Accent.TButton"
         elif st.conn is ConnectionState.CONNECTING:
-            text, state = t("连接中"), tk.DISABLED
+            text, state, style = t("连接中"), tk.DISABLED, "Accent.TButton"
         else:
-            text, state = t("断开连接"), tk.NORMAL
+            text, state, style = t("断开连接"), tk.NORMAL, "Danger.TButton"
         try:
-            btn.configure(text=text, state=state)
+            btn.configure(text=text, state=state, style=style)
         except Exception:                       # noqa: BLE001  按钮刷新失败不值得惊动用户
             pass
 
@@ -1098,6 +1118,16 @@ class TranslationGUI:
             self._stop_room()
             self._start_room()
         self._refresh_room_status_label()
+
+    def _on_room_generate(self) -> None:
+        """生成一个合法房间码填进输入框，并走与手输完全相同的落盘/重连路径。
+
+        生成的是**新建房间**的码：念给对方、对方手输同一个码才能进同一个房间。
+        """
+        code = new_room_code()
+        self._room_code_var.set(code)
+        self._on_room_field_change()      # 即时写回 config.yaml；已连接则用新码重连
+        print(f"[gui] 已生成随机房间码：{code}", flush=True)
 
     def _sync_room_cfg_from_fields(self) -> None:
         """把界面上的勾选/房间码/昵称同步进 `self._room_cfg`（只改内存，不落盘）。"""
@@ -1872,6 +1902,8 @@ class TranslationGUI:
         code_entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
         code_entry.bind("<Return>", lambda _e: self._on_room_field_change())
         code_entry.bind("<FocusOut>", lambda _e: self._on_room_field_change())
+        self._room_gen_btn = ttk.Button(form, text=t("随机生成"), command=self._on_room_generate)
+        self._room_gen_btn.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         ttk.Label(form, text=t("昵称:"), style="Dim.TLabel").grid(row=1, column=0,
                                                                   sticky="w", pady=(6, 0))

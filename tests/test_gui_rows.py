@@ -227,7 +227,9 @@ def test_room_button_text_and_empty_code_guard() -> bool:
         text = str(gui._room_btn.cget("text"))
         assert text == t("连接房间"), f"初始按钮文案应是「连接房间」，实际 {text!r}"
         assert str(gui._room_btn.cget("state")) == "normal", "初始按钮不该是禁用态"
-        print(f"  ✓ ① 未连接 → 按钮 {text!r}（可点）")
+        assert str(gui._room_btn.cget("style")) == "Accent.TButton", \
+            f"未连接时该用蓝色主按钮样式，实际 {gui._room_btn.cget('style')!r}"
+        print(f"  ✓ ① 未连接 → 按钮 {text!r}（可点，蓝色 Accent）")
 
         # ② 房间码为空 → 不起连接 + 状态栏提示 + 弹窗停在「房间」页
         gui._room_code_var.set("")
@@ -250,10 +252,79 @@ def test_room_button_text_and_empty_code_guard() -> bool:
         text = str(gui._room_btn.cget("text"))
         assert text == t("断开连接"), f"已连接时按钮文案应是「断开连接」，实际 {text!r}"
         assert str(gui._room_btn.cget("state")) == "normal", "已连接时按钮该可点（点了就断开）"
-        print(f"  ✓ ③ 已连接（替身 ONLINE · 2 人）→ 按钮 {text!r}")
+        assert str(gui._room_btn.cget("style")) == "Danger.TButton", \
+            f"已连接时该换成反向动作样式（与「连接房间」不同色），实际 {gui._room_btn.cget('style')!r}"
+        print(f"  ✓ ③ 已连接（替身 ONLINE · 2 人）→ 按钮 {text!r}（红棕 Danger，与连接态不同色）")
         return True
     finally:
         gui._room = None      # 替身不是真 client：别让任何收尾路径去 stop 它
+        try:
+            gui._root.destroy()
+        except Exception:
+            pass
+
+
+def test_room_generate_button() -> bool:
+    """★ 设置「房间」页的「随机生成」按钮：在位、能生成合法且不重复的房间码、并落盘。
+
+    防四类回归：
+      ① 按钮根本没被 grid 进布局（用户「看不到那个按钮」——Tk 空间不足会裁最后打包的控件）；
+      ② 点了不换码，或换出来的码不合法（对方照着念也进不了同一个房间）；
+      ③ 连点得到的是同一个码（等价于按钮没接上生成逻辑）；
+      ④ 生成的码没写回 config.yaml（重连/重启后丢失）。
+    """
+    import tempfile
+
+    import vlt.gui as gui_mod
+    from vlt.gui import TranslationGUI
+    from vlt.room.protocol import ROOM_CODE_LEN, is_valid_room_code
+
+    t = _i18n.t
+    gui = TranslationGUI()
+    real_default = gui_mod.DEFAULT_CONFIG
+    tmp = Path(tempfile.mkdtemp()) / "config.yaml"
+    try:
+        # 落盘目标先挪到临时文件：②③④ 都会经 _on_room_generate → _save_room_cfg，
+        # 不先把 DEFAULT_CONFIG 指走就会写真用户的 config.yaml。
+        tmp.write_text("session:\n  api_key: ''\n", encoding="utf-8")
+        gui_mod.DEFAULT_CONFIG = tmp
+
+        # ① 按钮在「房间」页里、文案对、且确实被 grid 进了布局
+        btn = getattr(gui, "_room_gen_btn", None)
+        assert btn is not None, "没有「随机生成」按钮（_room_gen_btn 不存在）"
+        got_text = str(btn.cget("text"))
+        assert got_text == t("随机生成"), f"按钮文案应是 {t('随机生成')!r}，实际 {got_text!r}"
+        assert btn.winfo_manager() == "grid", \
+            f"「随机生成」按钮没被 grid 进布局（manager={btn.winfo_manager()!r}）"
+        print(f"  ✓ ① 按钮在位、文案 {got_text!r}、已 grid 进布局")
+
+        # ② 空房间码 → 点一下生成一个 8 位合法码
+        gui._room_code_var.set("")
+        gui._on_room_generate()
+        code = gui._room_code_var.get()
+        assert len(code) == ROOM_CODE_LEN, f"房间码应是 {ROOM_CODE_LEN} 位，实际 {code!r}"
+        assert is_valid_room_code(code), f"生成的房间码不合法：{code!r}"
+        print(f"  ✓ ② 生成合法 {ROOM_CODE_LEN} 位房间码 {code!r}")
+
+        # ③ 连点 5 次，收集到的码两两不同（32^8≈1.1e12，重复概率可忽略；防「按钮没换码」）
+        codes: list[str] = []
+        for _ in range(5):
+            gui._on_room_generate()
+            c = gui._room_code_var.get()
+            assert is_valid_room_code(c), f"连点生成的房间码不合法：{c!r}"
+            codes.append(c)
+        assert len(set(codes)) == len(codes), f"连点 5 次出现了重复码：{codes}"
+        print(f"  ✓ ③ 连点 5 次得到 5 个互不相同的码：{codes}")
+
+        # ④ 落盘：最后一次生成的码应写进了 config.yaml（room 段被补建）
+        last = codes[-1]
+        text = tmp.read_text(encoding="utf-8")
+        assert "room:" in text, "config.yaml 里没有 room 段（没被补建）"
+        assert last in text, f"最后生成的房间码 {last!r} 没写进 config.yaml"
+        print(f"  ✓ ④ 房间码 {last!r} 已落盘到 config.yaml")
+        return True
+    finally:
+        gui_mod.DEFAULT_CONFIG = real_default
         try:
             gui._root.destroy()
         except Exception:
@@ -307,6 +378,11 @@ def main() -> int:
         all_ok &= test_room_button_text_and_empty_code_guard()
     except AssertionError as exc:
         print(f"  ❌ 房间按钮文案/空房间码守卫失败：{exc}")
+        all_ok = False
+    try:
+        all_ok &= test_room_generate_button()
+    except AssertionError as exc:
+        print(f"  ❌ 「随机生成」房间码按钮失败：{exc}")
         all_ok = False
     for i, (events, expect) in enumerate(cases, 1):
         print(f"用例 {i}:")

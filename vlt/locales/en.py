@@ -47,6 +47,7 @@ STRINGS: dict[str, str] = {
     "连接房间": "Join Room",
     "断开连接": "Disconnect",
     "先在「设置 → 房间」里填房间码": "Set a room code in Settings → Room first",
+    "随机生成": "Generate",
     "和填了同一个房间码的人互相看到对方说的话；只有你自己说的话会被发出去。": "Everyone who enters the same room code sees each other's speech. Only what you say is sent.",
     "改动会即时保存；已连接时按新设置重连。": "Changes are saved right away; if connected, the room reconnects with the new settings.",
 
