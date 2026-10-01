@@ -102,7 +102,14 @@ def test_pure_logic() -> None:
 
 
 def test_interface_signatures() -> None:
-    W._load_lib()
+    # ⚠️ Windows / 没装 libwayland-client 的机器上加载必然失败（FileNotFoundError）——
+    # 签名断言没有库数据可读，**明确跳过**而不是把测试判红（CI 的 Windows job 跑这份
+    # 用例，Linux job 上库在、断言照常真跑）。与下面 `_have("sway")` 的跳过同款口径。
+    try:
+        W._load_lib()
+    except (OSError, AttributeError) as exc:
+        print(f"  ⚠️ 没有可用的 libwayland-client（{type(exc).__name__}: {exc}）→ 跳过签名断言")
+        return
     shell = W.read_interface(W.iface_layer_shell)
     assert shell["name"] == "zwlr_layer_shell_v1", shell
     assert shell["version"] == W._LAYER_SHELL_VERSION, shell
