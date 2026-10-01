@@ -231,7 +231,7 @@ overlay:
 | 后端 | 什么时候走 | 透明 | 定位 / 跟随 | 鼠标穿透 |
 |---|---|---|---|---|
 | **原生 layer-shell 窗**<br>（`vlt/platform/wayland.py`） | Wayland 会话，且合成器实现了 `zwlr_layer_shell_v1`（niri / sway / Hyprland / KWin 6.x / labwc / Cage / gamescope …） | ✅ **逐像素 alpha**：真圆角、底板半透明、整层透明度滑块全生效 | ✅ overlay 层置顶 + anchor/margin 精确定位；跟随用 X11 读 VRChat 几何（与全局坐标一致） | ✅ 协议级：输入区置空 |
-| **原生 ARGB 覆盖窗**<br>（`vlt/platform/x11.py`） | X11 会话（纯 Xorg）；Wayland 会话只要带 XWayland（**GNOME/Mutter**、Weston 等没有 layer-shell 的同样吃这条腿） | ✅ **逐像素 alpha**（32 位 visual + 预乘出图）；⚠️ **需要合成器**（picom 等）——没有时启动日志有提醒，透明区显示为黑 | ✅ 覆盖窗置顶 + `XMoveWindow` 精确定位；跟随同左 | ✅ X Shape：输入区置空 |
+| **原生 ARGB 覆盖窗**<br>（`vlt/platform/x11.py`） | X11 会话（纯 Xorg）；Wayland 会话只要带 XWayland（**GNOME/Mutter**、Weston 等没有 layer-shell 的同样吃这条腿） | ✅ **逐像素 alpha**（32 位 visual + 预乘出图）；⚠️ **需要合成器**（picom 等）——没有时自动降级：1 位形状蒙版裁掉透明区（没有黑框；圆角为锯齿、底板是实色），启动日志有一行说明 | ✅ 覆盖窗置顶 + `XMoveWindow` 精确定位；跟随同左 | ✅ X Shape：输入区置空 |
 | **Tk 窗**（最后回落） | `backend=tk`；或两条原生腿都建不起来（没有对应协议 / 库 / 32 位 visual） | ⚠️ Windows 靠色键；Linux 用 **1 位形状蒙版**抠掉面板圆角外的键色底（圆角有锯齿；**逐像素半透明仍不行**——那是原生窗的能力） | ⚠️ X11 会话全功能；GNOME/Wayland 下客户端不能自定位 → 跟随不生效 | ✅ X11 输入区置空（X Shape）；GNOME 下未真机验证 |
 
 - 日志会写出走的哪条：`后端=原生`（某条原生腿）或 `后端=Tk`。原生窗建不起来时，后端模块会打一行**具体原因**（没有 layer-shell / 没有 32 位 visual / libwayland 加载失败等）再回落。
@@ -350,9 +350,10 @@ overlay:
    layer-shell 的合成器）走原生 layer-shell 窗 —— 逐像素透明、overlay 层置顶、精确跟随、
    协议级穿透、拖动全部成立（niri 真机实测，见平台约束记录第九节）；**X11 会话**（含带
    XWayland 的 GNOME/Weston）走原生 ARGB 覆盖窗（32 位 visual + 预乘出图，逐像素透明；
-   需要合成器 picom 等——没有时透明区显示为黑，启动日志有一行提醒）。两条原生腿都建不起来
-   时最后回落 Tk：位置/透明度由合成器决定属预期边界；Linux 的 Tk 会用 **1 位形状蒙版**
-   把面板圆角外的键色底抠掉（圆角有锯齿；逐像素半透明仍做不到——那是原生窗的事）。
+   需要合成器 picom 等——没有时**自动降级**用 1 位形状蒙版裁掉透明区：没有黑框，但圆角
+   是锯齿、底板是实色，启动日志有一行说明）。两条原生腿都建不起来时最后回落 Tk：
+   Linux 的 Tk 同样用 1 位形状蒙版抠掉面板圆角外的键色底（圆角有锯齿；逐像素半透明
+   做不到——那是原生窗的事）。
 
 ---
 
