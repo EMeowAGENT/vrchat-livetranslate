@@ -97,6 +97,41 @@ def find_cjk_font() -> str | None:
     return None
 
 
+# 泰文字体候选（按优先级）。
+#
+# ⚠️ **不能复用 CJK 字体**：实测 `C:/Windows/Fonts/msyh.ttc`（微软雅黑，默认 CJK 字体）
+# 不含泰文字形 —— 用 PIL 渲染 `สวัสดี`，位图与「私有区缺字位 U+E000」的位图**完全相同**
+# （= 豆腐块）。所以泰语必须走这条独立探测，渲染侧按书写系统切 run、各用各的字体画。
+#
+# 候选顺序：
+#   1. Leelawadee UI（`LeelawUI.ttf`）—— Windows 8+ 自带的泰文 UI 字体，观感最好；
+#   2. Tahoma（`tahoma.ttf`）—— Windows XP 起就带泰文字形，兜底最稳；
+#   3. Noto Sans Thai —— 用户自己装过 Noto 字体族的话；
+#   4. 其它可能含泰文的 Windows 字体（Arial Unicode MS 等）。
+# 一个都没有时返回 None，由调用方降级并留痕：`overlay.resolve_thai_font_path` 先试
+# 用户配置的字体，再回落到 CJK 字体（泰文会出豆腐块）+ 打一行告警（禁静默降级）。
+_THAI_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/LeelawUI.ttf",     # Leelawadee UI（泰文 UI 字体，Win 8+）
+    "C:/Windows/Fonts/tahoma.ttf",       # Tahoma（含泰文，Win XP 起）
+    "C:/Windows/Fonts/NotoSansThai-Regular.ttf",
+    "C:/Windows/Fonts/NotoSansThaiVF.ttf",
+    "C:/Windows/Fonts/ARIALUNI.TTF",     # Arial Unicode MS（老版 Office 会装）
+)
+
+
+def find_thai_font() -> str | None:
+    """找一个含泰文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` 是**两条独立**的探测：CJK 字体（雅黑等）不含泰文字形，
+    泰文字体（Leelawadee UI 等）不含中日韩字形 —— 混排时必须按书写系统切 run、
+    各用各的字体画，否则会出豆腐块。
+    """
+    for cand in _THAI_FONT_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 # ---------------------------------------------------------------- 界面语言
 
 # Windows 主语言 ID → 界面语言。表里没有的（德语/法语等已知但未支持的语言）按 en 接待；

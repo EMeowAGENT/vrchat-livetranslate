@@ -313,6 +313,7 @@ overlay:
 | 圆角外一圈是黑的 / 底板看着不透明 | 走了 Tk 回落路径（日志 `后端=Tk`） | 确认合成器支持 `zwlr_layer_shell_v1`（niri/sway/Hyprland/KDE 支持；GNOME/Weston 不支持）；`desktop_overlay.backend=wayland` 可让日志给出具体原因 |
 | 字幕窗被平铺、把桌面布局挤开 | 走了 Tk 回落（原生窗在 overlay 层，不会被平铺） | 同上：看日志确认后端；支持 layer-shell 的合成器里不该出现 |
 | 拖不动 / 拖动后落点没变 | 旧版只认 relative-pointer，而 niri 不发相对位移事件 | 升级到含「拖动双源」的版本；仍不对就附日志里 `[desktop:wayland]` 的几行 |
+| 泰语字幕显示成一排方块 | 宿主机没装含泰文字形的字体（AppImage **不自带字体**，用的是宿主 fontconfig；CJK 字体不含泰文） | 装一个泰文字体，例如 Debian/Ubuntu：`apt install fonts-thai-tlwg`（用 `fc-list :lang=th` 可确认装上没有）；日志里会有一行「找不到含泰文字形的字体 → …豆腐块」提示 |
 
 ### 其它
 

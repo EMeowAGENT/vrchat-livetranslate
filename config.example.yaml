@@ -86,7 +86,7 @@ directions:
   # ① 我说 → chatbox（对方看得见，我自己也看得见）
   mine:
     source_lang: zh
-    target_lang: en          # 可改 ja / ko / fr / de / es / ru ...
+    target_lang: en          # 可改 ja / ko / fr / de / es / ru / th ...
     output_audio: false      # true 则同时拿译音（走虚拟声卡那条腿）
     hotwords: {}             # 方向级热词（可选）：只对**这个方向**生效，覆盖下面 glossary 的同名词条
                              # 例：{"Nekoya": "Nekoya"} —— 我说英文名、英文译文保持原样
