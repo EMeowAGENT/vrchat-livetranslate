@@ -15,6 +15,7 @@ STRINGS: dict[str, str] = {
     "德语": "German",
     "西班牙语": "Spanish",
     "俄语": "Russian",
+    "泰语": "Thai",
     # ---- 主窗口 ----
     "VRChat 实时同传": "vrchat-livetranslate",
     "⚙ 设置": "⚙ Settings",

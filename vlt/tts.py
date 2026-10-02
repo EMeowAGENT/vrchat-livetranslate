@@ -42,7 +42,7 @@ DEFAULT_OMNI_VOICE = "Tina"
 LANG_NAMES = {
     "zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
     "fr": "French", "de": "German", "es": "Spanish", "ru": "Russian",
-    "it": "Italian", "pt": "Portuguese",
+    "it": "Italian", "pt": "Portuguese", "th": "Thai",
 }
 
 _opener = None

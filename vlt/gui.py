@@ -301,6 +301,7 @@ SOURCE_LANGS = {
     "德语": "de",
     "西班牙语": "es",
     "俄语": "ru",
+    "泰语": "th",
 }
 
 TARGET_LANGS = {
@@ -312,6 +313,7 @@ TARGET_LANGS = {
     "德语": "de",
     "西班牙语": "es",
     "俄语": "ru",
+    "泰语": "th",
 }
 
 

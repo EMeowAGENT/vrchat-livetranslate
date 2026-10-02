@@ -358,6 +358,52 @@ def find_cjk_font() -> str | None:
     return None
 
 
+# 泰文字体兜底路径（fc-match 找不到时用）。
+#
+# ⚠️ **不能复用 CJK 字体**：Noto Sans CJK 不含泰文字形，渲染泰文会出豆腐块
+# （与 Windows 侧 msyh.ttc 同因）。所以泰语必须走这条独立探测，渲染侧按书写系统
+# 切 run、各用各的字体画。
+#
+# 常见 Linux 泰文字体包：
+#   * `noto-fonts-thai` / `fonts-noto-thai` → NotoSansThai-Regular.ttf
+#   * `ttf-thai-tlwg` → Loma.ttf / Garuda.ttf / Norasi.ttf 等
+#   * `fonts-thai-tlwg` → 同上（Debian/Ubuntu 包名）
+_THAI_FONT_FALLBACKS = (
+    "/usr/share/fonts/noto-thai/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/tlwg/Loma.ttf",
+    "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
+    "/usr/share/fonts/truetype/tlwg/Norasi.ttf",
+    "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/thai-tlwg/Loma.ttf",
+)
+
+
+def find_thai_font() -> str | None:
+    """用 fontconfig 找一个含泰文字形的字体；找不到返回 None。
+
+    先问 `fc-match`（尊重用户自己的字体偏好），再退回已知路径。
+    Windows 侧对应的是 `LeelawUI.ttf` / `tahoma.ttf`（见 win.py）。
+    """
+    if shutil.which("fc-match"):
+        try:
+            res = subprocess.run(
+                ["fc-match", "-f", "%{file}", "Noto Sans Thai:lang=th"],
+                capture_output=True, timeout=5,
+            )
+            if res.returncode == 0:
+                cand = res.stdout.decode("utf-8", "replace").strip()
+                if cand and Path(cand).exists():
+                    return cand
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for cand in _THAI_FONT_FALLBACKS:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 # ---------------------------------------------------------------- 界面语言
 
 # 语言代码前缀 → 本项目支持的界面语言。与 win.py 的口径必须一致：

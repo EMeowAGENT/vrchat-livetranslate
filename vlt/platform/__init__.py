@@ -25,7 +25,7 @@ IS_LINUX = sys.platform.startswith("linux")
 __all__ = [
     "IS_WINDOWS", "IS_LINUX",
     "backend", "device_backend",
-    "open_path", "find_cjk_font", "detect_ui_language",
+    "open_path", "find_cjk_font", "find_thai_font", "detect_ui_language",
     # 桌面叠加窗（issue #11）：缺失实现的平台会拿到下面的安全默认值
     "desktop_window_backend", "find_game_window", "window_client_rect", "is_window",
     "set_click_through", "set_tool_window", "set_window_shape",
@@ -150,6 +150,19 @@ def find_cjk_font() -> str | None:
     （Linux 上 `test_wrap.py` 就是这么挂的）。
     """
     return backend().find_cjk_font()
+
+
+def find_thai_font() -> str | None:
+    """找一个含泰文字形的字体文件路径；找不到返回 None（由调用方回落）。
+
+    与 `find_cjk_font()` 是**两条独立**的探测：CJK 字体（雅黑 / Noto Sans CJK 等）
+    不含泰文字形，泰文字体（Leelawadee UI / Noto Sans Thai 等）不含中日韩字形 ——
+    混排时必须按书写系统切 run、各用各的字体画，否则会出豆腐块。
+
+    Windows 侧在 `win.py` 的 `_THAI_FONT_CANDIDATES`（LeelawUI.ttf → tahoma.ttf → …），
+    Linux 侧在 `linux.py` 用 `fc-match "Noto Sans Thai:lang=th"` + 已知路径兜底。
+    """
+    return backend().find_thai_font()
 
 
 def detect_ui_language() -> str:
