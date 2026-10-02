@@ -226,7 +226,8 @@ def test_normalize() -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         eq(endpoints.key_slot("garbage"), "qianwen", "key_slot 非法值回落 qianwen")
     eq(endpoints.signup_url("bailian_intl"),
-       "https://modelstudio.console.alibabacloud.com/", "signup_url(bailian_intl)")
+       "https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market",
+       "signup_url(bailian_intl) = 国际站模型市场页（用户实测确认的地址）")
     with contextlib.redirect_stdout(io.StringIO()):
         eq(endpoints.signup_url("unknown"), "https://www.qianwenai.com/",
            "signup_url 未知 provider 回落千问云")

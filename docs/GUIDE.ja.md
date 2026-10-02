@@ -91,7 +91,7 @@ python -m venv .venv
 モデルもリアルタイム API も同じで、違うのは入口のアドレスとアカウント体系だけです。
 2 つの回線は**排他**で、同時に有効なのは画面で選んだ片方だけです。
 
-**開通の 3 ステップ**（いずれも[百錬国際版コンソール](https://modelstudio.console.alibabacloud.com/)で）：
+**開通の 3 ステップ**（いずれも[百錬国際版コンソール・モデルマーケット](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)で）：
 
 1. ワークスペースを作成（既定のものをそのまま使っても可）して開く
 2. 「ワークスペース詳細」ページで **API Host のプレフィックス**をコピー —— この先頭部分が

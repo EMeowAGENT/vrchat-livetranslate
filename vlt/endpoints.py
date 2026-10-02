@@ -69,10 +69,14 @@ REGIONS: tuple[tuple[str, str], ...] = (
 )
 DEFAULT_REGION = "ap-southeast-1"
 
-# 注册入口（界面「去哪申请 key」用；未知 provider 回落千问云那条）。
+# 注册/开通入口（界面「去哪申请 key」按钮用；未知 provider 回落千问云那条）。
+# 百炼国际版这里给的是**新加坡地域的模型市场页**（用户实测确认的地址）：进去就能看到
+# 模型清单与「开通 / 创建 API key」入口，比控制台首页少点两下。地域段固定写
+# `ap-southeast-1`（= DEFAULT_REGION）；在别的国际站地域建了空间的用户，页面内可自己切地域。
 SIGNUP_URLS = {
     PROVIDER_QIANWEN: "https://www.qianwenai.com/",
-    PROVIDER_BAILIAN_INTL: "https://modelstudio.console.alibabacloud.com/",
+    PROVIDER_BAILIAN_INTL: ("https://modelstudio.console.alibabacloud.com"
+                            "/ap-southeast-1/model/market"),
 }
 
 

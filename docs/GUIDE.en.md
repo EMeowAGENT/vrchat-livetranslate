@@ -93,7 +93,7 @@ even open an account, and a direct connection is unreliable. Outside mainland Ch
 the entry address and the account system differ. The two lines are **mutually exclusive**: exactly one
 of them is working at any moment, whichever you select in the app.
 
-**Three steps to sign up** (all inside the [Model Studio console](https://modelstudio.console.alibabacloud.com/)):
+**Three steps to sign up** (all inside the [Model Studio console · Model Market](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)):
 
 1. Create a workspace (or just use the default one) and open it
 2. On its "Workspace Details" page, copy the **API Host prefix** — that leading part *is* the

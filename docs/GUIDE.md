@@ -96,7 +96,7 @@ python -m venv .venv
 海外请改用**阿里云百炼·国际版（Alibaba Cloud Model Studio）**——同一套模型、同一个实时接口，
 只是入口地址和账号体系不同。两条线路**互斥**：同一时刻只有一条在工作，界面里选哪条就用哪条。
 
-**开通三步**（都在[百炼国际版控制台](https://modelstudio.console.alibabacloud.com/)里做）：
+**开通三步**（都在[百炼国际版控制台 · 模型市场](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)里做）：
 
 1. 建一个业务空间（或直接用默认那个），进去
 2. 在「业务空间详情」页复制 **API Host 前缀** —— 这一截就是**业务空间 ID**，形如 `llm-xxxx`

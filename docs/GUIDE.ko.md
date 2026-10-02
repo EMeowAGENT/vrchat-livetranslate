@@ -90,7 +90,7 @@ python -m venv .venv
 모델도 실시간 API도 같고, 진입 주소와 계정 체계만 다릅니다. 두 회선은 **상호 배타**라서
 동시에 동작하는 것은 화면에서 고른 하나뿐입니다.
 
-**개통 3단계**(모두 [바이롄 국제판 콘솔](https://modelstudio.console.alibabacloud.com/)에서)：
+**개통 3단계**(모두 [바이롄 국제판 콘솔 · 모델 마켓](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)에서)：
 
 1. 워크스페이스를 만들고(기본 워크스페이스를 그대로 써도 됩니다) 들어갑니다
 2. 「워크스페이스 상세 정보」 페이지에서 **API Host 접두사**를 복사합니다 —— 이 앞부분이 곧
