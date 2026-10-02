@@ -175,21 +175,45 @@ class PyaudioLoopbackSource(QueueAudioSource):
 
     def __init__(self, loop, *, device_index: int, name: str, rate: int,
                  channels: int) -> None:
-        ch = min(2, channels or 2)
-        super().__init__(loop, rate=rate, channels=ch)
-        self.device_name = name
+        # ⚠️ **按设备原生声道数打开，不要压成 2。**
+        # WASAPI 的 loopback 端点只能用**端点混音格式**的声道数打开；压成 2 会被
+        # PortAudio 直接拒掉 → `OSError: [Errno -9998] Invalid number of channels`，
+        # 端点上一条音频都收不到。海外用户实测（2026-10-02，7.1 / 8 声道设备）：
+        # 采集腿与设置里的电平条**都**报这个错 —— 电平条复用同一处代码。
+        # 降混到单声道由下游负责（`to_16k_mono(pcm, rate, source.channels)` 按声道数取均值），
+        # 所以这里按原生声道数开是安全的。
+        # 个别设备只吃立体声 → 逐个候选试，**每个分支各留一行日志**（禁静默降级）。
+        # 日志用 print：`[loopback]` 这一族在引擎里就是 print 进日志文件的（用户在界面上
+        # 「打开日志文件夹」看的就是它），走 logging 会因 root 级别不够而整条消失。
+        wanted = max(1, int(channels or 2))
+        candidates = [wanted] if wanted == 2 else [wanted, 2]
         import pyaudiowpatch as pyaudio
 
+        self.device_name = name
         self._chunk_max = int(rate * 0.1)
         self._pa = pyaudio.PyAudio()
-        try:
-            self._stream = self._pa.open(
-                format=pyaudio.paInt16, channels=ch, rate=rate,
-                frames_per_buffer=int(rate * 0.1), input=True,
-                input_device_index=device_index)
-        except Exception:
+        self._stream = None
+        last_exc: Exception | None = None
+        for ch in candidates:
+            try:
+                self._stream = self._pa.open(
+                    format=pyaudio.paInt16, channels=ch, rate=rate,
+                    frames_per_buffer=int(rate * 0.1), input=True,
+                    input_device_index=device_index)
+            except Exception as exc:  # noqa: BLE001 — 换声道数再试
+                last_exc = exc
+                print(f"[loopback] 采集端点「{name}」按 {ch} 声道打开失败：{exc}", flush=True)
+                continue
+            if ch == wanted:
+                print(f"[loopback] 采集端点「{name}」{rate}Hz ×{ch}ch 打开成功", flush=True)
+            else:
+                print(f"[loopback] 采集端点「{name}」原生 {wanted}ch 打不开，"
+                      f"已回落 {ch}ch 打开", flush=True)
+            break
+        else:
             self._pa.terminate()
-            raise
+            raise last_exc if last_exc is not None else RuntimeError("loopback 打不开")
+        super().__init__(loop, rate=rate, channels=ch)
 
     def _pump(self, stop: threading.Event) -> None:
         while not stop.is_set():
