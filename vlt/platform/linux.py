@@ -37,6 +37,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -381,21 +382,29 @@ _THAI_FONT_FALLBACKS = (
 
 
 def find_thai_font() -> str | None:
-    """用 fontconfig 找一个含泰文字形的字体；找不到返回 None。
+    """用 fontconfig 找一个**确实含泰文字形**的字体；找不到返回 None。
 
-    先问 `fc-match`（尊重用户自己的字体偏好），再退回已知路径。
+    ⚠️ 判据必须是 `fc-list :lang=th`（只列**覆盖泰文**的字体），**不能只信 `fc-match`**：
+    `fc-match` 永远会返回一个字体（哪怕它不含泰文字形，例如 DejaVu Sans），于是
+    「拿到路径」≠「能画泰文」→ 既不告警、渲染出来还是豆腐块，属于**静默降级**。
+    所以：fc-list 拿不到 → 再走下面的已知路径兜底 → 都没有就返回 None，
+    由调用方（`overlay.resolve_thai_font_path`）打一次性告警后回落 CJK 字体。
+
     Windows 侧对应的是 `LeelawUI.ttf` / `tahoma.ttf`（见 win.py）。
     """
-    if shutil.which("fc-match"):
+    if shutil.which("fc-list"):
         try:
             res = subprocess.run(
-                ["fc-match", "-f", "%{file}", "Noto Sans Thai:lang=th"],
+                ["fc-list", ":lang=th", "-f", "%{file}\n"],
                 capture_output=True, timeout=5,
             )
             if res.returncode == 0:
-                cand = res.stdout.decode("utf-8", "replace").strip()
-                if cand and Path(cand).exists():
-                    return cand
+                for line in res.stdout.decode("utf-8", "replace").splitlines():
+                    cand = line.strip()
+                    # 字体集合（.ttc）在部分 fontconfig 版本里会带 `:index=0` / `:face=0` 后缀
+                    cand = re.sub(r":(?:index|face)=\d+$", "", cand)
+                    if cand and Path(cand).exists():
+                        return cand
         except (OSError, subprocess.TimeoutExpired):
             pass
     for cand in _THAI_FONT_FALLBACKS:

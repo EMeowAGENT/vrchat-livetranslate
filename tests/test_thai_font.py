@@ -134,6 +134,26 @@ def _fonts() -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
     return _fonts_at(FONT_SIZE)
 
 
+# 本机是否有含泰文字形的字体。没有时（裸 Linux 机器 / 没装泰文字体的 CI 很常见），
+# 依赖泰文字体的用例**明确跳过并说明原因**，而不是判红 —— 与
+# `tests/test_wayland_window.py` / `test_x11_window.py` 缺 sway / Xvfb 时的口径一致。
+# ⚠️ 不许静默：跳过的用例都会打印一行，结尾统计里也会写清跑了几条、跳过几条。
+THAI_FONT_PATH: str | None = resolve_thai_font_path("")
+_SKIPPED: list[str] = []
+_NO_FONT_WHY = ("本机没有含泰文字形的字体（装了泰文字体后会自动跑；"
+                "Linux 见 docs/GUIDE.linux.md 的泰语一节）")
+
+
+def _no_thai_font() -> bool:
+    """True = 本机没有泰文字体，该用例应跳过（调用方负责 `return _skip(name)`）。"""
+    return not THAI_FONT_PATH
+
+
+def _skip(name: str) -> None:
+    _SKIPPED.append(name)
+    print(f"  ⏭ 跳过 {name}：{_NO_FONT_WHY}")
+
+
 def _stub_thai_font(value):
     """上下文管理器：把 `resolve_thai_font_path` 打桩成固定返回值（绕过缓存）。"""
     class _Ctx:
@@ -169,23 +189,30 @@ def test_tofu_probe_has_teeth() -> None:
 
     这条不成立的话，下面所有「不是豆腐块」的断言都是空转（拿一个本来就覆盖泰文的字体
     去测，怎么写都绿）。CJK 字体自带泰文字形属于环境特例，不算失败，但必须显式说出来。
+
+    ⚠️ 判据只用**整词口径**：早期版本还要求「整词 == 逐字」一致，实测在 Linux 的
+    Noto Sans CJK 上不成立 —— 泰文的组合符号（如 `ั` `ี`）在缺字形的字体里会被画成
+    **空白**而不是方框，于是「逐字比 U+E000 的方框」判 False、整词判 True，
+    两者本来就不该相等。整词口径才是「这段文字有没有被这个字体画出来」的正确问法。
     """
     cjk_path = resolve_font_path("")
     assert cjk_path, "平台层没解析出 CJK 字体"
     cjk = ImageFont.truetype(cjk_path, FONT_SIZE)
     whole = _is_tofu(cjk, THAI_WORD)
-    per_char = all(_is_tofu(cjk, c) for c in _thai_chars(THAI_WORD))
-    assert whole == per_char, \
-        f"整词判据({whole})与逐字判据({per_char})结论不一致 —— 判据本身不可靠"
     if not whole:
         print(f"  ⚠ 本机 CJK 字体（{cjk_path}）自带泰文字形，"
               "「豆腐块判据」在本机没有分辨力（环境特例，不判失败）")
         return
     assert _is_tofu(cjk, THAI_SENTENCE), "换个更长的泰文句子判据就失效了？"
+    # 判据有分辨力：同一段文字换成泰文字体就不是豆腐块（本机没有泰文字体时无从对照，跳过该半条）
+    if THAI_FONT_PATH:
+        thai = ImageFont.truetype(THAI_FONT_PATH, FONT_SIZE)
+        assert not _is_tofu(thai, THAI_WORD), \
+            f"泰文字体（{Path(THAI_FONT_PATH).name}）渲染 {THAI_WORD!r} 也是豆腐块 —— 判据认不出对照物"
     assert not _is_tofu(cjk, CJK_WORD), \
         f"CJK 字体连 {CJK_WORD!r} 都渲染成豆腐块 —— 参照物选错了，判据不可用"
     print(f"  ✓ 判据有分辨力：CJK 字体 {Path(cjk_path).name} 渲染 {THAI_WORD!r} "
-          f"== 渲染 {TOFU!r}×{len(THAI_WORD)}（整词/逐字两种口径一致；中文非豆腐块）")
+          f"== 渲染 {TOFU!r}×{len(THAI_WORD)}（中文非豆腐块；泰文字体在场时结果相反）")
 
 
 # ---------------------------------------------------------------- ② 泰文字体真的有泰文字形
@@ -193,6 +220,8 @@ def test_tofu_probe_has_teeth() -> None:
 
 def test_thai_font_renders_real_glyphs() -> None:
     """★ 解析出来的泰文字体渲染 `สวัสดี`，位图**不等于**缺字位位图（整词 + 逐字两种口径）。"""
+    if _no_thai_font():
+        return _skip("test_thai_font_renders_real_glyphs")
     _, thai = _fonts()
     assert not _is_tofu(thai, THAI_WORD), \
         f"泰文字体渲染 {THAI_WORD!r} 仍是豆腐块（== {TOFU!r}×{len(THAI_WORD)}）"
@@ -211,14 +240,18 @@ def test_thai_font_resolved_through_platform_facade() -> None:
     并**打一行告警**，渲染不许崩（回落 CJK 字体 → 豆腐块，但至少留了痕）。
     """
     path = resolve_thai_font_path("")
-    assert path and Path(path).exists(), f"泰文字体路径无效：{path!r}"
-    assert path == platform_mod.find_thai_font(), \
-        (f"解析结果与门面不一致（overlay 自己写了平台路径？）："
-         f"{path!r} vs {platform_mod.find_thai_font()!r}")
+    if path:
+        assert Path(path).exists(), f"泰文字体路径无效：{path!r}"
+        assert path == platform_mod.find_thai_font(), \
+            (f"解析结果与门面不一致（overlay 自己写了平台路径？）："
+             f"{path!r} vs {platform_mod.find_thai_font()!r}")
 
-    src = (ROOT / "vlt" / "output" / "overlay.py").read_text(encoding="utf-8")
-    assert Path(path).name not in src, \
-        f"共享模块 overlay.py 里出现了具体泰文字体文件名 {Path(path).name!r}（平台路径必须留在 vlt/platform/）"
+        src = (ROOT / "vlt" / "output" / "overlay.py").read_text(encoding="utf-8")
+        assert Path(path).name not in src, \
+            f"共享模块 overlay.py 里出现了具体泰文字体文件名 {Path(path).name!r}（平台路径必须留在 vlt/platform/）"
+    else:
+        print(f"  ⏭ 本机没有泰文字体 → 跳过「路径有效 / 与门面一致 / 不在共享模块里」三条；"
+              f"降级留痕那半条照跑")
 
     saved_flag = overlay._thai_font_warned
     orig_facade = platform_mod.find_thai_font
@@ -247,8 +280,12 @@ def test_thai_font_resolved_through_platform_facade() -> None:
         overlay._thai_font_cache.pop("", None)
         overlay._thai_font_warned = saved_flag
     assert resolve_thai_font_path("") == path, "打桩复原后解析结果应回到真实字体"
-    print(f"  ✓ 泰文字体经平台门面解析（{Path(path).name}），overlay.py 不含该文件名；"
-          "门面返回 None 时降级留痕（只一次）且渲染不崩")
+    if path:
+        print(f"  ✓ 泰文字体经平台门面解析（{Path(path).name}），overlay.py 不含该文件名；"
+              "门面返回 None 时降级留痕（只一次）且渲染不崩")
+    else:
+        print("  ✓ 本机无泰文字体：门面返回 None 时降级留痕（只一次）且渲染不崩"
+              "（解析路径那一半已跳过）")
 
 
 # ---------------------------------------------------------------- ③ CJK 渲染行为不变
@@ -262,6 +299,8 @@ def test_cjk_font_not_swapped_for_thai() -> None:
     ② 非泰语文本走 `_draw_line`（泰文字体在场）与**改动前的写法**
        `d.text(..., font=cjk, anchor="la")` 逐字节相同。
     """
+    if _no_thai_font():
+        return _skip("test_cjk_font_not_swapped_for_thai")
     assert resolve_font_path("") == platform_mod.find_cjk_font(), \
         (f"默认字体被换了：resolve_font_path('')={resolve_font_path('')!r} "
          f"find_cjk_font()={platform_mod.find_cjk_font()!r}")
@@ -318,6 +357,8 @@ def test_mixed_line_uses_both_fonts() -> None:
     ② 混排行里每个泰文码位单独用泰文字体渲染都不是豆腐块；
     ③ 整行墨迹非空，且墨迹宽度与 `_measure_line` 的测量值吻合（测量跟着字体走）。
     """
+    if _no_thai_font():
+        return _skip("test_mixed_line_uses_both_fonts")
     cjk, thai = _fonts()
     assert _thai_chars(MIXED_LINE) and any(_is_hanzi(c) for c in MIXED_LINE), \
         "用例本身必须同时含中文与泰文"
@@ -361,6 +402,8 @@ def _hang_allowance(d: ImageDraw.ImageDraw, ln: str,
 
 def test_mixed_wrap_respects_max_width() -> None:
     """★ 混排长句折行：**每一行实画出来的墨迹都不许超出 max_w**（量错字体 = 溢出面板）。"""
+    if _no_thai_font():
+        return _skip("test_mixed_wrap_respects_max_width")
     cjk, thai = _fonts()
     d_probe = ImageDraw.Draw(_blank())
     text = ("这是一段中文和泰文混排的长句子，" + THAI_WITH_LATIN
@@ -407,6 +450,8 @@ def test_mixed_wrap_respects_max_width() -> None:
 def test_mixed_line_end_to_end_in_panel() -> None:
     """端到端：把中泰混排的句子塞进 `render_panel` / `render_conversation`，
     面板里泰文那段必须与「强制用 CJK 字体画」的结果不同（= 没出豆腐块），且尺寸正确。"""
+    if _no_thai_font():
+        return _skip("test_mixed_line_end_to_end_in_panel")
     cfg = OverlayConfig()
     img = render_panel(MIXED_LINE, MIXED_LINE, cfg)
     assert img.size == cfg.size_px, img.size
@@ -441,6 +486,8 @@ def test_right_anchor_mixed_line_stays_inside() -> None:
     ⚠️ 锚点必须离画布左边足够远：整行实测 ~1100px，锚点写小了行会从左边画出去，
     墨迹被画布裁掉，判据就成了「比较两张都被裁过的图」。
     """
+    if _no_thai_font():
+        return _skip("test_right_anchor_mixed_line_stays_inside")
     cjk, thai = _fonts()
     want = _measure_line(ImageDraw.Draw(_blank()), MIXED_LINE, cjk, thai)
     assert RIGHT_ANCHOR_X - want >= 0, \
@@ -466,6 +513,8 @@ def test_right_anchor_mixed_line_stays_inside() -> None:
 
 def test_thai_only_line_uses_thai_font() -> None:
     """纯泰文行（单 run）也必须走泰文字体 —— 不能因为「只有一个 run」就用了 CJK 字体。"""
+    if _no_thai_font():
+        return _skip("test_thai_only_line_uses_thai_font")
     cjk, thai = _fonts()
     got = _render(lambda d: _draw_line(d, ORIGIN, THAI_SENTENCE, cjk, thai, fill=255))
     ref_thai = _render(lambda d: d.text(ORIGIN, THAI_SENTENCE, font=thai, fill=255,
@@ -507,8 +556,13 @@ def main() -> int:
     if failed:
         print(f"❌ {failed}/{len(tests)} 个用例失败")
         return 1
-    print(f"ALL PASSED（{len(tests)} 个用例：豆腐块判据 / 泰文字体×2 / CJK 行为不变×2 / "
-          "中泰混排×3 / 右对齐 / 纯泰文）")
+    ran = len(tests) - len(_SKIPPED)
+    if _SKIPPED:
+        print(f"ALL PASSED（跑 {ran}/{len(tests)} 个用例，跳过 {len(_SKIPPED)} 条："
+              f"{'、'.join(_SKIPPED)}）—— 跳过原因：{_NO_FONT_WHY}")
+    else:
+        print(f"ALL PASSED（{len(tests)} 个用例：豆腐块判据 / 泰文字体×2 / CJK 行为不变×2 / "
+              "中泰混排×3 / 右对齐 / 纯泰文）")
     return 0
 
 
