@@ -1476,12 +1476,13 @@ def pick_input_device(pattern: str | None) -> int | None:
     """按名称子串匹配输入设备。"""
     if not pattern:
         return None
-    import sounddevice as sd
 
     want = pattern.lower()
-    for i, d in enumerate(sd.query_devices()):
+    # 走平台层的设备表（Windows 上已收敛到 WASAPI 已启用那一套）：不然同名设备会在
+    # MME/DirectSound/WASAPI 下各命中一次，而这里取**第一条**，命中的是 MME（44100Hz）。
+    for i, d in enumerate(platform.device_backend().query_devices()):
         if d["max_input_channels"] > 0 and want in str(d["name"]).lower():
-            return i
+            return int(d.get("pa_index", i))    # 过滤后列表下标 ≠ PortAudio 索引
     return None
 
 
@@ -1855,13 +1856,24 @@ async def _pump_vrchat_capture(session, tele, stop_event,
 
 
 def list_devices() -> None:
-    import sounddevice as sd
+    """打印设备表（`--list-devices`）。**列的是程序实际会用的那一套**。
+
+    Windows 上平台层已把设备收敛到 WASAPI 已启用端点（见 `platform/win.py: query_devices`），
+    所以这里不再出现 MME/DirectSound/WDM-KS 的重复项与未启用幽灵 —— 与界面下拉一致。
+    设备号打的是**真实 PortAudio 索引**（`pa_index`），可直接用于排查「打开到哪一路」。
+    """
+    devs = platform.device_backend().query_devices()
+
+    def idx_of(d: dict, i: int) -> int:
+        return int(d.get("pa_index", i))
 
     print("=== 输入设备（麦克风）===")
-    for i, d in enumerate(sd.query_devices()):
+    for i, d in enumerate(devs):
         if d["max_input_channels"] > 0:
-            print(f"  {i:3d} | in={d['max_input_channels']} | {int(d['default_samplerate'])}Hz | {d['name']}")
+            print(f"  {idx_of(d, i):3d} | in={d['max_input_channels']} | "
+                  f"{int(d['default_samplerate'])}Hz | {d['name']}")
     print("\n=== 输出设备 ===")
-    for i, d in enumerate(sd.query_devices()):
+    for i, d in enumerate(devs):
         if d["max_output_channels"] > 0:
-            print(f"  {i:3d} | out={d['max_output_channels']} | {int(d['default_samplerate'])}Hz | {d['name']}")
+            print(f"  {idx_of(d, i):3d} | out={d['max_output_channels']} | "
+                  f"{int(d['default_samplerate'])}Hz | {d['name']}")

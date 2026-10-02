@@ -276,6 +276,13 @@ exe는 콘솔 창이 없는 단일 파일 GUI라 위의 `--self-test` 외에 명
 > 📌 **오디오 장치 지정에 플래그는 필요 없습니다**: GUI의 "⚙ 설정"에서 고르거나(드롭다운 첫 항목 "자동 검출"이
 > 폴백 순서로 탐색합니다), `config.yaml` 의 `capture.mic_device` / `capture.loopback_device` 를 직접 고치세요.
 > 저장되는 것은 **장치 이름 문자열**이며 인덱스가 아닙니다 — 인덱스는 핫플러그나 세션 전환으로 통째로 밀립니다.
+>
+> ⚠️ **목록에는 '사용' 중인 장치만, 같은 사운드카드는 한 번만**: 이 앱은 **WASAPI** 엔드포인트만
+> 나열합니다 —— 즉 Windows 「소리」 설정에서 **사용**으로 되어 있는 것들입니다(사용 안 함은 나오지
+> 않습니다. 쓰려면 「소리 → 추가 사운드 설정」에서 먼저 사용으로 바꾸세요). 그래서 "같은 마이크가
+> 두세 줄, 게다가 샘플레이트가 제각각"인 상태가 되지 않고, 이름 뒤 괄호의 샘플레이트가
+> **실제로 쓰이는 값**입니다(보통 48000). 옛 설정에 저장된 이름도 그대로 해석됩니다
+> (같은 이름의 WASAPI 엔드포인트로 연결됩니다).
 
 ---
 
@@ -492,7 +499,7 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    57개 파일, 462개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    58개 파일, 467개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -544,7 +551,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
   ```
 
 ---

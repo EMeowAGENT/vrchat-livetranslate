@@ -21,14 +21,68 @@ from .base import PA_LOCK, AudioSource, LoopbackTarget
 # ---------------------------------------------------------------- 设备枚举
 
 def query_devices() -> list[dict]:
-    """sounddevice 的设备表（麦克风 + 播放）。
+    """sounddevice 的设备表 —— **只保留 Windows 已启用（WASAPI）那一套**。
 
     失败**不在这里吞**：调用方（`vlt/devices.py`）负责把异常翻成「空列表」，
     这样「枚举不到设备」与「库坏了」在日志里还分得开。
+
+    ## 为什么要按 host API 收敛（2026-10-02 实机对照）
+
+    Windows 上 PortAudio 有 4 个 host API（MME / DirectSound / WASAPI / WDM-KS），
+    **同一块声卡在每个 API 下各算一条**，还夹着一堆已禁用 / 未插入的幽灵端点。
+    本机实测 `sd.query_devices()` **41 条**，而 Windows「声音」里真正**已启用**的只有 **7 个**：
+
+      · Windows 已启用端点（`Get-PnpDevice -Class AudioEndpoint`，Status=OK）：**7 个**
+      · PortAudio 的 **WASAPI** 那一套：**正好这 7 个**（名字逐个对得上，采样率统一 48000）
+      · MME(8) + DirectSound(9) + WDM-KS(16) 共 33 条 = 那 7 个的重复 **+**
+        `立体声混音` / `Realtek HD Audio` 旧滤镜 / `耳机 ()` 空名幽灵 / 蓝牙免手操
+        这类**未启用**的端点
+
+    不收敛的后果（都是用户实测报上来的）：
+      1. 界面上同一支麦克风出现两三条（界面按「名字 (采样率Hz)」显示）；
+      2. 同名那几条**采样率还不一样** —— MME/DirectSound 报 44100、WASAPI 报 48000；
+      3. 会列出**根本没启用**的设备，选了当然打不开；
+      4. 按名字解析（`devices.resolve_device_name`）总是命中**第一条**，而 MME 排最前
+         —— 于是用户就算挑了 WASAPI 那条，实际打开的仍是 MME（最老、延迟最高的一路）。
+
+    ## 口径
+
+    只返回 WASAPI host API 的设备（= Windows 已启用端点，且天然去重）。
+    **只在 WASAPI 一个都枚举不到时才回落完整设备表**并留痕 —— 极端环境下宁可列表丑，
+    也不能让用户一个设备都选不到。
+
+    另外给每条 dict 打上 `pa_index`（**真实 PortAudio 索引**）：过滤后列表下标不再等于
+    PortAudio 索引，`devices.py` 靠这个键取索引，否则会打开到错位的设备。
     """
     import sounddevice as sd
     with PA_LOCK:                    # PortAudio 串行（并发 init/destroy 会段错误）
-        return [dict(d) for d in sd.query_devices()]
+        devices = [dict(d) for d in sd.query_devices()]
+        try:
+            apis = [dict(a) for a in sd.query_hostapis()]
+        except Exception as exc:     # noqa: BLE001 — 老版本/打桩环境可能没有这个接口
+            print(f"[devices] ⚠️ 拿不到 host API 列表（{type(exc).__name__}: {exc}）"
+                  "→ 设备表按原样返回（可能含重复项）", flush=True)
+            return devices
+    for i, d in enumerate(devices):
+        d["pa_index"] = i            # 真实索引：过滤后 devices.py 也拿它当设备号
+
+    wasapi = next((i for i, a in enumerate(apis)
+                   if "WASAPI" in str(a.get("name", "")).upper()), None)
+    if wasapi is None:
+        print("[devices] ⚠️ 没有 WASAPI host API，设备表按原样返回"
+              "（可能含 MME/DirectSound 的重复项）", flush=True)
+        return devices
+    kept = [d for d in devices if d.get("hostapi") == wasapi]
+    if not kept:
+        print("[devices] ⚠️ WASAPI 下没枚举到任何设备，回落完整设备表"
+              "（可能含未启用的端点，列表会变长）", flush=True)
+        return devices
+    dropped = len(devices) - len(kept)
+    if dropped:
+        print(f"[devices] 设备表收敛到 WASAPI 已启用设备：{len(kept)} 个"
+              f"（另有 {dropped} 条是 MME/DirectSound/WDM-KS 的重复项或未启用端点，已隐藏）",
+              flush=True)
+    return kept
 
 
 def query_loopback_devices() -> list[dict]:

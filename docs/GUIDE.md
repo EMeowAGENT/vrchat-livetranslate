@@ -276,6 +276,12 @@ exe 是无控制台窗口的单文件 GUI，除了上面的 `--self-test` 之外
 > 📌 **选音频设备不用传参数**：在图形界面「⚙ 设置」里选（下拉里第一项「自动检测」= 走回退链），
 > 或直接改 `config.yaml` 的 `capture.mic_device` / `capture.loopback_device`。
 > 存的是**设备名字符串**而不是索引——索引会随插拔/会话切换整个变掉。
+>
+> ⚠️ **列表里只有「已启用」的设备，同一块声卡只出现一次**：程序只列 **WASAPI** 那一套端点
+> —— 也就是 Windows「声音」设置里**已启用**的那些（不启用的不会列出来，想用先去
+> 「声音 → 更多声音设置」里启用它）。这样不会出现「同一支麦克风列两三条、采样率还各不一样」
+> 的情况；名字后面括号里的采样率**就是实际会用的采样率**（一般是 48000）。
+> 老配置里存的名字仍能解析——会自动落到同名的那条 WASAPI 端点。
 
 ---
 
@@ -617,7 +623,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    57 个文件、462 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    58 个文件、467 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -668,7 +674,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
   ```
 
 ---

@@ -284,6 +284,13 @@ and **`run_overlay.bat`** (others speak → wrist display).
 > 📌 **No flag needed to pick audio devices**: choose in the GUI under "⚙ Settings" (the first dropdown entry, "Auto-detect", walks the fallback chain),
 > or edit `capture.mic_device` / `capture.loopback_device` in `config.yaml` directly.
 > What's stored is the **device name string**, not an index — indices shift wholesale with hot-plugs and session switches.
+>
+> ⚠️ **Only enabled devices are listed, and each sound card appears once**: the app lists just the
+> **WASAPI** endpoints — i.e. the ones **enabled** in Windows Sound settings (disabled endpoints are
+> not shown; enable them under "Sound → More sound settings" first). So you will no longer see the
+> same microphone two or three times with different sample rates, and the rate in parentheses **is
+> the rate that will actually be used** (usually 48000). Names saved in older configs still resolve
+> — they land on the same-named WASAPI endpoint.
 
 ---
 
@@ -520,7 +527,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    57 files, 462 test functions (all run offline; CI runs them file by
+tests/                    58 files, 467 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -571,7 +578,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
   ```
 
 ---
