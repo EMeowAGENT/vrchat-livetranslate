@@ -389,8 +389,10 @@ output:
 * **Linux**：**Wayland セッション**（niri / sway / Hyprland / KDE など layer-shell 対応の合成器）
   では**ネイティブオーバーレイウィンドウ**：ピクセル単位の透明（本物の角丸・半透明の下地）、
   最前面・ゲームウィンドウへの追従・プロトコルレベルのマウス透過・ドラッグの保存まで Windows と同等。
-  X11 セッションおよび layer-shell 非対応の合成器（GNOME/Weston）は Tk ウィンドウに自動フォールバック
-  （ピクセル単位で透明なネイティブ X11 ウィンドウは未実装）。`desktop_overlay.backend` で経路を強制できます
+  X11 セッション（XWayland を伴う GNOME/Weston を含む）は**ネイティブ ARGB オーバーレイウィンドウ**で
+  動作します（ピクセル単位の alpha + X Shape によるマウス透過）。合成器（picom など）が必要で、
+  無い場合は 1 ビットの形状マスクによる縮退動作（黒枠なし・角丸はギザギザ・下地は不透明）になり、
+  ログに 1 行残ります。`desktop_overlay.backend` で経路を強制できます
   （描画トラブルの切り分けに便利）——境界は [GUIDE.linux.md](GUIDE.linux.md) の「デスクトップ字幕」を参照。
 
 > ⚠️ VRChat は**ウィンドウモード / ボーダーレス**である必要があります（Unity の
@@ -496,7 +498,7 @@ vlt/
 
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
-tests/                    50 ファイル・411 のテスト関数（オフラインで実行可、CI はファイル単位で
+tests/                    55 ファイル・458 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -548,7 +550,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.0 "find_thai_font"
   ```
 
 ---

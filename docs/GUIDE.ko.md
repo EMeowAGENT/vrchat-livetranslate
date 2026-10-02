@@ -383,8 +383,9 @@ output:
 * **Linux**: **Wayland 세션**(niri / sway / Hyprland / KDE 등 layer-shell을 구현한 합성기)에서는
   **네이티브 오버레이 창**으로 동작합니다 — 픽셀 단위 투명(진짜 둥근 모서리 · 반투명 판), 항상 위 ·
   게임 창 따라가기 · 프로토콜 수준 마우스 통과 · 드래그 저장까지 Windows와 동일합니다. X11 세션과
-  layer-shell이 없는 합성기(GNOME/Weston)는 Tk 창으로 자동 폴백합니다(픽셀 단위로 투명한 네이티브
-  X11 창은 아직 미구현). `desktop_overlay.backend`로 경로를 강제할 수 있습니다(렌더링 문제를
+  X11 세션(XWayland를 동반한 GNOME/Weston 포함)은 **네이티브 ARGB 오버레이 창**으로 동작합니다
+  (픽셀 단위 alpha + X Shape 마우스 통과). 합성기(picom 등)가 필요하며, 없으면 1비트 모양
+  마스크로 자동 강등됩니다(검은 테두리 없음 · 둥근 모서리는 계단 · 판은 불투명) — 로그에 한 줄 남습니다. `desktop_overlay.backend`로 경로를 강제할 수 있습니다(렌더링 문제를
   가릴 때 편리) — 경계는 [GUIDE.linux.md](GUIDE.linux.md)의 "데스크톱 자막" 참고.
 
 > ⚠️ VRChat은 **창 모드 / 테두리 없음**이어야 합니다(Unity `Fullscreen mode = 3`, VRChat 기본값).
@@ -481,7 +482,7 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    50개 파일, 411개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    55개 파일, 458개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -533,7 +534,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.0 "find_thai_font"
   ```
 
 ---

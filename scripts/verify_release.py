@@ -1,13 +1,14 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.6.0 "RoomClient"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.0 "find_thai_font"
 
 第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.6.0）**：本版新增「多人房间文本中继」，needle 取新模块的类名
-`RoomClient`（`vlt/room/client.py`，解包后在 `vlt/room/client.pyc` 里命中）。
-本版另有 Linux 侧改动（AppImage 构建切 onedir、手腕屏 X11 后端），**exe 那 9 项看不见它们** ——
+⚠️ **功能型发布（v0.7.0）**：本版新增「服务线路（海外可用）」「Linux 原生桌面字幕」「泰语支持」，
+needle 取新增的平台门面函数名 `find_thai_font`（`vlt/platform/__init__.py`，解包后在
+`vlt/platform/__init__.pyc` 里命中）—— 它是**Windows 产物里也必然存在**的新符号。
+本版另有 Linux 侧改动（Wayland layer-shell / X11 ARGB 原生桌面字幕窗），**exe 那 9 项看不见它们** ——
 AppImage 侧要单独核（体积 + 包内断言，用 `scripts/verify_appimage.py <下载下来的 .AppImage>`），
 别把「exe 9/9 通过」当成整版已验证。
 修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。

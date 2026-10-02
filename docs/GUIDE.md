@@ -510,7 +510,7 @@ Nekoya=猫屋
 * **Linux**：**Wayland 会话**（niri / sway / Hyprland / KDE 等实现了 layer-shell 的合成器）
   走**原生 layer-shell 窗**；**X11 会话**（含带 XWayland 的 GNOME/Weston）走**原生 ARGB
   覆盖窗**——都是逐像素透明（真圆角、底板半透明）、置顶跟随、协议级鼠标穿透、拖动落盘，
-  与 Windows 同款（X11 的透明需要合成器，如 picom；没有时透明区显示为黑，日志有提醒）。
+  与 Windows 同款（X11 的透明需要合成器，如 picom；没检测到时会自动降级用 1 位形状蒙版裁掉透明区——没有黑框，圆角为锯齿、底板是实色，启动日志有一行说明）。
   两条原生腿都建不起来时回落 Tk 窗。`desktop_overlay.backend` 可强制某条腿（排查渲染问题时
   很有用）——边界与排查见 [GUIDE.linux.md](GUIDE.linux.md) 的「桌面字幕」一节。
 
@@ -607,7 +607,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    50 个文件、411 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    55 个文件、458 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -658,7 +658,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.6.0 "RoomClient"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.0 "find_thai_font"
   ```
 
 ---
