@@ -483,7 +483,7 @@ wrist overlay / desktop subtitles.
 |---|---|
 | Nothing in the bubble | VRChat not running / OSC off / chat bubble visibility is Off. If `--dry-run` shows send logs, the program side is fine |
 | `[loopback] ❌ no loopback device found` | VRChat isn't playing any sound; or you're **running inside a Remote Desktop session** (WASAPI endpoints are per-session isolated — you must be on the physical machine's current session) |
-| Microphone captures nothing | Same as above; first check which device is selected in the dropdown under "⚙ Settings" (when enumeration is empty the status bar notes that empty enumeration is normal in a remote session) |
+| Microphone captures nothing | Same as above; first check which device is selected in the dropdown under "⚙ Settings" (when enumeration is empty the status bar notes that empty enumeration is normal in a remote session). Search the log for `[mic]`: "已回落到同名设备" means this sound card's WASAPI endpoint could not be opened and the program switched to another audio interface by itself (normal, nothing to do); only "所有候选设备都打不开" is a real failure |
 | `Voice 'Chelsie' is not supported` | `session.voice` is unset. Keep it at `Tina` |
 | `Invalid translation parameter` | `session.update` is missing the `translation` field (guaranteed in code; watch out if you modify it) |
 | `1007 Requests rate limit exceeded` | Hit RPM 10. Wait 1 minute; don't restart frequently (**every WS connection counts as one request**) |
@@ -527,7 +527,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    58 files, 467 test functions (all run offline; CI runs them file by
+tests/                    59 files, 472 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -578,7 +578,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
   ```
 
 ---

@@ -1,19 +1,22 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **修复型发布（v0.7.3）**：本版修「设备表混进重复项 / 未启用设备」+ 沿用前两版的修复，
+⚠️ **修复型发布（v0.7.4）**：本版修「WASAPI 端点打开失败」的两条兜底，沿用前几版修复，
 每个改动各取一个没人用过的串做 needle ——
-  ① 设备表收敛到 WASAPI：`vlt/platform/win.py` / `vlt/devices.py` 里的 `pa_index`；
-  ② 地域收口到新加坡：`vlt/endpoints.py` 的新函数名 `region_supported`；
-  ③ loopback 声道数：`vlt/platform/win.py` 里回落分支的文案 `已回落`。
+  ① 麦克风按原生采样率 + 同名回落：`vlt/platform/win.py` / `vlt/platform/__init__.py` 的
+     `same_name_fallbacks`；
+  ② 设备表收敛到 WASAPI：`pa_index`；
+  ③ 地域收口到新加坡：`region_supported`；
+  ④ loopback 声道数：`已回落`。
 修复型发布没有新文案可挑，用**修复引入的符号名/文案**最可靠；本版改动全在**共享代码**
-（`vlt/platform/win.py` + `vlt/devices.py` + `vlt/output/virtualmic.py` + `vlt/engine.py` +
-`vlt/endpoints.py` + `vlt/gui.py` + 四套词表 + 五份 GUIDE），Windows 产物与 AppImage 用的是
-同一份 —— 所以 exe 那几项（尤其 needle）就是本版改动的直接证据；AppImage 侧仍按惯例核附件与体积。
+（`vlt/platform/win.py` + `vlt/platform/audio.py` + `vlt/platform/__init__.py` +
+`vlt/output/virtualmic.py` + `vlt/engine.py` + `vlt/devices.py` + `vlt/endpoints.py` + `vlt/gui.py`
++ 四套词表 + 五份 GUIDE），Windows 产物与 AppImage 用的是同一份 —— 所以 exe 那几项（尤其 needle）
+就是本版改动的直接证据；AppImage 侧仍按惯例核附件与体积。
 
 复核项：
   1. 附件下载（只认 exe）

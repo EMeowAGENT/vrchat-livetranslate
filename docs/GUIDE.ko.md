@@ -455,7 +455,7 @@ output:
 |---|---|
 | 말풍선에 아무것도 안 나옴 | VRChat 미실행 / OSC 꺼짐 / 말풍선 표시가 Off. `--dry-run` 에서 전송 로그가 보이면 프로그램 쪽은 정상입니다 |
 | `[loopback] ❌ no loopback device found` | VRChat이 소리를 재생하지 않거나, **원격 데스크톱 세션에서 실행 중**입니다(WASAPI 엔드포인트는 세션마다 분리되므로 물리 머신의 현재 세션에서 실행해야 합니다) |
-| 마이크가 아무것도 못 잡음 | 위와 같습니다. 먼저 "⚙ 설정" 드롭다운에서 선택된 장치를 확인하세요(원격 세션에서 열거가 비는 것은 정상이라고 상태 표시줄에 안내됩니다) |
+| 마이크가 아무것도 못 잡음 | 위와 같습니다. 먼저 "⚙ 설정" 드롭다운에서 선택된 장치를 확인하세요(원격 세션에서 열거가 비는 것은 정상이라고 상태 표시줄에 안내됩니다). 로그에서 `[mic]` 검색: 「已回落到同名设备」가 보이면 이 사운드카드의 WASAPI 엔드포인트를 열 수 없어 프로그램이 같은 이름의 다른 인터페이스로 자동 전환한 정상 동작입니다. 「所有候选设备都打不开」면 실제 고장입니다 |
 | `Voice 'Chelsie' is not supported` | `session.voice` 가 비어 있습니다. `Tina` 로 두세요 |
 | `Invalid translation parameter` | `session.update` 에 `translation` 필드가 없습니다(코드에서 보장됨. 수정할 때 주의) |
 | `1007 Requests rate limit exceeded` | RPM 10에 도달했습니다. 1분 기다리세요. 자주 재시작하지 마세요(**WS 연결 1회마다 요청 1회**로 계산됩니다) |
@@ -499,7 +499,7 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    58개 파일, 467개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    59개 파일, 472개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -551,7 +551,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
   ```
 
 ---

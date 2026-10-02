@@ -473,7 +473,7 @@ output:
 |---|---|
 | 吹き出しに何も出ない | VRChat が起動していない／OSC がオフ／吹き出しの表示が Off。`--dry-run` で送信ログが出るならプログラム側は正常です |
 | `[loopback] ❌ no loopback device found` | VRChat が音を再生していない、または**リモートデスクトップ経由で操作している**（WASAPI のエンドポイントはセッションごとに分離されるため、物理マシンの現在のセッションで動かす必要があります） |
-| マイクが何も拾わない | 上と同じ。まず「⚙ 設定」のドロップダウンで選ばれているデバイスを確認してください（リモートセッションでは列挙が空になるのが正常である旨、ステータスバーに表示されます） |
+| マイクが何も拾わない | 上と同じ。まず「⚙ 設定」のドロップダウンで選ばれているデバイスを確認してください（リモートセッションでは列挙が空になるのが正常である旨、ステータスバーに表示されます）。ログで `[mic]` を検索：「已回落到同名设备」はこのサウンドカードの WASAPI 端点が開けず、プログラムが同じ名前の別インターフェースへ自動で切り替えた正常動作です。「所有候选设备都打不开」なら本当の故障です |
 | `Voice 'Chelsie' is not supported` | `session.voice` が未設定です。`Tina` のままにしてください |
 | `Invalid translation parameter` | `session.update` に `translation` フィールドがありません（コード側では保証済み。改変するときは注意） |
 | `1007 Requests rate limit exceeded` | RPM 10 に到達しました。1 分待ってください。頻繁な再起動は避けてください（**WS 接続 1 回ごとにリクエスト 1 回**と数えます） |
@@ -517,7 +517,7 @@ vlt/
 
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
-tests/                    58 ファイル・467 のテスト関数（オフラインで実行可、CI はファイル単位で
+tests/                    59 ファイル・472 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -569,7 +569,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
   ```
 
 ---

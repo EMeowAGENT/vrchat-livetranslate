@@ -579,7 +579,7 @@ Nekoya=猫屋
 |---|---|
 | 气泡里没东西 | VRChat 没开 / OSC 没开 / chat bubble visibility 是 Off。`--dry-run` 能看到发送日志说明程序没问题 |
 | `[loopback] ❌ 没找到任何 loopback 设备` | VRChat 没在放声音；或**在远程桌面会话里跑**（WASAPI 端点按会话隔离，必须在物理机当前会话） |
-| 麦克风采不到声音 | 同上；先在「⚙ 设置」里确认设备下拉里选的是哪个（枚举为空时状态栏会提示「远程会话下枚举为空是正常的」） |
+| 麦克风采不到声音 | 同上；先在「⚙ 设置」里确认设备下拉里选的是哪个（枚举为空时状态栏会提示「远程会话下枚举为空是正常的」）。日志里搜 `[mic]`：出现「已回落到同名设备」= 这块声卡的 WASAPI 端点开不了、程序自己换了另一条音频接口（正常，不用管）；只有「所有候选设备都打不开」才是真故障 |
 | `Voice 'Chelsie' is not supported` | `session.voice` 没填。保持 `Tina` |
 | `Invalid translation parameter` | `session.update` 缺 `translation` 字段（代码里已保证，改代码时注意） |
 | `1007 Requests rate limit exceeded` | 撞了 RPM 10。等 1 分钟；别频繁重启（**每次 WS 连接都算一次请求**） |
@@ -623,7 +623,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    58 个文件、467 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    59 个文件、472 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -674,7 +674,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.3 "pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
   ```
 
 ---

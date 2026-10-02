@@ -909,12 +909,16 @@ class Engine:
 
         device_name = audio_cfg.get("device_name") or ""
         picked = None
+        fallbacks: list[int] = []
         if device_name:
             idx = resolve_device_name(device_name, "output")
             if idx is not None:
                 import sounddevice as sd
                 info = sd.query_devices(idx)
                 picked = (idx, str(info["name"]), int(info.get("default_samplerate", 48000)))
+                # 同名设备在别的 host API 下的条目：WASAPI 端点打不开时按序回落
+                # （Voicemeeter 实测 `-9999`，见 platform.output_device_fallbacks 的说明）
+                fallbacks = platform.output_device_fallbacks(device_name, exclude=idx)
                 self._events.on_status("info", f"按名称选中输出设备：{device_name!r} → #{idx}")
             else:
                 self._events.on_status("warn",
@@ -939,6 +943,7 @@ class Engine:
             buffer_ms=int(audio_cfg.get("buffer_ms", 300)),
             max_buffer_ms=int(audio_cfg.get("max_buffer_ms", 2000)),
             on_status=self._events.on_status,
+            device_fallbacks=fallbacks,
         )
 
     async def _create_session(self, scfg: SessionConfig) -> None:
