@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import shutil
 import struct
 import sys
@@ -630,6 +631,133 @@ def test_persist_provider_guard() -> None:
     eq(bad_cfg.read_text(encoding="utf-8"), before, "② 失败时磁盘文件一字未改")
 
 
+# ---------------------------------------------------------------- 业务空间 ID 形态校验
+
+
+def test_validate_workspace_id() -> None:
+    """case 14：业务空间 ID 的**形态**校验 —— 线上事故的直接回归。
+
+    事故（2026-10-02，海外用户）：把 114 字符的 API key 粘进了「业务空间 ID」框。
+    改动前只校验「非空」，于是 key 被当成 host 的**第一段**拼进去 → DNS 单段超 63 字符 →
+    建链那一刻抛 `UnicodeError: encoding with 'idna' codec failed (label empty or too long)`
+    —— 报错与「粘错了框」毫无关系，用户和我们都要翻半天日志。
+    """
+    key = "sk-ws-" + "A" * 108                      # 与事故同形：114 字符、sk- 开头
+    cases = [
+        (key, "key_like", "114 字符 API key（事故现场原样）"),
+        ("sk-abcdef", "key_like", "短的 sk- 串同样算 key"),
+        ("SK-abcdef", "key_like", "大写 SK- 也要认"),
+        ("", "empty", "空串"),
+        ("   ", "empty", "全空白"),
+        (None, "empty", "None"),
+        ("A" * 64, "too_long", "64 字符（超 DNS 单段上限 1 个字符）"),
+        ("llm.abcd1234", "bad_chars", "带点（业务空间 ID 是单个 DNS 段）"),
+        ("llm abcd", "bad_chars", "带空格（从控制台复制常带）"),
+        ("业务空间-abcd", "bad_chars", "非 ASCII"),
+        ("-llm-abcd", "edge_dash", "以短横线开头"),
+        ("llm-abcd-", "edge_dash", "以短横线结尾"),
+        ("llm-abcd1234", None, "正常值"),
+        ("A" * 63, None, "63 字符（正好在上限）"),
+        ("llm-0a1b2c3d", None, "另一条正常值"),
+    ]
+    for value, want, label in cases:
+        eq(endpoints.validate_workspace_id(value), want, f"validate_workspace_id({label})")
+
+    # 回归核心：**正是这个值**会让建链炸掉 —— 证明守卫拦的是真会出事的输入，不是摆设
+    base = endpoints.default_base_url(endpoints.PROVIDER_BAILIAN_INTL, key, "ap-northeast-1")
+    blew = ""
+    try:
+        endpoints.host_of(base, key).encode("idna")
+    except UnicodeError as exc:
+        blew = str(exc)
+    check(bool(blew), f"① 不校验时该值确实会让建链炸（{blew[:52]}…）")
+    check(endpoints.validate_workspace_id(key) == "key_like",
+          "① 校验会在保存 / 开始翻译之前把它拦下（用户看不到 idna 报错）")
+    ok_host = endpoints.host_of(
+        endpoints.default_base_url(endpoints.PROVIDER_BAILIAN_INTL, "llm-abcd1234",
+                                   "ap-northeast-1"), "llm-abcd1234")
+    try:
+        ok_host.encode("idna")
+        check(True, f"① 合法业务空间 ID 派生出的 host 能过 idna（{ok_host}）")
+    except UnicodeError as exc:                     # pragma: no cover — 正常不会走到
+        check(False, f"① 合法值反而过不了 idna？{exc}")
+
+
+def test_gui_workspace_id_guard() -> None:
+    """case 15：真窗口 —— 「保存线路设置」与「开始翻译」两条路都要拦下形态不对的值。
+
+    钉子：① 保存被拒时**配置文件一个字不改**（不能把连不上的 host 留在配置里）；
+    ② 错误提示里得说清「这是 API key、该填哪儿」；③ 合法值照常落盘；
+    ④ 「开始翻译」前置守卫拦住并给状态栏错误，不真的去建链。
+    """
+    d = Path(tempfile.mkdtemp(prefix="vlt-wsid-"))
+    cfg = d / "config.yaml"
+    shutil.copyfile(ROOT / "config.example.yaml", cfg)
+    key = "sk-ws-" + "A" * 108
+    saved_env = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME", "DASHSCOPE_API_KEY")}
+    os.environ["USERPROFILE"] = str(d)
+    os.environ["HOME"] = str(d)
+    os.environ.pop("DASHSCOPE_API_KEY", None)
+    gui = None
+    try:
+        import vlt.config as cfg_mod
+        import vlt.gui as gui_mod
+
+        cfg_mod.DEFAULT_CONFIG = cfg
+        gui_mod.DEFAULT_CONFIG = cfg
+        gui = gui_mod.TranslationGUI()
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        # ---- ① 保存：把 API key 粘进「业务空间 ID」→ 拒绝 + 磁盘一字不动 ----
+        before = cfg.read_text(encoding="utf-8")
+        gui._provider_var.set(gui._provider_id_to_name[endpoints.PROVIDER_BAILIAN_INTL])
+        gui._on_provider_change()
+        gui._region_var.set(gui._region_id_to_name["ap-northeast-1"])
+        gui._workspace_var.set(key)
+        gui._on_save_provider()
+        gui._root.update()
+        check(cfg.read_text(encoding="utf-8") == before, "① 保存被拒：配置文件一个字没改")
+        err = str(gui._provider_err.cget("text") or "")
+        check("API key" in err, f"① 提示说清了「这是 API key」（{err[:44]}…）")
+        check(gui._last_status_level == "error", "① 状态栏标成 error（不静默）")
+
+        # ---- ② 合法值：照常落盘（改完要能正常工作）----
+        gui._workspace_var.set("llm-abcd1234")
+        gui._on_save_provider()
+        gui._root.update()
+        raw = (yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("session") or {}
+        eq(raw.get("provider"), "bailian_intl", "② 合法值：落盘 session.provider")
+        eq(raw.get("workspace_id"), "llm-abcd1234", "② 合法值：落盘 session.workspace_id")
+        check("{workspace_id}" in str(raw.get("base_url") or ""),
+              "② 合法值：base_url 仍保留 {workspace_id} 字面量")
+        check(not str(gui._provider_err.cget("text") or ""), "② 保存成功后错误提示已清空")
+
+        # ---- ③ 「开始翻译」前置守卫：配置里是 key → 拦下且不建链 ----
+        gui._cfg.session_base["workspace_id"] = key
+        gui._cfg.session_base["api_key"] = "sk-" + "t" * 40      # 绕过「没 key」那条更早的分支
+        gui._refresh_api_key_in_cfg = lambda: None               # 别让它把 key 重新解成空
+        gui._start()
+        gui._root.update()
+        check(not any(e.running for e in gui._engines), "③ 未启动：一个引擎都没起来")
+        check(gui._last_status_level == "error", "③ 状态栏标成 error")
+        check("业务空间 ID" in str(gui._status_label.cget("text") or ""),
+              f"③ 状态栏说清了是业务空间 ID 的问题（{gui._status_label.cget('text')!r}）")
+    finally:
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:                       # noqa: BLE001
+                pass
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -649,6 +777,8 @@ _FUNCS = [
     test_stream_fallback_keeps_endpoint,
     test_describe_masks_workspace,
     test_persist_provider_guard,
+    test_validate_workspace_id,
+    test_gui_workspace_id_guard,
 ]
 
 

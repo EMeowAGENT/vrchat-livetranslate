@@ -213,6 +213,25 @@ def _mask_workspace_id(workspace_id: str) -> str:
     return f"{s[:6]}…" if s else ""
 
 
+def _ws_id_error_text(code: str) -> str:
+    """业务空间 ID 校验失败的原因码 → 给用户看的一句话（**字面量 key，走词表**）。
+
+    为什么每个分支都写成字面量 `t("…")` 而不是 t(变量)：i18n 守卫是按 AST 扫
+    「源码里出现的字面量 key」来查漏译的，动态拼出来的 key 扫不到 → 会静默漏译。
+    """
+    if code == "key_like":
+        return t("业务空间 ID 填的是 API key —— 那里要填 API Host 的第一段"
+                 "（形如 llm-xxxx），key 请填在上面的「API key」框里")
+    if code == "too_long":
+        return t("业务空间 ID 太长 —— 它只是 API Host 的第一段（形如 llm-xxxx），"
+                 "不要把别的长串整段粘进来")
+    if code == "bad_chars":
+        return t("业务空间 ID 只能含字母、数字和短横线（形如 llm-xxxx）")
+    if code == "edge_dash":
+        return t("业务空间 ID 不能以短横线开头或结尾（形如 llm-xxxx）")
+    return t("百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）")
+
+
 def _persist_provider(cfg_path: "Path", provider: str, region: str,
                       workspace_id: str, base_url: str) -> None:
     """把线路四项就地写回 config.yaml；**先复检、后写盘**，写不进去就抛 RuntimeError。
@@ -1990,8 +2009,10 @@ class TranslationGUI:
     def _on_save_provider(self) -> None:
         """把线路四项（provider / region / workspace_id / base_url）就地写回 config.yaml。
 
-        ⚠️ 百炼国际版缺业务空间 ID 时**什么都不写**（响亮失败）：静默回落千问云的话，
-        用户看到的就是"我明明选了海外线路，怎么还连国内" —— 那比直接报错难查十倍。
+        ⚠️ 百炼国际版**缺业务空间 ID 或形态不对**（填成了 API key / 太长 / 有非法字符）时
+        **什么都不写**（响亮失败）：静默回落千问云的话，用户看到的就是"我明明选了海外线路，
+        怎么还连国内" —— 那比直接报错难查十倍；而形态不对还硬写，会把一个连不上的 host
+        留在配置里，报错推迟到建链那一刻。
 
         写法照 `_save_room_cfg`：就地改文本，保住注释与键顺序。`session:` 段是模板的
         第一段，一定存在，**不需要**像 room 段那样补建。
@@ -1999,12 +2020,16 @@ class TranslationGUI:
         provider = self._selected_provider()
         region = self._selected_region()
         workspace_id = (self._workspace_var.get() or "").strip()
-        if provider == endpoints.PROVIDER_BAILIAN_INTL and not workspace_id:
-            msg = t("❌ 没保存：百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）")
-            self._provider_err.configure(text=msg)
-            self._set_status("error", msg)
-            print("[gui] ❌ 线路保存被拒：百炼国际版缺业务空间 ID", flush=True)
-            return
+        if provider == endpoints.PROVIDER_BAILIAN_INTL:
+            code = endpoints.validate_workspace_id(workspace_id)
+            if code:
+                # 形态不对（填成了 API key / 太长 / 有非法字符）与「没填」一样**什么都不写**：
+                # 写下去的话 base_url 会拼出一个连不上的 host，报错还发生在建链那一刻。
+                msg = t("❌ 没保存：{msg}", msg=_ws_id_error_text(code))
+                self._provider_err.configure(text=msg)
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 线路保存被拒：业务空间 ID 不合法（{code}）", flush=True)
+                return
         self._provider_err.configure(text="")
         # base_url 里刻意保留**字面量** `{workspace_id}` 占位符（连接时才替换）：
         # 这样用户日后换空间 ID 不必回头改 base_url（见 endpoints.default_base_url）。
@@ -4093,16 +4118,20 @@ class TranslationGUI:
             self._set_status("error", t("还没配置 API key —— 点右上角「API key ›」填一个再开始"))
             self._open_settings()
             return
-        if (self._provider() == endpoints.PROVIDER_BAILIAN_INTL
-                and not str(self._cfg.session_base.get("workspace_id") or "").strip()):
-            # 百炼线路的 base_url 里带 {workspace_id} 占位符，缺它建链时必抛
-            # （endpoints.resolve_base_url）—— 与其让用户看一条看不懂的握手失败，
-            # 不如在这里拦下并**把他送到该填的那一页**（与「没填房间码」同一手法）。
-            self._set_status("error",
-                             t("未配置业务空间 ID —— 请在「设置 → 常规」里选线路并填写"))
-            print("[gui] ❌ 未启动：百炼国际版缺业务空间 ID", flush=True)
-            self._open_settings(page="general")
-            return
+        if self._provider() == endpoints.PROVIDER_BAILIAN_INTL:
+            # 百炼线路的 base_url 里带 {workspace_id} 占位符，值不对就别白连一次：
+            # 空 → 老文案（把人送到设置页）；**形态**不对（填成了 API key / 太长 /
+            # 有非法字符）→ 说清哪里不对，而不是让 websockets 抛一句看不懂的 idna 错。
+            ws_code = endpoints.validate_workspace_id(self._cfg.session_base.get("workspace_id"))
+            if ws_code:
+                if ws_code == "empty":
+                    msg = t("未配置业务空间 ID —— 请在「设置 → 常规」里选线路并填写")
+                else:
+                    msg = t("❌ 无法开始：{msg}", msg=_ws_id_error_text(ws_code))
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 未启动：业务空间 ID 不合法（{ws_code}）", flush=True)
+                self._open_settings(page="general")
+                return
         d = self._direction_var.get()
 
         sinks: set[str] = set()

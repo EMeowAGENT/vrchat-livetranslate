@@ -197,6 +197,46 @@ def key_slot(provider: str) -> str:
     return normalize_provider(provider)
 
 
+# ---------------------------------------------------------------- 业务空间 ID 的形态校验
+
+# DNS 单段（label）长度上限，RFC 1035。业务空间 ID 会当 host 的**第一段**用，
+# 超了在建链那一刻必炸 —— 实测：把 114 字符的 API key 粘进这个框，
+# 拼出的 host 首段 114 字符 → `UnicodeError: encoding with 'idna' codec failed
+# (label empty or too long)`，而报错发生在 websockets 建链里，用户和我们都要翻半天。
+WS_ID_MAX_LEN = 63
+
+
+def validate_workspace_id(raw: object) -> str | None:
+    """校验业务空间 ID 的**形态**；合法返回 None，不合法返回一个**稳定的原因码**。
+
+    为什么返回码而不是句子：文案要走 `t()`（五种界面语言），码由调用方
+    （`vlt/gui.py:_ws_id_error_text`）映射成词表里的句子 —— 词表只认字面量 key，
+    动态拼出来的句子既进不了词表、也不会被 i18n 守卫看到（会静默漏译）。
+
+    原因码：
+      * `"empty"`      —— 空（百炼线路必填）
+      * `"key_like"`   —— 以 `sk-` 开头：**这是 API key，不是业务空间 ID**（本次事故）
+      * `"too_long"`   —— 超过 63 字符（DNS 单段上限），拼进 host 必炸
+      * `"bad_chars"`  —— 含字母/数字/短横线以外的字符（业务空间 ID 是单个 DNS 段）
+      * `"edge_dash"`  —— 以短横线开头或结尾
+    """
+    ws = str(raw or "").strip()
+    if not ws:
+        return "empty"
+    if ws.lower().startswith("sk-"):
+        # 踩过的坑：这个框和目标里的「API key」框在同一页，粘错就会掉进这里；
+        # 光看「连不上」根本猜不到，所以要单独判一条并给出「该填哪儿」。
+        return "key_like"
+    if len(ws) > WS_ID_MAX_LEN:
+        return "too_long"
+    if not all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in ws):
+        return "bad_chars"
+    if ws.startswith("-") or ws.endswith("-"):
+        return "edge_dash"
+    return None
+
+
+
 def _mask_workspace_in_host(host: str, workspace_id: str) -> str:
     """把 host 首段里的业务空间 ID 打码成 `llm-ab…`，其余（地域 + 域名）原样保留。
 

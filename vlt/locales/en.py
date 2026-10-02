@@ -262,6 +262,21 @@ STRINGS: dict[str, str] = {
         "No workspace ID configured — pick a line and enter it under Settings → General",
     "⚠ 未配置 API key · 点此开通百炼 ▸": "⚠ No API Key · Set Up Model Studio ▸",
 
+    "业务空间 ID 填的是 API key —— 那里要填 API Host 的第一段（形如 llm-xxxx），key 请填在上面的「API key」框里":
+        "The Workspace ID field holds an API key — it wants the first segment of the "
+        "API Host (looks like llm-xxxx); put the key in the \"API key\" box above",
+    "业务空间 ID 太长 —— 它只是 API Host 的第一段（形如 llm-xxxx），不要把别的长串整段粘进来":
+        "Workspace ID is too long — it is only the first segment of the API Host "
+        "(looks like llm-xxxx); don't paste a long string here",
+    "业务空间 ID 只能含字母、数字和短横线（形如 llm-xxxx）":
+        "Workspace ID may contain only letters, digits and hyphens (like llm-xxxx)",
+    "业务空间 ID 不能以短横线开头或结尾（形如 llm-xxxx）":
+        "Workspace ID must not start or end with a hyphen (like llm-xxxx)",
+    "❌ 无法开始：{msg}": "❌ Can't start: {msg}",
+    "百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）":
+        "Model Studio (International) requires a workspace ID "
+        "(the prefix of \"Workspace Details → API Host\" in the console)",
+
     # ---- 日志导出 ----
     "打不开保存对话框：{msg}": "Can't open the save dialog: {msg}",
     "导出日志失败：{msg}": "Failed to export logs: {msg}",

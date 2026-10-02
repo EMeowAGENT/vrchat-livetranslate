@@ -1,17 +1,16 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.0 "find_thai_font"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.1 "validate_workspace_id"
 
 第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.7.0）**：本版新增「服务线路（海外可用）」「Linux 原生桌面字幕」「泰语支持」，
-needle 取新增的平台门面函数名 `find_thai_font`（`vlt/platform/__init__.py`，解包后在
-`vlt/platform/__init__.pyc` 里命中）—— 它是**Windows 产物里也必然存在**的新符号。
-本版另有 Linux 侧改动（Wayland layer-shell / X11 ARGB 原生桌面字幕窗），**exe 那 9 项看不见它们** ——
-AppImage 侧要单独核（体积 + 包内断言，用 `scripts/verify_appimage.py <下载下来的 .AppImage>`），
-别把「exe 9/9 通过」当成整版已验证。
-修复型发布没有新文案可挑时，用**修复引入的符号名**最可靠。
+⚠️ **修复型发布（v0.7.1）**：本版修「业务空间 ID 填成 API key」的校验缺口，
+needle 取新增的校验函数名 `validate_workspace_id`（`vlt/endpoints.py`，解包后在
+`vlt/endpoints.pyc` 里命中）—— 修复型发布没有新文案可挑，用**修复引入的符号名**最可靠。
+本版改动全在**共享代码**（`vlt/endpoints.py` 的校验 + `vlt/gui.py` 的两处接线 + 四套词表），
+Windows 产物与 AppImage 用的是同一份 —— 所以 exe 那 9 项（尤其第 5 项 needle）就是本版
+改动的直接证据；AppImage 侧仍按惯例核附件与体积。
 
 复核项：
   1. 附件下载（只认 exe）

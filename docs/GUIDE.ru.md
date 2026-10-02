@@ -507,7 +507,7 @@ vlt/
 
 server/                   Сервер комнаты (Cloudflare Worker + Durable Object, разворачивается отдельно)
 scripts/                   Инструменты разведки и отладки (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    55 файлов, 458 тестовых функций (работают офлайн; CI выполняет их по
+tests/                    55 файлов, 460 тестовых функций (работают офлайн; CI выполняет их по
                           файлам, без tests/test_engine.py — ему нужен настоящий ключ API)
 docs/                     Результаты измерений P0.5 / P1 / P2 (протокол, задержка, экран на запястье)
 testdata/                 Встроенный тестовый звук (китайский 8.56 с, английский 7.92 с, 16 кГц моно PCM)
@@ -559,7 +559,7 @@ build_exe.bat                                              :: сборка + п�
   (SHA256, реальный запуск `--self-test`, строка версии, поиск строк новых функций в байткоде, попиксельное сравнение иконки):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.0 "find_thai_font"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.1 "validate_workspace_id"
   ```
 
 ---
