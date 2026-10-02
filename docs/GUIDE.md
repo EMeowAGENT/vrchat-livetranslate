@@ -98,10 +98,16 @@ python -m venv .venv
 
 **开通三步**（都在[百炼国际版控制台 · 模型市场](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)里做）：
 
+![国际站模型市场：右上角可切区域（Region）与界面语言（English）](../assets/modelstudio-market.png)
+
 1. 建一个业务空间（或直接用默认那个），进去
 2. 在「业务空间详情」页复制 **API Host 前缀** —— 这一截就是**业务空间 ID**，形如 `llm-xxxx`
    （完整 Host 长这样：`llm-xxxx.ap-southeast-1.maas.aliyuncs.com`，只取开头的 `llm-xxxx`）
-3. 在**同一个业务空间**下建一个 API key（`sk-...`）
+3. 在**同一个业务空间**下建一个 API key（`sk-...`）—— 入口在控制台**左下角**的 `API-KEY`：
+
+![控制台左下角的 API-KEY 入口（红框处）](../assets/modelstudio-api-key-entry.png)
+
+![点进去就是 API Key 管理页：在这里创建/复制 key（未登录会先让你登录）](../assets/modelstudio-api-key.png)
 
 **界面四步**：
 

@@ -95,11 +95,17 @@ of them is working at any moment, whichever you select in the app.
 
 **Three steps to sign up** (all inside the [Model Studio console · Model Market](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)):
 
+![Model Studio · Model Market — switch Region and UI language at the top right](../assets/modelstudio-market.png)
+
 1. Create a workspace (or just use the default one) and open it
 2. On its "Workspace Details" page, copy the **API Host prefix** — that leading part *is* the
    **workspace ID**, e.g. `llm-xxxx`
    (the full host looks like `llm-xxxx.ap-southeast-1.maas.aliyuncs.com`; take only the leading `llm-xxxx`)
-3. Create an API key (`sk-...`) **inside that same workspace**
+3. Create an API key (`sk-...`) **inside that same workspace** — the entry is `API-KEY` at the **bottom-left** of the console:
+
+![The API-KEY entry at the bottom-left of the console (red box)](../assets/modelstudio-api-key-entry.png)
+
+![Clicking it opens API Key management: create/copy your key here (you'll be asked to log in first)](../assets/modelstudio-api-key.png)
 
 **Four steps in the app**:
 

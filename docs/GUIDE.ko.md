@@ -92,11 +92,17 @@ python -m venv .venv
 
 **개통 3단계**(모두 [바이롄 국제판 콘솔 · 모델 마켓](https://modelstudio.console.alibabacloud.com/ap-southeast-1/model/market)에서)：
 
+![국제판 모델 마켓: 오른쪽 위에서 리전과 언어(English)를 바꿀 수 있습니다](../assets/modelstudio-market.png)
+
 1. 워크스페이스를 만들고(기본 워크스페이스를 그대로 써도 됩니다) 들어갑니다
 2. 「워크스페이스 상세 정보」 페이지에서 **API Host 접두사**를 복사합니다 —— 이 앞부분이 곧
    **워크스페이스 ID**입니다(예: `llm-xxxx`)
    (전체 Host는 `llm-xxxx.ap-southeast-1.maas.aliyuncs.com` 형태이며, 앞의 `llm-xxxx`만 필요합니다)
-3. **같은 워크스페이스**에서 API key(`sk-...`)를 만듭니다
+3. **같은 워크스페이스**에서 API key(`sk-...`)를 만듭니다 —— 입구는 콘솔 **왼쪽 아래**의 `API-KEY`입니다:
+
+![콘솔 왼쪽 아래의 API-KEY 입구(빨간 박스)](../assets/modelstudio-api-key-entry.png)
+
+![클릭하면 API Key 관리 페이지가 열립니다. 여기서 만들고 복사하세요(로그인하지 않았다면 먼저 로그인)](../assets/modelstudio-api-key.png)
 
 **화면에서 4단계**：
 
