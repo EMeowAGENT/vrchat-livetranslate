@@ -377,9 +377,13 @@ def updater_env() -> dict[str, str]:
     `OWD` / `ARGV0` 也要剥掉，让新 AppImage 干干净净地自己挂载。
     （`PYTHONPATH` 不清：AppRun 是**追加**而不是覆盖继承值，新挂载的路径排在前面，
     清掉反而会抹掉用户自己设的东西。）
+
+    ⚠️ 还有第三条（`platform.child_env()`）：PyInstaller 会把包内目录前置进
+    `LD_LIBRARY_PATH`。更新器是宿主程序、新实例自己会重新挂载 —— 都不能带着父进程
+    「旧挂载点」的库搜索路径去启动（那目录马上随父进程消失，路径还排在前面）。
     """
     strip = ("_MEI", "_PYI_", "APPIMAGE", "APPDIR", "OWD", "ARGV0")
-    return {k: v for k, v in os.environ.items() if not k.startswith(strip)}
+    return {k: v for k, v in platform.child_env().items() if not k.startswith(strip)}
 
 
 def _source_name(code: str | None) -> str:
