@@ -239,6 +239,28 @@ STRINGS: dict[str, str] = {
     "打不开浏览器，请手动复制访问：{url}":
         "Can't open the browser — please copy and visit: {url}",
 
+    # ---- 服务线路（千问云 / 阿里云百炼·国际版，互斥）----
+    "服务线路": "Service Line",
+    "千问云": "Qwen Cloud",
+    "阿里云百炼·国际版": "Alibaba Cloud Model Studio (International)",
+    "业务空间 ID": "Workspace ID",
+    "地域": "Region",
+    "保存线路设置": "Save Line Settings",
+    "百炼控制台「业务空间详情」里的 API Host 前缀（形如 llm-xxxx）":
+        "The API Host prefix shown under \"Workspace Details\" in the Model Studio "
+        "console (looks like llm-xxxx)",
+    "❌ 没保存：百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）":
+        "❌ Not saved: Model Studio (International) requires a workspace ID "
+        "(the prefix of \"Workspace Details → API Host\" in the console)",
+    "已切换到 {line}（重启翻译后生效）":
+        "Switched to {line} — takes effect when you start translation again",
+    "当前线路需要先停止翻译，改完再重新开始":
+        "Stop translation first; the new line applies once you start it again",
+    "当前（{line}）：{src} {masked}": "Current ({line}): {src} {masked}",
+    "未配置业务空间 ID —— 请在「设置 → 常规」里选线路并填写":
+        "No workspace ID configured — pick a line and enter it under Settings → General",
+    "⚠ 未配置 API key · 点此开通百炼 ▸": "⚠ No API Key · Set Up Model Studio ▸",
+
     # ---- 日志导出 ----
     "打不开保存对话框：{msg}": "Can't open the save dialog: {msg}",
     "导出日志失败：{msg}": "Failed to export logs: {msg}",

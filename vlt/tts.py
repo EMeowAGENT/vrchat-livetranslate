@@ -147,11 +147,15 @@ def synthesize(
     api_key: str = "",
     language: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> bytes:
     """把一段文本合成为 24kHz 单声道 s16le PCM（与实时模型译音同格式）。
 
     同步函数（调用方丢线程池里跑）；`language` 是目标语言码（zh/en/ja…），
     会映射成 service 的 `language_type`，拿不准就不传。
+
+    `endpoint`：多模态地址由**调用方**按当前线路从 base_url 的 host 派生后传入
+    （见 endpoints.multimodal_url）；不传则回落模块常量 ENDPOINT（千问云默认）。
     """
     text = (text or "").strip()
     if not text:
@@ -165,7 +169,7 @@ def synthesize(
     if lang_name:
         payload["input"]["language_type"] = lang_name
 
-    req = Request(ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    req = Request(endpoint or ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json"}, method="POST")
     try:
@@ -202,12 +206,17 @@ def synthesize_stream(
     api_key: str = "",
     language: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> Iterator[bytes]:
     """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
 
     为什么值得：实测同一句 20~30 字，首包 0.36~0.42s、整段 1.6~1.7s；而下游虚拟声卡
     是抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），拿到前几个分片就能开口 ——
     打字腿的「开口」从 ~1.7s 降到 ~0.5s。
+
+    `endpoint`：同 `synthesize`（由调用方按线路派生传入，不传回落 ENDPOINT）。
+    ⚠️ 退回整段时要把 endpoint **一路透传**给 `synthesize`，否则兜底那条腿会悄悄
+    读回模块常量、连到默认线路去（切了海外线路时正是最难查的那种漂移）。
 
     退回策略（调用方不必写两套逻辑；**每一处降级都留痕，禁静默降级**）：
     - 服务端没给 `text/event-stream`（或一个分片都没拿到）→ 退回整段 `synthesize()`，yield 一整块；
@@ -228,7 +237,7 @@ def synthesize_stream(
     lang_name = LANG_NAMES.get((language or "").lower())
     if lang_name:
         payload["input"]["language_type"] = lang_name
-    req = Request(ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    req = Request(endpoint or ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json",
                            # 实测：这两个头一起给，服务端才按 SSE 分片推
@@ -303,7 +312,7 @@ def synthesize_stream(
         _note(f"服务端不认流式（HTTP {exc.code}）→ 退回整段合成")
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                             language=language, timeout=timeout)
+                             language=language, timeout=timeout, endpoint=endpoint)
         except TtsError:
             raise err from exc
         return
@@ -319,7 +328,7 @@ def synthesize_stream(
     if not got:                                             # 流式没给东西 → 整段兜底
         _note("流式一个分片都没拿到 → 退回整段合成")
         yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                         language=language, timeout=timeout)
+                         language=language, timeout=timeout, endpoint=endpoint)
 
 
 def synthesize_omni(
@@ -329,6 +338,7 @@ def synthesize_omni(
     model: str = DEFAULT_OMNI_MODEL,
     api_key: str = "",
     timeout: float = DEFAULT_TIMEOUT_S,
+    endpoint: str | None = None,
 ) -> bytes:
     """用**非实时 Qwen-Omni** 合成一段文本 → 24kHz 单声道 s16le PCM（与 `synthesize` 同格式）。
 
@@ -341,6 +351,9 @@ def synthesize_omni(
     - 它不是逐字 TTS：下一条指令让它朗读样例句，个别措辞可能略有出入 —— 试听音色足够。
     - 回的是 24k 单声道音频（可能裸 PCM、也可能带 WAV 头），统一过一遍解码器，
       解不动就当裸 s16le PCM 直接用（本就是目标格式）。
+
+    `endpoint`：音色试听走的是 chat/completions（与打字翻译同一条），由调用方按线路
+    从 base_url 的 host 派生后传入（见 endpoints.chat_url）；不传回落 OMNI_ENDPOINT。
     """
     text = (text or "").strip()
     if not text:
@@ -357,7 +370,7 @@ def synthesize_omni(
         "stream": True,                             # ⚠️ Omni 音频输出必须流式
         "stream_options": {"include_usage": True},
     }
-    req = Request(OMNI_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    req = Request(endpoint or OMNI_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json",
                            "Accept": "text/event-stream"}, method="POST")
