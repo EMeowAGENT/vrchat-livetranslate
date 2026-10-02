@@ -109,7 +109,7 @@ python -m venv .venv
 
 1. `⚙ 設定 → 一般 → サービス回線` で「Alibaba Cloud 百錬（国際版）」を選ぶ
 2. 「ワークスペース ID」に `llm-xxxx` を入力（千問雲の回線ではこの欄はグレーで入力不要）
-3. 「リージョン」で key が属する地域を選ぶ
+3. 「リージョン」は既定の **Singapore (`ap-southeast-1`)** のままにします —— 本バージョン以降、選択肢はこれだけです（理由は下記）
 4. 「回線設定を保存」を押し、そのうえで本ページ上部の「API key」欄に key を貼り付けて保存
 
 > 🔑 **key は別々に保存されます**：回線ごとに別ファイル（`api_key.txt` / `api_key_bailian_intl.txt`）へ
@@ -117,19 +117,31 @@ python -m venv .venv
 > 「現在の設定（回線）：…」の行も回線に追従します。回線を変えたあとは**翻訳を開始し直して**ください
 > （すでに実行中なら、先に停止するよう促されます）。
 
-**リージョン一覧**：
+**リージョン：使えるのはシンガポールだけ**（本バージョン以降、画面の選択肢もこれだけ）
 
-| リージョン id | 城市 |
-|---|---|
-| `ap-southeast-1` | Singapore（既定） |
-| `ap-northeast-1` | Japan (Tokyo) |
-| `us-east-1` | US (Virginia) |
-| `eu-central-1` | Germany (Frankfurt) |
-| `cn-hongkong` | China (Hong Kong) |
+| リージョン id | 城市 | 本アプリ |
+|---|---|---|
+| `ap-southeast-1` | Singapore（既定） | ✅ すべての機能 |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ 音声系モデルなし |
+| `us-east-1` | US (Virginia) | ❌ 音声系モデルなし |
+| `eu-central-1` | Germany (Frankfurt) | ❌ 音声系モデルなし |
+| `cn-hongkong` | China (Hong Kong) | ❌ 音声系モデルなし |
 
-> ⚠️ **key とリージョンは一致させる必要があります**：ある地域のワークスペースで作った key は、
-> その地域でしか使えません。地域を間違えると「いつまでも接続できない／認証に失敗する」という形で
-> 現れます —— まずコンソールで key がどの地域のものか確認し、ここの「リージョン」を直してください。
+> ⚠️ **なぜシンガポールだけか**：百錬国際版では**リージョンごとに endpoint・API key・モデル一覧が
+> 独立しており、リージョンをまたいで使えません**（公式原文：*“Each region has its own endpoint,
+> API Key, and model list. These cannot be used across regions.”*）。本アプリが必要とする**音声系
+> モデル**（リアルタイム同時通訳 `qwen3.8-livetranslate-flash-realtime`、音色の試聴／文字入力の
+> 読み上げ `qwen3-tts-flash`、Omni 音色 `qwen3.5-omni-flash`）は、国際版では**Singapore にしか
+> 配備されていません**。東京・バージニア・フランクフルト・香港には音声系モデルがありません
+> （東京には文字翻訳の `qwen-mt-flash` すらありません）。そのため画面の選択肢は **Singapore だけ**
+> です。設定ファイルに古いリージョンが残っている場合は、「翻訳を開始」した時点で**止めて変更を
+> 促します**（黙って書き換えることはしません —— リージョンは Host に入るため、書き換えると
+> 別リージョンのドメインへリクエストを送ることになります）。
+
+> ⚠️ **key も Singapore のものである必要があります**：key は作成したワークスペースのリージョンでしか
+> 使えません。別リージョン（例：日本で作ったワークスペース）の key では接続できないか
+> `Model not exist` が返ります —— コンソールでワークスペースと key の両方が Singapore にあることを
+> 確認してください。
 
 **対応する `config.yaml` の 4 つのキー**（「回線設定を保存」で自動的に書き込まれます。手で編集する必要はありません）：
 
@@ -498,7 +510,7 @@ vlt/
 
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
-tests/                    55 ファイル・460 のテスト関数（オフラインで実行可、CI はファイル単位で
+tests/                    57 ファイル・462 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -550,7 +562,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.1 "validate_workspace_id"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
   ```
 
 ---

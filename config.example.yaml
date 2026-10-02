@@ -19,8 +19,11 @@ session:
   # 百炼国际版专用：业务空间 ID（控制台「业务空间详情」里的 API Host 前缀，形如 llm-xxxx）
   # 千问云不需要；填了它 base_url 里的 {workspace_id} 会被替换
   workspace_id: ""
-  # 百炼国际版专用地域：ap-southeast-1(新加坡，默认) / ap-northeast-1(东京) /
-  #   us-east-1(弗吉尼亚) / eu-central-1(法兰克福) / cn-hongkong(香港)
+  # 百炼国际版专用地域：**只有 ap-southeast-1(新加坡) 可用**（本版起界面里也只给这一个）。
+  #   ⚠️ 原因：本程序要用的语音链路（实时同传 / 试听音色 / 打字译音 / Omni 音色）在国际站
+  #   只在**新加坡**部署；东京/弗吉尼亚/法兰克福/香港都没有语音类模型（东京连打字翻译用的
+  #   qwen-mt-flash 都没有）。填了别的地域**不会静默回落**，而是「开始翻译」时被拦下并提示。
+  #   地域会进 host（{workspace_id}.{region}.maas.aliyuncs.com），且 API key 不能跨地域使用。
   region: ap-southeast-1
   # 千问云（默认）：免业务空间 ID；百炼国际版会被界面写成
   #   wss://{workspace_id}.{region}.maas.aliyuncs.com/api-ws/v1/realtime

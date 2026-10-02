@@ -277,6 +277,12 @@ STRINGS: dict[str, str] = {
         "Model Studio (International) requires a workspace ID "
         "(the prefix of \"Workspace Details → API Host\" in the console)",
 
+    "地域「{region}」用不了 —— 本程序要用的语音模型（实时同传 / 试听音色 / 打字译音）国际站只有新加坡有部署。请在百炼国际版控制台把业务空间建在 Singapore (ap-southeast-1)，并在该业务空间下创建 API key（key 不能跨地域使用）":
+        "The region \"{region}\" won't work — the speech models this app needs (live "
+        "interpretation / voice preview / speaking typed text) are deployed on the "
+        "international site only in Singapore. Create your workspace in Singapore "
+        "(ap-southeast-1) in the Model Studio international console, and create the API "
+        "key inside that workspace (keys cannot be used across regions)",
     # ---- 日志导出 ----
     "打不开保存对话框：{msg}": "Can't open the save dialog: {msg}",
     "导出日志失败：{msg}": "Failed to export logs: {msg}",

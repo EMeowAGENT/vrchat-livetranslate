@@ -113,25 +113,35 @@ python -m venv .venv
 
 1. `⚙ 设置 → 常规 → 服务线路` 选「阿里云百炼·国际版」
 2. 「业务空间 ID」填 `llm-xxxx`（线路是千问云时这个框是灰的，不用填）
-3. 「地域」选你的 key 所属地域
+3. 「地域」保持默认的 **Singapore (`ap-southeast-1`)** —— 本版起界面里也只有这一个可选（原因见下）
 4. 点「保存线路设置」，再把 key 粘到本页上方的「API key」框里保存
 
 > 🔑 **key 分开存**：两条线路的 key 各存一个文件（`api_key.txt` / `api_key_bailian_intl.txt`），
 > 来回切线路**不用重填** key；界面里那行「当前（线路）：来源 sk-****6789」会跟着线路变。
 > 改完线路**要重新开始翻译**才生效（正在翻译时会提示你先停）。
 
-**地域表**：
+**地域：只有新加坡能用**（本版起界面里也只给这一个）
 
-| 地域 id | 城市 |
-|---|---|
-| `ap-southeast-1` | Singapore（默认） |
-| `ap-northeast-1` | Japan (Tokyo) |
-| `us-east-1` | US (Virginia) |
-| `eu-central-1` | Germany (Frankfurt) |
-| `cn-hongkong` | China (Hong Kong) |
+| 地域 id | 城市 | 本程序 |
+|---|---|---|
+| `ap-southeast-1` | Singapore（默认） | ✅ 全部功能 |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ 没有语音类模型 |
+| `us-east-1` | US (Virginia) | ❌ 没有语音类模型 |
+| `eu-central-1` | Germany (Frankfurt) | ❌ 没有语音类模型 |
+| `cn-hongkong` | China (Hong Kong) | ❌ 没有语音类模型 |
 
-> ⚠️ **key 必须与地域一致**：key 是在哪个地域的业务空间里建的，就只能连那个地域。
-> 地域选错的表现是一直连不上/鉴权失败 —— 先回控制台确认 key 属于哪个地域，再改这里的「地域」。
+> ⚠️ **为什么只剩新加坡**：百炼国际版**每个地域各自有 endpoint、API key 和模型清单，
+> 不能跨地域使用**（官方原文：*Each region has its own endpoint, API Key, and model list.
+> These cannot be used across regions.*）。而本程序要用的**语音链路** ——
+> 实时同传 `qwen3.8-livetranslate-flash-realtime`、试听音色 / 打字译音 `qwen3-tts-flash`、
+> Omni 音色 `qwen3.5-omni-flash` —— 在国际站**只在 Singapore 部署**。东京、弗吉尼亚、
+> 法兰克福、香港都缺语音类模型（东京连打字翻译用的 `qwen-mt-flash` 都没有）。
+> 所以界面里**只给新加坡**；配置文件里若还留着老地域，点「开始翻译」会被**拦下并提示**改回来
+> （不会静默替换成新加坡 —— 地域会进 Host，替换等于把请求打到别的地域的域名上）。
+
+> ⚠️ **key 也必须属于新加坡**：key 是在哪个地域的业务空间里建的，就只能连那个地域。
+> 拿别的地域（比如在日本建的业务空间）的 key 来连，会连不上或报 `Model not exist`
+> —— 先回控制台确认业务空间和 key 都在新加坡，再改这里的「地域」。
 
 **对应的 `config.yaml` 四个键**（界面点「保存线路设置」时自动就地写入，不用手改）：
 
@@ -607,7 +617,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    55 个文件、460 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    57 个文件、462 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -658,7 +668,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.1 "validate_workspace_id"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
   ```
 
 ---

@@ -111,7 +111,7 @@ of them is working at any moment, whichever you select in the app.
 
 1. `⚙ Settings → General → Service Line` → select "Alibaba Cloud Model Studio (International)"
 2. Enter `llm-xxxx` in "Workspace ID" (on the Qwen Cloud line this box is greyed out — nothing to fill in)
-3. Select the "Region" your key belongs to
+3. Leave "Region" at the default **Singapore (`ap-southeast-1`)** — it is the only choice since this version (see below)
 4. Click "Save Line Settings", then paste your key into the "API key" box above and save it
 
 > 🔑 **The two keys are stored separately**: each line keeps its own key file
@@ -120,19 +120,30 @@ of them is working at any moment, whichever you select in the app.
 > You must **start translation again** for a line change to take effect (if it is already running,
 > the app asks you to stop it first).
 
-**Region table**:
+**Region: only Singapore works** (and it is the only choice in the UI since this version)
 
-| Region id | City |
-|---|---|
-| `ap-southeast-1` | Singapore (default) |
-| `ap-northeast-1` | Japan (Tokyo) |
-| `us-east-1` | US (Virginia) |
-| `eu-central-1` | Germany (Frankfurt) |
-| `cn-hongkong` | China (Hong Kong) |
+| Region id | City | This app |
+|---|---|---|
+| `ap-southeast-1` | Singapore (default) | ✅ everything |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ no speech models |
+| `us-east-1` | US (Virginia) | ❌ no speech models |
+| `eu-central-1` | Germany (Frankfurt) | ❌ no speech models |
+| `cn-hongkong` | China (Hong Kong) | ❌ no speech models |
 
-> ⚠️ **The key must match the region**: a key created in a workspace in one region only works in that
-> region. A wrong region shows up as "never connects / authentication failure" — check in the console
-> which region the key belongs to, then fix "Region" here.
+> ⚠️ **Why Singapore only**: on Model Studio (International) **each region has its own endpoint,
+> API key and model list, and they cannot be used across regions** (official wording: *"Each region
+> has its own endpoint, API Key, and model list. These cannot be used across regions."*). The speech
+> chain this app needs — live interpretation `qwen3.8-livetranslate-flash-realtime`, voice preview /
+> typed speech `qwen3-tts-flash`, Omni voices `qwen3.5-omni-flash` — is deployed on the international
+> site **only in Singapore**. Tokyo, Virginia, Frankfurt and Hong Kong have no speech models at all
+> (Tokyo does not even have `qwen-mt-flash`, which typed translation uses). So the UI offers
+> **Singapore only**; if your config still holds an old region, pressing "Start translation" will
+> **stop you and tell you to change it** (it is never silently rewritten — the region goes into the
+> Host, so rewriting it would send your requests to the wrong domain).
+
+> ⚠️ **The key must belong to Singapore too**: a key only works in the region of the workspace it was
+> created in. A key from another region (say a workspace in Japan) fails to connect or returns
+> `Model not exist` — check in the console that both the workspace and the key are in Singapore.
 
 **The four corresponding `config.yaml` keys** (written in place when you click "Save Line Settings";
 no manual editing needed):
@@ -509,7 +520,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    55 files, 460 test functions (all run offline; CI runs them file by
+tests/                    57 files, 462 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -560,7 +571,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.1 "validate_workspace_id"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
   ```
 
 ---

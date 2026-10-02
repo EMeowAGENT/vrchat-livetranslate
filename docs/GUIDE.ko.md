@@ -108,26 +108,36 @@ python -m venv .venv
 
 1. `⚙ 설정 → 일반 → 서비스 회선`에서 「알리바바 클라우드 바이롄(국제판)」을 선택
 2. 「워크스페이스 ID」에 `llm-xxxx` 입력 (치엔원 클라우드 회선에서는 이 칸이 회색이라 입력할 것이 없습니다)
-3. 「리전」에서 key가 속한 지역을 선택
+3. 「리전」은 기본값 **Singapore (`ap-southeast-1`)** 그대로 둡니다 —— 이 버전부터 선택지는 이것뿐입니다(이유는 아래)
 4. 「회선 설정 저장」을 누른 뒤, 이 페이지 위쪽의 「API key」 칸에 key를 붙여넣고 저장
 
 > 🔑 **key는 따로 저장됩니다**: 회선마다 별도 파일(`api_key.txt` / `api_key_bailian_intl.txt`)에 저장되므로
 > 회선을 오가도 key를 다시 입력할 필요가 없습니다. 「현재(회선): …」 줄도 회선을 따라갑니다.
 > 회선을 바꾼 뒤에는 **번역을 다시 시작**해야 적용됩니다(이미 실행 중이면 먼저 중지하라는 안내가 뜹니다).
 
-**리전 목록**：
+**리전: 싱가포르만 사용할 수 있습니다**（이 버전부터 화면의 선택지도 이것뿐）
 
-| 리전 id | 도시 |
-|---|---|
-| `ap-southeast-1` | Singapore(기본값) |
-| `ap-northeast-1` | Japan (Tokyo) |
-| `us-east-1` | US (Virginia) |
-| `eu-central-1` | Germany (Frankfurt) |
-| `cn-hongkong` | China (Hong Kong) |
+| 리전 id | 도시 | 이 앱 |
+|---|---|---|
+| `ap-southeast-1` | Singapore(기본값) | ✅ 모든 기능 |
+| `ap-northeast-1` | Japan (Tokyo) | ❌ 음성 계열 모델 없음 |
+| `us-east-1` | US (Virginia) | ❌ 음성 계열 모델 없음 |
+| `eu-central-1` | Germany (Frankfurt) | ❌ 음성 계열 모델 없음 |
+| `cn-hongkong` | China (Hong Kong) | ❌ 음성 계열 모델 없음 |
 
-> ⚠️ **key와 리전은 일치해야 합니다**: 특정 지역 워크스페이스에서 만든 key는 그 지역에서만 동작합니다.
-> 리전이 틀리면 「계속 연결되지 않음 / 인증 실패」로 나타납니다 —— 먼저 콘솔에서 key가 어느 지역 것인지
-> 확인하고, 여기의 「리전」을 고치세요.
+> ⚠️ **왜 싱가포르뿐인가**: 바이롄 국제판은 **리전마다 endpoint·API key·모델 목록이 따로이고,
+> 리전을 넘어 사용할 수 없습니다**(공식 원문: *“Each region has its own endpoint, API Key, and
+> model list. These cannot be used across regions.”*). 이 앱이 필요로 하는 **음성 계열 모델**
+> (실시간 동시통역 `qwen3.8-livetranslate-flash-realtime`, 음색 미리듣기/입력한 글 읽기
+> `qwen3-tts-flash`, Omni 음색 `qwen3.5-omni-flash`)은 국제판에서 **싱가포르에만 배포**되어 있습니다.
+> 도쿄·버지니아·프랑크푸르트·홍콩에는 음성 계열 모델이 아예 없습니다(도쿄에는 텍스트 번역에 쓰는
+> `qwen-mt-flash`조차 없습니다). 그래서 화면의 선택지는 **Singapore 하나**입니다. 설정 파일에 옛
+> 리전이 남아 있으면 「번역 시작」 시점에 **막고 변경을 안내합니다**(조용히 바꾸지 않습니다 —— 리전은
+> Host에 들어가므로 바꾸면 다른 리전의 도메인으로 요청이 나갑니다).
+
+> ⚠️ **key도 Singapore 것이어야 합니다**: key는 만든 워크스페이스의 리전에서만 동작합니다.
+> 다른 리전(예: 일본에서 만든 워크스페이스)의 key로는 연결되지 않거나 `Model not exist`가
+> 반환됩니다 —— 콘솔에서 워크스페이스와 key가 모두 Singapore에 있는지 확인하세요.
 
 **대응하는 `config.yaml`의 네 개 키**(「회선 설정 저장」을 누르면 자동으로 기록됩니다. 직접 편집할 필요는 없습니다)：
 
@@ -482,7 +492,7 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    55개 파일, 460개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    57개 파일, 462개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -534,7 +544,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.1 "validate_workspace_id"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.7.2 "region_supported,已回落"
   ```
 
 ---

@@ -59,15 +59,38 @@ QIANWEN_HOST = "maas.qianwenaiapi.com"
 # `{region}` 由 default_base_url 用实参代入。
 BAILIAN_HOST_TMPL = "{workspace_id}.{region}.maas.aliyuncs.com"
 
-# 国际站地域（id, 英文显示名）。显示名是英文、**不进词表**（不是界面文案）。
+# 国际站地域（id, 英文显示名）。**只列本程序能跑通全套模型的地域。**
+#
+# ⚠️ 为什么只剩新加坡（2026-10-02，官方国际站逐页核对）：
+#   本程序依赖的语音链路在**国际站只有新加坡有部署** ——
+#     · 核心实时同传 `qwen3.8-livetranslate-flash-realtime` → Singapore + 北京
+#     · TTS `qwen3-tts-flash` / Omni `qwen3.5-omni-flash` → Singapore + 北京
+#     · 打字翻译 `qwen-mt-flash` → 北京 + 新加坡 + 法兰克福 + 弗吉尼亚
+#   东京、弗吉尼亚、法兰克福、香港都缺语音类模型（东京连 `qwen-mt-flash` 都没有）。
+#   官方原文：「Each region has its own endpoint, API Key, and model list.
+#   These cannot be used across regions.」
+#
+# 显示名是英文、**不进词表**（不是界面文案）。
 REGIONS: tuple[tuple[str, str], ...] = (
     ("ap-southeast-1", "Singapore"),
-    ("ap-northeast-1", "Japan (Tokyo)"),
-    ("us-east-1", "US (Virginia)"),
-    ("eu-central-1", "Germany (Frankfurt)"),
-    ("cn-hongkong", "China (Hong Kong)"),
 )
 DEFAULT_REGION = "ap-southeast-1"
+
+# 平台有、但**本程序要用的模型没部署齐**的地域：**识别、但不可选**。
+#
+# 为什么不直接从 KNOWN 里删掉：配置文件是用户手写/老版本存下来的，删掉就等于「不认识」→
+# `normalize_region` 会把它改写成新加坡 —— 而**地域进 host**
+# （`{workspace_id}.{region}.maas.aliyuncs.com`），静默改写等于把请求打到一个和用户
+# 业务空间对不上的域名上，报错比「这个地域不支持」难查十倍。
+# 所以：原样认出来 → 由 `region_supported()` 在前面响亮拦下并指路。
+UNSUPPORTED_REGIONS: dict[str, str] = {
+    "ap-northeast-1": "Japan (Tokyo)",
+    "us-east-1": "US (Virginia)",
+    "eu-central-1": "Germany (Frankfurt)",
+    "cn-hongkong": "China (Hong Kong)",
+}
+KNOWN_REGIONS: tuple[str, ...] = (tuple(rid for rid, _ in REGIONS)
+                                 + tuple(UNSUPPORTED_REGIONS))
 
 # 注册/开通入口（界面「去哪申请 key」按钮用；未知 provider 回落千问云那条）。
 # 百炼国际版这里给的是**新加坡地域的模型市场页**（用户实测确认的地址）：进去就能看到
@@ -99,15 +122,43 @@ def normalize_provider(raw: object) -> str:
 
 
 def normalize_region(raw: object) -> str:
-    """把任意取值规范成一个合法地域 id；非法值**留痕后**回落默认（新加坡）。
+    """把任意取值规范成一个**已知**地域 id；未知值**留痕后**回落默认（新加坡）。
 
     与 `normalize_provider` 同一纪律：脏值不致命，但必须留痕。
+
+    ⚠️ **已知但本程序不支持的地域（东京等）原样返回**，不在这里改写 —— 地域会进 host
+    （`{workspace_id}.{region}.maas.aliyuncs.com`），改写它等于把请求打到和用户业务空间
+    对不上的域名上。支不支持由 `region_supported()` 判定，由调用方**响亮拦下**。
     """
     val = str(raw).strip().lower()
-    if any(val == rid for rid, _ in REGIONS):
+    if val in KNOWN_REGIONS:
         return val
     print(f"[endpoints] ⚠️ 未识别的地域 {raw!r}，按默认 {DEFAULT_REGION} 处理", flush=True)
     return DEFAULT_REGION
+
+
+def region_name(region: str) -> str:
+    """地域的英文显示名（日志/报错用）。未知值**原样回显**，绝不 KeyError。"""
+    rid = str(region or "").strip().lower()
+    for r, name in REGIONS:
+        if r == rid:
+            return name
+    return UNSUPPORTED_REGIONS.get(rid, rid)
+
+
+def region_supported(region: str) -> str | None:
+    """该地域能不能跑通本程序的全套模型：`None` = 能；否则返回**原因码**。
+
+    原因码（稳定标识，给词表用，不要直接当文案）：
+      · `unsupported` —— 平台有、但本程序要用的语音类模型没在这个地域部署
+      · `unknown`     —— 完全不认识的地域 id
+    """
+    rid = str(region or "").strip().lower()
+    if any(rid == r for r, _ in REGIONS):
+        return None
+    if rid in UNSUPPORTED_REGIONS:
+        return "unsupported"
+    return "unknown"
 
 
 def provider_name(provider: str) -> str:

@@ -142,15 +142,19 @@ def test_bailian_derivation() -> None:
        "multimodal_url(bailian_intl)")
 
 
-# ---------------------------------------------------------------- 3) 五个地域（表驱动）
+# ---------------------------------------------------------------- 3) 地域（表驱动 + 已收口的老地域）
 
 
 def test_all_regions() -> None:
-    """case 3：五个地域各跑一遍，断言 host 里的 region 段正确、后缀是百炼域名。"""
-    want_regions = ["ap-southeast-1", "ap-northeast-1", "us-east-1",
-                    "eu-central-1", "cn-hongkong"]
-    eq([rid for rid, _ in endpoints.REGIONS], want_regions, "REGIONS 表与简报一致")
-    for rid, _disp in endpoints.REGIONS:
+    """case 3：地域 → host 的 region 段正确、后缀是百炼域名。
+
+    ⚠️ 2026-10-02 收口：**可选地域只剩新加坡**（语音链路国际站只有新加坡有部署，
+    见 `endpoints.REGIONS` 的说明）。但 host 派生逻辑对**已知的老地域**仍然成立 ——
+    它们只是不可选/会被守卫拦下，不在这里被改写（地域进 host，改写等于打错域名）。
+    """
+    eq([rid for rid, _ in endpoints.REGIONS], ["ap-southeast-1"], "REGIONS 表与简报一致")
+    host_regions = [rid for rid, _ in endpoints.REGIONS] + list(endpoints.UNSUPPORTED_REGIONS)
+    for rid in host_regions:
         base = endpoints.default_base_url("bailian_intl", region=rid)
         host = endpoints.host_of(base, "llm-x")
         check(host == f"llm-x.{rid}.maas.aliyuncs.com",
@@ -715,7 +719,7 @@ def test_gui_workspace_id_guard() -> None:
         before = cfg.read_text(encoding="utf-8")
         gui._provider_var.set(gui._provider_id_to_name[endpoints.PROVIDER_BAILIAN_INTL])
         gui._on_provider_change()
-        gui._region_var.set(gui._region_id_to_name["ap-northeast-1"])
+        gui._region_var.set(gui_mod._region_display(endpoints.DEFAULT_REGION))
         gui._workspace_var.set(key)
         gui._on_save_provider()
         gui._root.update()
@@ -758,6 +762,122 @@ def test_gui_workspace_id_guard() -> None:
                 os.environ[k] = v
 
 
+# ---------------------------------------------------------------- 地域收口
+
+
+def test_region_closure() -> None:
+    """case 16：地域收口到新加坡 —— 候选、判定、**绝不静默改写**。
+
+    背景（2026-10-02，官方国际站逐页核对）：本程序要用的语音链路
+    （实时同传 `qwen3.8-livetranslate-flash-realtime` / TTS `qwen3-tts-flash` /
+    Omni）在国际站**只有新加坡**有部署；东京、弗吉尼亚、法兰克福、香港都缺语音类模型
+    （东京连打字翻译的 `qwen-mt-flash` 都没有）。所以地域候选只留新加坡。
+
+    但**绝不静默改写**已有配置里的地域：地域进 host
+    （`{workspace_id}.{region}.maas.aliyuncs.com`），把它改成新加坡等于把请求打到一个
+    和用户业务空间对不上的域名上 —— 比「这个地域不支持」难查得多。
+    """
+    eq([rid for rid, _ in endpoints.REGIONS], ["ap-southeast-1"], "可选地域只剩新加坡")
+    eq(endpoints.DEFAULT_REGION, "ap-southeast-1", "默认地域 = 新加坡")
+    for rid, _name in endpoints.REGIONS:
+        eq(endpoints.region_supported(rid), None, f"{rid} 应判为可用")
+    for rid in endpoints.UNSUPPORTED_REGIONS:
+        eq(endpoints.region_supported(rid), "unsupported", f"{rid} 应判为不支持")
+    eq(endpoints.region_supported("zz-nowhere"), "unknown", "完全未知的地域 → unknown")
+
+    # 关键不变式一：已知但不支持的地域**原样保留**（不改写成新加坡）
+    eq(endpoints.normalize_region("ap-northeast-1"), "ap-northeast-1",
+       "已知但不支持的地域原样保留（改写会把请求打到别的地域域名上）")
+    # 关键不变式二：它仍然如实进 host —— 正因如此才必须在前面拦住，而不是改掉它
+    host = endpoints.host_of(
+        endpoints.default_base_url(endpoints.PROVIDER_BAILIAN_INTL,
+                                   "ws-j8wqpy9f2w86a8k3", "ap-northeast-1"),
+        "ws-j8wqpy9f2w86a8k3")
+    check(host.endswith(".ap-northeast-1.maas.aliyuncs.com"),
+          f"地域仍如实进 host（{host}）")
+    # 只有**完全不认识**的值才回落默认
+    eq(endpoints.normalize_region("zz-nowhere"), endpoints.DEFAULT_REGION, "未知地域回落新加坡")
+    eq(endpoints.region_name("ap-northeast-1"), "Japan (Tokyo)", "region_name 认得老地域")
+    eq(endpoints.region_name("zz-nowhere"), "zz-nowhere", "region_name 未知值原样回显（不 KeyError）")
+
+
+def test_gui_region_guard() -> None:
+    """case 17：真窗口 —— 老配置里存着东京时，设置页要开得开、红字要讲清、
+    保存与开始翻译两条路都要拦下；切成新加坡后照常保存。
+    """
+    d = Path(tempfile.mkdtemp(prefix="vlt-region-"))
+    cfg = d / "config.yaml"
+    # 造一份「老版本存下来的东京配置」：provider/region/workspace_id 都按东京写
+    txt = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    txt = txt.replace("  provider: qianwen", "  provider: bailian_intl")
+    txt = txt.replace("  region: ap-southeast-1", "  region: ap-northeast-1")
+    txt = txt.replace('  workspace_id: ""', '  workspace_id: "ws-j8wqpy9f2w86a8k3"')
+    check("  region: ap-northeast-1" in txt, "造出了东京老配置")
+    cfg.write_text(txt, encoding="utf-8")
+
+    saved_env = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME", "DASHSCOPE_API_KEY")}
+    os.environ["USERPROFILE"] = str(d)
+    os.environ["HOME"] = str(d)
+    os.environ.pop("DASHSCOPE_API_KEY", None)
+    gui = None
+    try:
+        import vlt.config as cfg_mod
+        import vlt.gui as gui_mod
+
+        cfg_mod.DEFAULT_CONFIG = cfg
+        gui_mod.DEFAULT_CONFIG = cfg
+        gui = gui_mod.TranslationGUI()          # ← 老地域不能让这一步抛 KeyError
+        if gui._update_check_job is not None:
+            gui._root.after_cancel(gui._update_check_job)
+            gui._update_check_job = None
+        gui._root.update()
+
+        # ---- ① 设置页打得开、地域显示东京、红字当场讲清原因 ----
+        check("Japan (Tokyo)" in gui._region_var.get(),
+              f"① 地域照实显示（{gui._region_var.get()!r}）")
+        err = str(gui._provider_err.cget("text") or "")
+        check("新加坡" in err, f"① 红字说清了该改用新加坡（{err[:40]}…）")
+        check("ap-southeast-1" in err, "① 红字给了具体地域 id")
+
+        # ---- ② 保存被拒 + 配置文件一字不动 ----
+        before = cfg.read_text(encoding="utf-8")
+        gui._on_save_provider()
+        gui._root.update()
+        check(cfg.read_text(encoding="utf-8") == before, "② 保存被拒：配置文件一个字没改")
+        check(gui._last_status_level == "error", "② 状态栏标成 error（不静默）")
+        raw = (yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("session") or {}
+        eq(raw.get("region"), "ap-northeast-1", "② 地域没被静默改写")
+
+        # ---- ③ 「开始翻译」被拦下，不建链 ----
+        gui._cfg.session_base["api_key"] = "sk-" + "t" * 40   # 绕过更早的「没 key」分支
+        gui._refresh_api_key_in_cfg = lambda: None            # 别把 key 重新解成空
+        gui._start()
+        gui._root.update()
+        check(not any(e.running for e in gui._engines), "③ 未启动：一个引擎都没起来")
+        check(gui._last_status_level == "error", "③ 状态栏标成 error")
+        check("地域" in str(gui._status_label.cget("text") or ""),
+              f"③ 状态栏说清了是地域的问题（{gui._status_label.cget('text')!r}）")
+
+        # ---- ④ 切成新加坡 → 照常落盘，红字清空 ----
+        gui._region_var.set(gui_mod._region_display(endpoints.DEFAULT_REGION))
+        gui._on_save_provider()
+        gui._root.update()
+        raw = (yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("session") or {}
+        eq(raw.get("region"), "ap-southeast-1", "④ 切成新加坡后落盘")
+        check(not str(gui._provider_err.cget("text") or ""), "④ 保存成功后错误提示已清空")
+    finally:
+        if gui is not None:
+            try:
+                gui._root.destroy()
+            except Exception:                       # noqa: BLE001
+                pass
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -779,6 +899,8 @@ _FUNCS = [
     test_persist_provider_guard,
     test_validate_workspace_id,
     test_gui_workspace_id_guard,
+    test_region_closure,
+    test_gui_region_guard,
 ]
 
 

@@ -1,16 +1,17 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.1 "validate_workspace_id"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.7.2 "region_supported,已回落"
 
-第二个参数 = 本版代码里必定出现的字符串。判据是「在解包出来的字节码里搜得到」——
-不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
+第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
+判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **修复型发布（v0.7.1）**：本版修「业务空间 ID 填成 API key」的校验缺口，
-needle 取新增的校验函数名 `validate_workspace_id`（`vlt/endpoints.py`，解包后在
-`vlt/endpoints.pyc` 里命中）—— 修复型发布没有新文案可挑，用**修复引入的符号名**最可靠。
-本版改动全在**共享代码**（`vlt/endpoints.py` 的校验 + `vlt/gui.py` 的两处接线 + 四套词表），
-Windows 产物与 AppImage 用的是同一份 —— 所以 exe 那 9 项（尤其第 5 项 needle）就是本版
-改动的直接证据；AppImage 侧仍按惯例核附件与体积。
+⚠️ **修复型发布（v0.7.2）**：本版两处修复，各取一个没人用过的串做 needle ——
+  ① loopback 声道数：`vlt/platform/win.py` 里回落分支的文案 `已回落`；
+  ② 地域收口到新加坡：`vlt/endpoints.py` 的新函数名 `region_supported`。
+修复型发布没有新文案可挑，用**修复引入的符号名/文案**最可靠；本版改动全在**共享代码**
+（`vlt/platform/win.py` + `vlt/endpoints.py` + `vlt/gui.py` + 四套词表 + 五份 GUIDE），
+Windows 产物与 AppImage 用的是同一份 —— 所以 exe 那几项（尤其 needle）就是本版改动的
+直接证据；AppImage 侧仍按惯例核附件与体积。
 
 复核项：
   1. 附件下载（只认 exe）
@@ -43,7 +44,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 TAG = sys.argv[1] if len(sys.argv) > 1 else "v0.0.2"
-NEEDLE = sys.argv[2] if len(sys.argv) > 2 else "俄语"      # 本版新功能里必定出现的字符串
+# 本版新功能里必定出现的字符串；**逗号可给多个**（每个都要命中才算过）
+NEEDLES = [s.strip() for s in
+           (sys.argv[2] if len(sys.argv) > 2 else "俄语").split(",") if s.strip()]
 ROOT = Path(__file__).resolve().parents[1]
 REPO_SLUG = "nixi-agent/vrchat-livetranslate"
 WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
@@ -145,11 +148,12 @@ else:
                        text=True, encoding="utf-8", errors="replace", timeout=900)
     check("pyinstxtractor-ng 解包成功", r.returncode == 0 and unpacked.is_dir(),
           f"rc={r.returncode}，产物目录 {'存在' if unpacked.is_dir() else '不存在'}")
-    needle = NEEDLE.encode("utf-8")
     pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
-    hits = [p.relative_to(unpacked).as_posix() for p in pycs if needle in p.read_bytes()]
-    check(f"exe 内含新增的「{NEEDLE}」（解包后在字节码里搜到）", bool(hits),
-          f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
+    for nd in NEEDLES:
+        hits = [p.relative_to(unpacked).as_posix() for p in pycs
+                if nd.encode("utf-8") in p.read_bytes()]
+        check(f"exe 内含新增的「{nd}」（解包后在字节码里搜到）", bool(hits),
+              f"{len(pycs)} 个 pyc 里命中：{hits[:3]}")
     # 顺带核：包内版本号是这次的、不是上一个版本的残留
     init = next((p for p in pycs if p.name == "__init__.pyc" and "vlt" in p.as_posix()), None)
     if init is not None:

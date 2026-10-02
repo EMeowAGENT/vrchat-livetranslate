@@ -193,13 +193,25 @@ def _provider_choices() -> tuple[tuple[str, str], ...]:
 
 
 def _region_choices() -> tuple[tuple[str, str], ...]:
-    """地域下拉的候选：`(显示名, 地域 id)`。
+    """地域下拉的候选：`(显示名, 地域 id)`。**只列能跑通全套模型的地域**。
+
+    依据见 `endpoints.REGIONS`：国际站的语音链路（实时同传 / TTS / Omni）只有新加坡有部署，
+    其余地域平台虽然存在、本程序却跑不通 —— 所以不放进候选里让人选。
 
     显示名刻意用 `endpoints.REGIONS` 里的**纯 ASCII 英文名**、不进词表：地域是阿里云
     的产品术语，五语各译一套只会让人对不上控制台里的原文（`Singapore (ap-southeast-1)`
     在任何语言下都能一眼认出）。
     """
     return tuple((f"{name} ({rid})", rid) for rid, name in endpoints.REGIONS)
+
+
+def _region_display(rid: str) -> str:
+    """地域 id → 下拉里显示的那个串。**对已收口掉的老地域也成立**（绝不 KeyError）。
+
+    老配置里可能存着东京这种地域：直接 `_region_id_to_name[region]` 会 KeyError ——
+    设置页当场打不开，用户连「哪里不对、怎么改」都看不到。
+    """
+    return f"{endpoints.region_name(rid)} ({rid})"
 
 
 def _mask_workspace_id(workspace_id: str) -> str:
@@ -230,6 +242,19 @@ def _ws_id_error_text(code: str) -> str:
     if code == "edge_dash":
         return t("业务空间 ID 不能以短横线开头或结尾（形如 llm-xxxx）")
     return t("百炼国际版必须填业务空间 ID（控制台「业务空间详情 → API Host」的前缀）")
+
+
+def _region_error_text(region: str) -> str:
+    """地域不可用时给用户看的一句话（**字面量 key，走词表**）。
+
+    为什么国际版只剩新加坡能选：本程序要用的语音链路（实时同传 / TTS / Omni）在国际站
+    只有新加坡有部署（官方模型页逐个核对过，2026-10-02）。别的地域选下去，表现是
+    「连不上 / 试听 404 / Model not exist」这类和地域看不出关系的错，所以要在前面拦。
+    """
+    return t("地域「{region}」用不了 —— 本程序要用的语音模型（实时同传 / 试听音色 / 打字译音）"
+             "国际站只有新加坡有部署。请在百炼国际版控制台把业务空间建在 Singapore "
+             "(ap-southeast-1)，并在该业务空间下创建 API key（key 不能跨地域使用）",
+             region=endpoints.region_name(region))
 
 
 def _persist_provider(cfg_path: "Path", provider: str, region: str,
@@ -1950,7 +1975,13 @@ class TranslationGUI:
         self._region_id_to_name = {rid: name
                                    for name, rid in self._region_name_to_id.items()}
         region = endpoints.normalize_region(self._cfg.session_base.get("region"))
-        self._region_var = tk.StringVar(value=self._region_id_to_name[region])
+        # 老配置里存着已收口掉的地域（东京等）时：**显示出来**（藏起来会让用户以为配置被改了），
+        # 但**不放进候选**（不给再选回去的机会）；能不能用由保存/开始翻译两处守卫拦。
+        # 名字→id 表里必须留一条，否则 `_selected_region()` 认不出来会回落成新加坡 ——
+        # 那等于把请求悄悄打到另一个地域的域名上（地域进 host）。
+        if region not in self._region_id_to_name:
+            self._region_name_to_id[_region_display(region)] = region
+        self._region_var = tk.StringVar(value=_region_display(region))
         self._region_combo = ttk.Combobox(form, values=list(self._region_name_to_id),
                                           state="readonly", textvariable=self._region_var)
         self._region_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=3)
@@ -1971,6 +2002,9 @@ class TranslationGUI:
         self._provider_err = ttk.Label(body, text="", style="Error.TLabel",
                                        justify=tk.LEFT, wraplength=SETTINGS_WRAP)
         self._provider_err.pack(anchor=tk.W, pady=(6, 0))
+        if endpoints.region_supported(region):
+            # 老配置存着已收口掉的地域（东京等）：一进设置页就把原因讲清，不等用户点保存
+            self._provider_err.configure(text=_region_error_text(region))
 
         self._sync_provider_controls(cur)
 
@@ -2029,6 +2063,16 @@ class TranslationGUI:
                 self._provider_err.configure(text=msg)
                 self._set_status("error", msg)
                 print(f"[gui] ❌ 线路保存被拒：业务空间 ID 不合法（{code}）", flush=True)
+                return
+            why = endpoints.region_supported(region)
+            if why:
+                # 地域进 host（`{workspace_id}.{region}.maas.aliyuncs.com`）：写下去就是个
+                # 连不上的地址，且报错和「地域没部署模型」看不出关系 → 一样什么都不写。
+                msg = t("❌ 没保存：{msg}", msg=_region_error_text(region))
+                self._provider_err.configure(text=msg)
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 线路保存被拒：地域不支持（region={region} 原因={why}）",
+                      flush=True)
                 return
         self._provider_err.configure(text="")
         # base_url 里刻意保留**字面量** `{workspace_id}` 占位符（连接时才替换）：
@@ -4130,6 +4174,17 @@ class TranslationGUI:
                     msg = t("❌ 无法开始：{msg}", msg=_ws_id_error_text(ws_code))
                 self._set_status("error", msg)
                 print(f"[gui] ❌ 未启动：业务空间 ID 不合法（{ws_code}）", flush=True)
+                self._open_settings(page="general")
+                return
+            # 地域：国际站的语音链路（同传 / TTS / Omni）只有新加坡有部署 —— 老配置里存着
+            # 东京这类地域时直接拦下并指路，别让它连出去换回一句和地域无关的报错。
+            raw_region = self._cfg.session_base.get("region")
+            reg_why = endpoints.region_supported(raw_region)
+            if reg_why:
+                msg = t("❌ 无法开始：{msg}", msg=_region_error_text(raw_region))
+                self._set_status("error", msg)
+                print(f"[gui] ❌ 未启动：地域不支持（region={raw_region} 原因={reg_why}）",
+                      flush=True)
                 self._open_settings(page="general")
                 return
         d = self._direction_var.get()
