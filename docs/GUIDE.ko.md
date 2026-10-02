@@ -308,10 +308,12 @@ output:
 * **설정**: `config.yaml`의 `desktop_overlay:` 섹션(`mode`를 `latest`로 바꾸면 "최신 한 줄만"
   보여 주는 가사 스타일). 시각 파라미터(글꼴 / 크기 / 색 / 줄 수 / 원문 표시)는 기본적으로
   `overlay:` 섹션을 **상속**하며, `desktop_overlay:`에 같은 이름의 키로 덮어쓸 수 있습니다.
-* **Linux**: **X11 세션**에서는 Windows와 동일(창 검색 / 붙이기 추종 / 마우스 통과 / 드래그 저장 /
-  불투명도). **Wayland 세션**(niri 등, GUI는 XWayland 경유)에서는 창 위치와 불투명도를 합성기가
-  정하므로 추종이 동작하지 않습니다 — 자세한 경계는 [GUIDE.linux.md](GUIDE.linux.md)의
-  "데스크톱 자막"을 참고.
+* **Linux**: **Wayland 세션**(niri / sway / Hyprland / KDE 등 layer-shell을 구현한 합성기)에서는
+  **네이티브 오버레이 창**으로 동작합니다 — 픽셀 단위 투명(진짜 둥근 모서리 · 반투명 판), 항상 위 ·
+  게임 창 따라가기 · 프로토콜 수준 마우스 통과 · 드래그 저장까지 Windows와 동일합니다. X11 세션과
+  layer-shell이 없는 합성기(GNOME/Weston)는 Tk 창으로 자동 폴백합니다(픽셀 단위로 투명한 네이티브
+  X11 창은 아직 미구현). `desktop_overlay.backend`로 경로를 강제할 수 있습니다(렌더링 문제를
+  가릴 때 편리) — 경계는 [GUIDE.linux.md](GUIDE.linux.md)의 "데스크톱 자막" 참고.
 
 > ⚠️ VRChat은 **창 모드 / 테두리 없음**이어야 합니다(Unity `Fullscreen mode = 3`, VRChat 기본값).
 > 독점 전체 화면에서는 서드파티 최상위 창이 반드시 가려집니다 — 이 프로그램의 버그가 아닙니다.
