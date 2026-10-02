@@ -16,12 +16,15 @@ import contextlib
 import io
 import json
 import math
+import shutil
 import struct
 import sys
 import tempfile
 import wave
 from pathlib import Path
 from urllib.error import HTTPError
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
 sys.path.insert(0, str(ROOT))
@@ -579,6 +582,53 @@ def test_describe_masks_workspace() -> None:
     check("<host 解析失败>" in bad, "base_url 解析失败 → 降级占位串，不抛")
 
 
+# ---------------------------------------------------------------- 13) 界面保存线路：落盘 + 缺段响亮失败
+
+
+def test_persist_provider_guard() -> None:
+    """case 13：`gui._persist_provider` —— 正常落盘；config.yaml 缺 `session:` 段时**响亮失败**。
+
+    为什么单钉第二条：`_yaml_set_in_text` 找不到路径时是「原样返回」，写成文件就是
+    同一份文本 —— 界面会说保存成功、配置其实一字未改（静默降级）。房间段有补建逻辑，
+    session 段没有，所以老配置上必须**抛错**而不是假装成功。
+    """
+    d = Path(tempfile.mkdtemp())
+    try:
+        import vlt.gui as gui_mod          # 延迟导入：本文件其余用例不需要 tkinter/音频依赖
+    except Exception as exc:               # noqa: BLE001 — 缺依赖的环境跳过，别把整份用例打成红
+        print(f"  ⚠ 跳过（导入 vlt.gui 失败：{type(exc).__name__}: {exc}）")
+        return
+
+    bailian_base = "wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime"
+
+    # ① 正常：从模板拷一份（含注释）→ 四项都写进去
+    ok_cfg = d / "config.yaml"
+    shutil.copyfile(ROOT / "config.example.yaml", ok_cfg)
+    gui_mod._persist_provider(ok_cfg, "bailian_intl", "ap-southeast-1", "llm-test123",
+                              bailian_base)
+    after = ok_cfg.read_text(encoding="utf-8")
+    raw = (yaml.safe_load(after) or {}).get("session") or {}
+    eq(raw.get("provider"), "bailian_intl", "① 落盘 session.provider（裸写线路 id）")
+    eq(raw.get("region"), "ap-southeast-1", "① 落盘 session.region")
+    eq(raw.get("workspace_id"), "llm-test123", "① 落盘 session.workspace_id")
+    eq(raw.get("base_url"), bailian_base, "① 落盘 session.base_url（保留 {workspace_id} 字面量）")
+    check("# " in after, "① 就地写入保住了注释")
+
+    # ② 老配置没有 session: 段 → 必须抛错，且磁盘文件**一个字没动**
+    bad_cfg = d / "legacy.yaml"
+    bad_cfg.write_text("chatbox:\n  host: 127.0.0.1\n  port: 9000\n", encoding="utf-8")
+    before = bad_cfg.read_text(encoding="utf-8")
+    raised = ""
+    try:
+        gui_mod._persist_provider(bad_cfg, "bailian_intl", "ap-southeast-1", "llm-x",
+                                  bailian_base)
+    except RuntimeError as exc:
+        raised = str(exc)
+    check(bool(raised), "② 缺 session: 段 → 抛 RuntimeError（不是静默不保存）")
+    check("session" in raised, "② 报错说清缺的是哪一段（用户能自己补）")
+    eq(bad_cfg.read_text(encoding="utf-8"), before, "② 失败时磁盘文件一字未改")
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -597,6 +647,7 @@ _FUNCS = [
     test_engine_derives_endpoints,
     test_stream_fallback_keeps_endpoint,
     test_describe_masks_workspace,
+    test_persist_provider_guard,
 ]
 
 
