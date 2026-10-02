@@ -1,0 +1,623 @@
+"""服务线路（千问云 / 阿里云百炼·国际版）出网端点派生的验收测试。
+
+本轮新增 `vlt/endpoints.py` 作为**地址的单一真相源**：`session.base_url` 说了算，
+另外两条 HTTP 端点（打字翻译 chat/completions、打字译音 multimodal）一律从它的
+host 派生。这个脚本把「派生对不对、脏值会不会静默、密钥分槽互不干扰、老配置零变化」
+这几件事钉死 —— 全程离线（HTTP opener 与密钥目录都被替换成替身，不连服务端、不碰
+用户真实 `config.yaml`、不碰真实 `~/.vrchat-livetranslate`）。
+
+跑法：`.venv/Scripts/python.exe tests/test_endpoints.py`，全绿末行打印 `OK`，
+有失败则非 0 退出（照本仓库 `tests/test_textin.py` 的单文件脚本惯例）。
+"""
+from __future__ import annotations
+
+import base64
+import contextlib
+import io
+import json
+import math
+import struct
+import sys
+import tempfile
+import wave
+from pathlib import Path
+from urllib.error import HTTPError
+
+ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
+sys.path.insert(0, str(ROOT))
+
+# 界面/日志文案会跟随系统语言（CI 与外国机器是英文系统）。本脚本里 `credentials.mask_key`
+# 等会走 t()，钉死成 zh 让输出在不同机器上稳定（产品代码不依赖这个补丁）。
+import vlt.i18n as _i18n  # noqa: E402
+_i18n.detect_system_language = lambda: "zh"
+
+import vlt.config as config_mod  # noqa: E402
+import vlt.credentials as credentials  # noqa: E402
+import vlt.endpoints as endpoints  # noqa: E402
+import vlt.textin as textin  # noqa: E402
+import vlt.tts as tts_mod  # noqa: E402
+from vlt.session.base import SessionConfig  # noqa: E402
+
+# 断言计数：每条 check 都打印一行，末尾汇总；有任何一条为假 → 非 0 退出。
+_CHECKS = {"n": 0, "bad": 0}
+
+
+def check(cond: bool, label: str) -> bool:
+    _CHECKS["n"] += 1
+    if cond:
+        print(f"  ✓ {label}")
+    else:
+        _CHECKS["bad"] += 1
+        print(f"  ✗ {label}")
+    return cond
+
+
+def eq(got: object, want: object, label: str) -> bool:
+    """相等断言：把 got/want 都打出来，失败时一眼看出差在哪。"""
+    return check(got == want, f"{label}：got={got!r} want={want!r}")
+
+
+# ---------------------------------------------------------------- 测试替身
+
+
+class FakeResp:
+    """最小响应替身：可 read()、可当上下文管理器（with ... as r）。"""
+
+    def __init__(self, body: str) -> None:
+        self._buf = io.BytesIO(body.encode("utf-8"))
+
+    def read(self) -> bytes:
+        return self._buf.read()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeOpener:
+    """替掉模块级 `_opener`，把请求对象留下来断言（`req.full_url` 就是实际出网地址）。"""
+
+    def __init__(self, body: str = "") -> None:
+        self.body, self.req = body, None
+
+    def open(self, req, timeout=None):  # noqa: ANN001
+        self.req = req
+        return FakeResp(self.body)
+
+
+def _wav24k(seconds: float = 0.2) -> bytes:
+    """造一段 24kHz 单声道 s16le WAV —— TTS 服务端返回的就是这个形态。"""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        n = int(24000 * seconds)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * i / 24000)))
+            for i in range(n)))
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------- 1) 千问云（写死期望值）
+
+
+def test_qianwen_endpoints() -> None:
+    """case 1：千问云四条值**整串写死**比对（不复算 —— 复算等于没测）。"""
+    base = "wss://maas.qianwenaiapi.com/api-ws/v1/realtime"
+    eq(endpoints.default_base_url("qianwen"), base, "default_base_url(qianwen)")
+    eq(endpoints.host_of(base), "maas.qianwenaiapi.com", "host_of(qianwen)")
+    eq(endpoints.chat_url(base),
+       "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions",
+       "chat_url(qianwen)")
+    eq(endpoints.multimodal_url(base),
+       "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation",
+       "multimodal_url(qianwen)")
+
+
+# ---------------------------------------------------------------- 2) 百炼派生
+
+
+def test_bailian_derivation() -> None:
+    """case 2：百炼 + 新加坡 + 空间 ID llm-abc123 —— 占位符被实参替换，两端点从 host 派生。"""
+    base = endpoints.default_base_url("bailian_intl", region="ap-southeast-1")
+    eq(base,
+       "wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime",
+       "default_base_url(bailian_intl) 保留字面量占位符")
+    eq(endpoints.resolve_base_url(base, "llm-abc123"),
+       "wss://llm-abc123.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime",
+       "resolve_base_url 把 {workspace_id} 换成实参")
+    eq(endpoints.chat_url(base, "llm-abc123"),
+       "https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+       "chat_url(bailian_intl)")
+    eq(endpoints.multimodal_url(base, "llm-abc123"),
+       "https://llm-abc123.ap-southeast-1.maas.aliyuncs.com"
+       "/api/v1/services/aigc/multimodal-generation/generation",
+       "multimodal_url(bailian_intl)")
+
+
+# ---------------------------------------------------------------- 3) 五个地域（表驱动）
+
+
+def test_all_regions() -> None:
+    """case 3：五个地域各跑一遍，断言 host 里的 region 段正确、后缀是百炼域名。"""
+    want_regions = ["ap-southeast-1", "ap-northeast-1", "us-east-1",
+                    "eu-central-1", "cn-hongkong"]
+    eq([rid for rid, _ in endpoints.REGIONS], want_regions, "REGIONS 表与简报一致")
+    for rid, _disp in endpoints.REGIONS:
+        base = endpoints.default_base_url("bailian_intl", region=rid)
+        host = endpoints.host_of(base, "llm-x")
+        check(host == f"llm-x.{rid}.maas.aliyuncs.com",
+              f"region={rid} → host={host!r}")
+
+
+# ---------------------------------------------------------------- 4) 缺 workspace_id 报错
+
+
+def test_missing_workspace_raises() -> None:
+    """case 4：占位符在但 workspace_id 为空 → ValueError（绝不拼出残废 host 去连）。
+
+    ⚠️ 简报内部口径冲突：§2.1 要求异常文案**照抄**为「…需要 workspace_id（百炼控制台
+    「业务空间详情 → API Host」的前缀）」，而 §2.9-4 又要求消息含「业务空间 ID」。
+    两者不可能同时字面成立 —— 这里以 §2.1 的**照抄文案**为准（产品代码不改），
+    断言落在真正存在的子串上：既含英文键名 `workspace_id`、也含中文「业务空间」。
+    """
+    base = endpoints.default_base_url("bailian_intl", region="ap-southeast-1")
+    try:
+        endpoints.resolve_base_url(base, "")
+        check(False, "缺 workspace_id 应抛 ValueError")
+    except ValueError as exc:
+        msg = str(exc)
+        check("workspace_id" in msg and "业务空间" in msg,
+              f"ValueError 消息含定位信息：{msg!r}")
+
+    # 纪律 §4：异常里绝不出现**完整业务空间 ID**。手写一个缺 scheme 的 base_url
+    # （占位符在、但没 wss://）→ host 解析不出 → host_of 抛错，消息**不得**回显空间 ID。
+    leaky = "{workspace_id}.ap-southeast-1.maas.aliyuncs.com"     # 故意漏掉 wss://
+    try:
+        endpoints.host_of(leaky, "llm-secret999")
+        check(False, "缺 scheme 的 base_url 应让 host_of 抛 ValueError")
+    except ValueError as exc:
+        msg = str(exc)
+        check("llm-secret999" not in msg, f"host_of 异常不回显完整空间 ID：{msg!r}")
+
+
+# ---------------------------------------------------------------- 5) 手填公有域名（无占位符）
+
+
+def test_public_domain_no_placeholder() -> None:
+    """case 5：手填公有域名（无 {workspace_id}）→ 不要求空间 ID，chat_url 照常派生。"""
+    base = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    eq(endpoints.resolve_base_url(base), base, "无占位符 → resolve_base_url 原样返回")
+    eq(endpoints.chat_url(base),
+       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+       "chat_url(公有域名)")
+    eq(endpoints.multimodal_url(base),
+       "https://dashscope-intl.aliyuncs.com"
+       "/api/v1/services/aigc/multimodal-generation/generation",
+       "multimodal_url(公有域名)")
+
+
+# ---------------------------------------------------------------- 6) 归一化
+
+
+def test_normalize() -> None:
+    """case 6：合法值原样、非法/空/None 回落默认；key_slot / signup_url 同样回落。"""
+    eq(endpoints.normalize_provider("qianwen"), "qianwen", "normalize_provider 合法值原样")
+    eq(endpoints.normalize_provider("BAILIAN_INTL"), "bailian_intl", "normalize_provider 大写归一")
+    # 非法值会各打印一行留痕（下面用 redirect 收掉，避免污染汇总输出），断言回落默认
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        eq(endpoints.normalize_provider("nope"), "qianwen", "normalize_provider 非法值回落")
+        eq(endpoints.normalize_provider(""), "qianwen", "normalize_provider 空串回落")
+        eq(endpoints.normalize_provider(None), "qianwen", "normalize_provider None 回落")
+        eq(endpoints.normalize_region("us-east-1"), "us-east-1", "normalize_region 合法值原样")
+        eq(endpoints.normalize_region("mars-9"), "ap-southeast-1", "normalize_region 非法值回落")
+        eq(endpoints.normalize_region(None), "ap-southeast-1", "normalize_region None 回落")
+    check("未识别的服务线路" in buf.getvalue(), "非法 provider 留痕（不静默）")
+    check("未识别的地域" in buf.getvalue(), "非法 region 留痕（不静默）")
+    eq(endpoints.key_slot("bailian_intl"), "bailian_intl", "key_slot(bailian_intl)")
+    eq(endpoints.key_slot("qianwen"), "qianwen", "key_slot(qianwen)")
+    with contextlib.redirect_stdout(io.StringIO()):
+        eq(endpoints.key_slot("garbage"), "qianwen", "key_slot 非法值回落 qianwen")
+    eq(endpoints.signup_url("bailian_intl"),
+       "https://modelstudio.console.alibabacloud.com/", "signup_url(bailian_intl)")
+    with contextlib.redirect_stdout(io.StringIO()):
+        eq(endpoints.signup_url("unknown"), "https://www.qianwenai.com/",
+           "signup_url 未知 provider 回落千问云")
+
+
+# ---------------------------------------------------------------- 7) 密钥分槽
+
+
+def test_key_slots() -> None:
+    """case 7：两条线路各存一份 key，互不干扰；老文件名仍是 qianwen 槽；非法槽名抛错。"""
+    d = Path(tempfile.mkdtemp())                 # 目录只建一次（别每次调用换目录）
+    old = credentials._storage_dir_override
+    credentials._storage_dir_override = lambda: d
+    try:
+        # 拼接出来的假 key（不触发仓库凭据扫描；只需满足 >=16 字符、无空白）
+        k1 = "sk" + "-test-" + "qianwen0123456789abcdef"
+        k2 = "sk" + "-test-" + "bailian0123456789abcdef"
+        credentials.save_api_key(k1, slot="qianwen")
+        credentials.save_api_key(k2, slot="bailian_intl")
+        names = sorted(p.name for p in d.iterdir())
+        eq(names, ["api_key.txt", "api_key_bailian_intl.txt"], "两槽各写一个文件")
+        eq(credentials.load_saved_key("qianwen"), k1, "qianwen 槽读回 k1")
+        eq(credentials.load_saved_key("bailian_intl"), k2, "bailian 槽读回 k2")
+        eq(credentials._key_file("qianwen").name, "api_key.txt",
+           "qianwen 槽 = 老文件名 api_key.txt（向后兼容，零迁移）")
+        # 清一个槽不影响另一个（这就是「各存各的」）
+        check(credentials.clear_saved_key("bailian_intl") is True, "clear_saved_key(bailian) 返回 True")
+        check(credentials.load_saved_key("bailian_intl") is None, "清 bailian 后该槽为空")
+        eq(credentials.load_saved_key("qianwen"), k1, "清 bailian 不动 qianwen 槽")
+        # 非法槽名（含路径穿越风险）→ ValueError，绝不拼出目录穿越的文件名
+        try:
+            credentials.save_api_key(k1, slot="../evil")
+            check(False, "非法槽名应抛 ValueError")
+        except ValueError:
+            check(True, "非法槽名 ../evil → ValueError")
+    finally:
+        credentials._storage_dir_override = old
+
+
+# ---------------------------------------------------------------- 8) load_config 读 provider/region
+
+
+def _fake_key(tag: str) -> str:
+    """拼一个够长、无空白、不触发凭据扫描的假 key（load_config 显式传参用）。"""
+    return "sk" + "-test-" + tag + "0123456789abcdef"
+
+
+def test_load_config_provider_region() -> None:
+    """case 8：临时 yaml 读 provider/region；老配置回落 qianwen；脏值回落默认。
+
+    **绝不碰用户真实 config.yaml**：全部写到 tempfile.mkdtemp() 下的临时文件。
+    显式传 api_key → `load_api_key` 第一步就返回，既不读环境变量也不 SystemExit。
+    """
+    key = _fake_key("cfgload")
+    d = Path(tempfile.mkdtemp())
+
+    f1 = d / "bailian.yaml"
+    f1.write_text(
+        "session:\n"
+        "  model: qwen3.8-livetranslate-flash-realtime\n"
+        "  provider: bailian_intl\n"
+        "  region: us-east-1\n"
+        "  workspace_id: llm-abc123\n"
+        "  base_url: wss://{workspace_id}.us-east-1.maas.aliyuncs.com/api-ws/v1/realtime\n",
+        encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cfg = config_mod.load_config(f1, api_key=key)
+    eq(cfg.session_base["provider"], "bailian_intl", "读到 provider=bailian_intl")
+    eq(cfg.session_base["region"], "us-east-1", "读到 region=us-east-1")
+    eq(cfg.session_base["workspace_id"], "llm-abc123", "读到 workspace_id")
+    scfg = cfg.directions["mine"].to_session_config(cfg.session_base)
+    check(scfg.provider == "bailian_intl" and scfg.region == "us-east-1",
+          f"to_session_config 带出 provider/region：{scfg.provider}/{scfg.region}")
+
+    # 老 yaml（没有 provider/region/base_url）→ 回落 qianwen + 默认地址（行为零变化），
+    # 且**不该**打印「未识别的服务线路 None」这类噪声（键缺失 ≠ 填错值，见 config.load_config）。
+    f2 = d / "old.yaml"
+    f2.write_text("session:\n  model: qwen3.8-livetranslate-flash-realtime\n",
+                  encoding="utf-8")
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        cfg2 = config_mod.load_config(f2, api_key=key)
+    eq(cfg2.session_base["provider"], "qianwen", "老配置回落 provider=qianwen")
+    eq(cfg2.session_base["region"], "ap-southeast-1", "老配置回落默认 region")
+    eq(cfg2.session_base["base_url"], endpoints.default_base_url("qianwen"),
+       "老配置 base_url = 千问云默认")
+    check("未识别的服务线路" not in buf2.getvalue()
+          and "未识别的地域" not in buf2.getvalue(),
+          "老配置（键缺失）静默回落，不打「未识别」噪声（§1.5 零变化）")
+
+    # 脏值（填了但填错）→ 留痕后回落默认（不静默、也不致命）
+    f3 = d / "bad.yaml"
+    f3.write_text("session:\n  provider: nope\n  region: mars-9\n", encoding="utf-8")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cfg3 = config_mod.load_config(f3, api_key=key)
+    eq(cfg3.session_base["provider"], "qianwen", "非法 provider 回落 qianwen")
+    eq(cfg3.session_base["region"], "ap-southeast-1", "非法 region 回落默认")
+    check("未识别的服务线路" in buf.getvalue() and "未识别的地域" in buf.getvalue(),
+          "非法值（present）留痕 + 回落（§1.4 不静默）")
+
+
+def test_provider_host_mismatch_warn() -> None:
+    """设计口径 #4：provider 与 base_url 的 host 对不上 → 打一行 WARN（不报错）。
+
+    顺带验证「对得上时不误报」—— 否则 WARN 就成了噪声，真出问题时反而被淹没。
+    """
+    key = _fake_key("mismatch")
+    d = Path(tempfile.mkdtemp())
+
+    f1 = d / "mismatch.yaml"                 # provider=百炼，但 base_url 还是千问云域名
+    f1.write_text(
+        "session:\n"
+        "  provider: bailian_intl\n"
+        "  region: ap-southeast-1\n"
+        "  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime\n",
+        encoding="utf-8")
+    buf1 = io.StringIO()
+    with contextlib.redirect_stdout(buf1):
+        config_mod.load_config(f1, api_key=key)
+    out1 = buf1.getvalue()
+    check("线路=阿里云百炼·国际版" in out1 and "千问云的域名" in out1,
+          "provider=百炼 但 host=千问云 → WARN")
+
+    f2 = d / "mismatch2.yaml"                # 反过来：provider=千问云，但 base_url 是百炼域名
+    f2.write_text(
+        "session:\n"
+        "  provider: qianwen\n"
+        "  base_url: wss://llm-x.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime\n",
+        encoding="utf-8")
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        config_mod.load_config(f2, api_key=key)
+    check("线路=千问云" in buf2.getvalue(), "provider=千问云 但 host=百炼 → 对称 WARN")
+
+    f3 = d / "match.yaml"                    # 对得上：不该有任何 WARN
+    f3.write_text(
+        "session:\n"
+        "  provider: bailian_intl\n"
+        "  region: ap-southeast-1\n"
+        "  workspace_id: llm-abc123\n"
+        "  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime\n",
+        encoding="utf-8")
+    buf3 = io.StringIO()
+    with contextlib.redirect_stdout(buf3):
+        config_mod.load_config(f3, api_key=key)
+    check("但 session.base_url" not in buf3.getvalue(), "provider 与 host 一致 → 不误报 WARN")
+
+
+# ---------------------------------------------------------------- 9) endpoint 覆盖
+
+
+def test_endpoint_override() -> None:
+    """case 9：translate_text / synthesize 传 endpoint 时实际请求 URL 改变，不传回落模块常量。"""
+    custom_chat = "https://custom.example/compatible-mode/v1/chat/completions"
+    custom_mm = "https://custom.example/api/v1/services/aigc/multimodal-generation/generation"
+
+    # 打字翻译：传 endpoint
+    body = json.dumps({"choices": [{"message": {"content": "Hello"}}]})
+    f = FakeOpener(body)
+    textin._opener = f
+    textin.translate_text("你好", target_lang="en", api_key="sk-x", endpoint=custom_chat)
+    eq(f.req.full_url, custom_chat, "translate_text(endpoint=...) 实际请求地址")
+    # 不传 → 回落模块常量 ENDPOINT
+    f = FakeOpener(body)
+    textin._opener = f
+    textin.translate_text("你好", target_lang="en", api_key="sk-x")
+    eq(f.req.full_url, textin.ENDPOINT, "translate_text() 不传 → 回落 textin.ENDPOINT")
+
+    # 打字译音 TTS：传 endpoint
+    wav_b64 = base64.b64encode(_wav24k(0.2)).decode()
+    tts_body = json.dumps({"output": {"audio": {"data": wav_b64}}})
+    g = FakeOpener(tts_body)
+    tts_mod._opener = g
+    tts_mod.synthesize("hi", api_key="sk-x", endpoint=custom_mm)
+    eq(g.req.full_url, custom_mm, "synthesize(endpoint=...) 实际请求地址")
+    # 不传 → 回落模块常量 ENDPOINT
+    g = FakeOpener(tts_body)
+    tts_mod._opener = g
+    tts_mod.synthesize("hi", api_key="sk-x")
+    eq(g.req.full_url, tts_mod.ENDPOINT, "synthesize() 不传 → 回落 tts.ENDPOINT")
+
+
+# ---------------------------------------------------------------- 10) SessionConfig.url（逻辑搬了家）
+
+
+def test_session_config_url() -> None:
+    """case 10：url 属性回归 —— 占位符替换那段逻辑从 base.py 搬进了 endpoints。"""
+    scfg = SessionConfig(
+        model="qwen3.8-livetranslate-flash-realtime",
+        base_url="wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime",
+        workspace_id="llm-abc123")
+    eq(scfg.url,
+       "wss://llm-abc123.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime"
+       "?model=qwen3.8-livetranslate-flash-realtime",
+       "占位符 + workspace_id → 拼出 ?model= 完整 URL")
+
+    missing = SessionConfig(
+        base_url="wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime",
+        workspace_id="")
+    try:
+        _ = missing.url
+        check(False, "缺 workspace_id 时 .url 应抛 ValueError")
+    except ValueError:
+        check(True, "缺 workspace_id 时 .url → ValueError")
+
+    dflt = SessionConfig(model="m")            # base_url 默认 = 千问云
+    eq(dflt.url, "wss://maas.qianwenaiapi.com/api-ws/v1/realtime?model=m",
+       "默认 SessionConfig.url = 千问云")
+
+
+# ---------------------------------------------------------------- 额外：Engine 接线派生
+
+
+def test_engine_derives_endpoints() -> None:
+    """额外：Engine 启动时把两端点算一次并缓存；派生失败留痕后回落千问云默认（构造不崩）。"""
+    try:
+        from vlt.engine import Engine, EngineEvents
+    except Exception as exc:  # noqa: BLE001
+        print(f"  （跳过 Engine 派生用例：{type(exc).__name__}: {exc}）")
+        return
+    from vlt.config import AppConfig, Direction
+
+    key = _fake_key("engine")
+    bailian_base = endpoints.default_base_url("bailian_intl", region="ap-southeast-1")
+
+    def _mk(base_url: str, ws: str) -> "AppConfig":
+        return AppConfig(
+            session_base={"model": "qwen3.8-livetranslate-flash-realtime",
+                          "base_url": base_url, "workspace_id": ws,
+                          "provider": "bailian_intl", "region": "ap-southeast-1",
+                          "api_key": key},
+            directions={"mine": Direction(source_lang="zh", target_lang="en")},
+            chatbox={}, merger={}, text_input={})
+
+    eng = Engine(cfg=_mk(bailian_base, "llm-abc123"), direction="mine", source="mic",
+                 sinks=set(), events=EngineEvents(), dry_run=True)
+    eq(eng._chat_endpoint,
+       "https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+       "Engine._chat_endpoint 从 base_url 派生")
+    eq(eng._tts_endpoint,
+       "https://llm-abc123.ap-southeast-1.maas.aliyuncs.com"
+       "/api/v1/services/aigc/multimodal-generation/generation",
+       "Engine._tts_endpoint 从 base_url 派生")
+
+    # 占位符在但没 workspace_id → 派生抛 ValueError：留痕 + 回落千问云默认端点，构造不崩
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        eng2 = Engine(cfg=_mk(bailian_base, ""), direction="mine", source="mic",
+                      sinks=set(), events=EngineEvents(), dry_run=True)
+    dflt = endpoints.default_base_url("qianwen")
+    eq(eng2._chat_endpoint, endpoints.chat_url(dflt), "派生失败 → chat 回落千问云默认")
+    eq(eng2._tts_endpoint, endpoints.multimodal_url(dflt), "派生失败 → tts 回落千问云默认")
+    check("出网端点派生失败" in buf.getvalue(), "派生失败留痕（不静默）")
+
+
+# ---------------------------------------------------------------- 11) 流式兜底那次请求也必须走当前线路
+
+
+class _SeqResp:
+    """按需返回：既可当 SSE 逐行迭代，也可 read()。`headers` 是判定 SSE 的唯一依据。"""
+
+    def __init__(self, lines, ctype: str = "text/event-stream") -> None:
+        self.headers = {"Content-Type": ctype}
+        self._lines = [ln.encode("utf-8") if isinstance(ln, str) else ln for ln in lines]
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def read(self) -> bytes:
+        return b"".join(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a) -> bool:
+        return False
+
+
+class _SeqOpener:
+    """按调用顺序发不同的响应，并把每次请求留下来（`reqs[-1].full_url` = 最后一次真实地址）。"""
+
+    def __init__(self, resps, fail_first: int | None = None) -> None:
+        self.resps, self.reqs, self.fail_first = list(resps), [], fail_first
+
+    def open(self, req, timeout=None):  # noqa: ANN001
+        self.reqs.append(req)
+        if self.fail_first is not None and len(self.reqs) == 1:
+            raise HTTPError(req.full_url, self.fail_first, "synthetic", {}, io.BytesIO(b"{}"))
+        return self.resps[min(len(self.reqs) - 1, len(self.resps) - 1)]
+
+
+def test_stream_fallback_keeps_endpoint() -> None:
+    """case 11：`synthesize_stream` 退回整段合成时，那次请求**也必须**走当前线路。
+
+    为什么单独钉这条：两条兜底路径（① 服务端不认流式：HTTP 400/406/415；② 一个分片都没拿到）
+    都会掉回 `synthesize()`。若兜底那次忘了透传 endpoint，切到海外线路后**只有流式兜底**
+    会偷偷连回千问云 —— 平时一切正常，只在服务端不认流式时才现形，是最难查的那种漂移。
+    两条路径各验一遍。
+    """
+    custom_mm = "https://llm-abc.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    tts_body = json.dumps({"output": {"audio": {"data": base64.b64encode(_wav24k(0.2)).decode()}}})
+
+    # ① 服务端不认流式（HTTP 400）→ 退回整段
+    op = _SeqOpener([_SeqResp([], ctype="application/json"), FakeResp(tts_body)], fail_first=400)
+    tts_mod._opener = op
+    parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x", endpoint=custom_mm))
+    eq(len(op.reqs), 2, "① 服务端不认流式 → 触发整段兜底（共 2 次请求）")
+    eq(op.reqs[-1].full_url, custom_mm,
+       "① 兜底那次请求也必须走当前线路（否则切海外会偷偷连回千问云）")
+    check(len(parts) == 1, "① 兜底确实吐出了 1 块音频")
+
+    # ② 流式一个分片都没拿到（只回 [DONE]）→ 退回整段
+    op2 = _SeqOpener([_SeqResp(["data: [DONE]\n"]), FakeResp(tts_body)])
+    tts_mod._opener = op2
+    parts2 = list(tts_mod.synthesize_stream("你好", api_key="sk-x", endpoint=custom_mm))
+    eq(len(op2.reqs), 2, "② 流式空手而归 → 触发整段兜底（共 2 次请求）")
+    eq(op2.reqs[-1].full_url, custom_mm,
+       "② 兜底那次请求也必须走当前线路（否则切海外会偷偷连回千问云）")
+    check(len(parts2) == 1, "② 兜底确实吐出了 1 块音频")
+
+    # ③ 不传 endpoint 时仍回落模块常量（老调用零变化）
+    op3 = _SeqOpener([_SeqResp(["data: [DONE]\n"]), FakeResp(tts_body)])
+    tts_mod._opener = op3
+    list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
+    eq(op3.reqs[-1].full_url, tts_mod.ENDPOINT, "③ 不传 endpoint → 兜底仍回落 tts.ENDPOINT")
+
+
+# ---------------------------------------------------------------- 12) describe 日志摘要（打码 + 不抛）
+
+
+def test_describe_masks_workspace() -> None:
+    """case 12：`[net]` 那行日志 —— 线路/地域/host 要看得清，业务空间 ID 不能整串进日志。
+
+    为什么单钉：日志会落到用户硬盘上（还可能被贴进 issue / 群里求助），
+    空间 ID 是账号标识，整串打出去属于白白泄露；但线路名与地域必须完整，
+    否则「我切了线路怎么没生效」根本查不了。
+    """
+    ws = "llm-abc123def"
+    base = endpoints.default_base_url("bailian_intl", ws, "ap-southeast-1")
+    line = endpoints.describe("bailian_intl", "ap-southeast-1", base, ws)
+    check(ws not in line, f"describe 不整串打出业务空间 ID：{line}")
+    check("llm-ab…" in line, "describe 保留空间 ID 前 6 字符（够对控制台）")
+    check("ap-southeast-1.maas.aliyuncs.com" in line, "describe 保留地域 + 域名（排查要看）")
+    check("阿里云百炼·国际版" in line, "describe 带线路名")
+
+    q = endpoints.describe("qianwen", "ap-southeast-1",
+                           endpoints.default_base_url("qianwen"), "")
+    eq(q, "线路=千问云 host=maas.qianwenaiapi.com", "千问云线路的 describe")
+
+    # host 解析不出来时也绝不能把启动搞挂（日志本身不能成为故障源）
+    bad = endpoints.describe("bailian_intl", "ap-southeast-1", "没有 scheme 的串", "llm-x")
+    check("<host 解析失败>" in bad, "base_url 解析失败 → 降级占位串，不抛")
+
+
+# ---------------------------------------------------------------- main
+
+
+_FUNCS = [
+    test_qianwen_endpoints,
+    test_bailian_derivation,
+    test_all_regions,
+    test_missing_workspace_raises,
+    test_public_domain_no_placeholder,
+    test_normalize,
+    test_key_slots,
+    test_load_config_provider_region,
+    test_provider_host_mismatch_warn,
+    test_endpoint_override,
+    test_session_config_url,
+    test_engine_derives_endpoints,
+    test_stream_fallback_keeps_endpoint,
+    test_describe_masks_workspace,
+]
+
+
+def main() -> int:
+    print("test_endpoints:")
+    for fn in _FUNCS:
+        print(f"\n[{fn.__name__}]")
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            _CHECKS["n"] += 1
+            _CHECKS["bad"] += 1
+    print(f"\n共 {_CHECKS['n']} 项断言，失败 {_CHECKS['bad']} 项")
+    if _CHECKS["bad"]:
+        print("FAILED")
+        return 1
+    print("OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
