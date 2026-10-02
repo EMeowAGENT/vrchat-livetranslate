@@ -85,6 +85,77 @@ Sources are tried in the order below — **the first hit wins**:
 > Why: once a key lands in git history, deleting the file doesn't remove it — you'd have to rewrite history.
 > Better to stop it before commit.
 
+### For users outside mainland China: Alibaba Cloud Model Studio (International)
+
+**Why two lines**: the default "Qwen Cloud" line only serves mainland China — from abroad you cannot
+even open an account, and a direct connection is unreliable. Outside mainland China use
+**Alibaba Cloud Model Studio (International)** instead: the same models, the same realtime API — only
+the entry address and the account system differ. The two lines are **mutually exclusive**: exactly one
+of them is working at any moment, whichever you select in the app.
+
+**Three steps to sign up** (all inside the [Model Studio console](https://modelstudio.console.alibabacloud.com/)):
+
+1. Create a workspace (or just use the default one) and open it
+2. On its "Workspace Details" page, copy the **API Host prefix** — that leading part *is* the
+   **workspace ID**, e.g. `llm-xxxx`
+   (the full host looks like `llm-xxxx.ap-southeast-1.maas.aliyuncs.com`; take only the leading `llm-xxxx`)
+3. Create an API key (`sk-...`) **inside that same workspace**
+
+**Four steps in the app**:
+
+1. `⚙ Settings → General → Service Line` → select "Alibaba Cloud Model Studio (International)"
+2. Enter `llm-xxxx` in "Workspace ID" (on the Qwen Cloud line this box is greyed out — nothing to fill in)
+3. Select the "Region" your key belongs to
+4. Click "Save Line Settings", then paste your key into the "API key" box above and save it
+
+> 🔑 **The two keys are stored separately**: each line keeps its own key file
+> (`api_key.txt` / `api_key_bailian_intl.txt`), so switching back and forth **never** asks you to
+> re-enter a key. The status line "Current (line): source sk-****6789" follows the active line.
+> You must **start translation again** for a line change to take effect (if it is already running,
+> the app asks you to stop it first).
+
+**Region table**:
+
+| Region id | City |
+|---|---|
+| `ap-southeast-1` | Singapore (default) |
+| `ap-northeast-1` | Japan (Tokyo) |
+| `us-east-1` | US (Virginia) |
+| `eu-central-1` | Germany (Frankfurt) |
+| `cn-hongkong` | China (Hong Kong) |
+
+> ⚠️ **The key must match the region**: a key created in a workspace in one region only works in that
+> region. A wrong region shows up as "never connects / authentication failure" — check in the console
+> which region the key belongs to, then fix "Region" here.
+
+**The four corresponding `config.yaml` keys** (written in place when you click "Save Line Settings";
+no manual editing needed):
+
+```yaml
+session:
+  provider: qianwen          # line id: qianwen (Qwen Cloud) / bailian_intl (Model Studio International)
+  region: ap-southeast-1     # only meaningful for Model Studio (International)
+  workspace_id: ""           # workspace ID (llm-xxxx); leave empty on Qwen Cloud
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
+```
+
+After switching to Model Studio (International), `base_url` becomes the following (`{workspace_id}` is a
+**literal placeholder**, replaced only at connect time — so changing the workspace ID later does *not*
+mean editing this line):
+
+```yaml
+  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+```
+
+**`base_url` is the only source of truth for where it actually connects**; `provider` only decides the
+UI defaults, which key file is used, and the validation rules (Model Studio (International) **must**
+have a workspace ID — without one, saving is refused in red and "Start translation" is blocked and
+takes you to the settings page).
+
+> 🔍 **Troubleshooting**: in the log, `[net] 线路=… host=…` is the address actually in use (the workspace ID is masked),
+> and `[gui] 服务线路已保存：…` is what the UI wrote to disk. If the two disagree, you changed the line
+> but have not restarted translation yet.
+
 ## 4. Self-check
 
 **Exe users**: launch it and confirm three things —

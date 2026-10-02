@@ -90,6 +90,66 @@ python -m venv .venv
 > 手动全量检查：`python scripts/check_no_secrets.py --once`
 > 为什么需要：key 一旦进了 git 历史，删掉文件也清不掉，只能 rewrite 历史 —— 宁可在提交前拦。
 
+### 海外用户：阿里云百炼·国际版
+
+**为什么有两条线路**：默认的「千问云」只面向国内，海外网络既开不了号、直连也不稳。
+海外请改用**阿里云百炼·国际版（Alibaba Cloud Model Studio）**——同一套模型、同一个实时接口，
+只是入口地址和账号体系不同。两条线路**互斥**：同一时刻只有一条在工作，界面里选哪条就用哪条。
+
+**开通三步**（都在[百炼国际版控制台](https://modelstudio.console.alibabacloud.com/)里做）：
+
+1. 建一个业务空间（或直接用默认那个），进去
+2. 在「业务空间详情」页复制 **API Host 前缀** —— 这一截就是**业务空间 ID**，形如 `llm-xxxx`
+   （完整 Host 长这样：`llm-xxxx.ap-southeast-1.maas.aliyuncs.com`，只取开头的 `llm-xxxx`）
+3. 在**同一个业务空间**下建一个 API key（`sk-...`）
+
+**界面四步**：
+
+1. `⚙ 设置 → 常规 → 服务线路` 选「阿里云百炼·国际版」
+2. 「业务空间 ID」填 `llm-xxxx`（线路是千问云时这个框是灰的，不用填）
+3. 「地域」选你的 key 所属地域
+4. 点「保存线路设置」，再把 key 粘到本页上方的「API key」框里保存
+
+> 🔑 **key 分开存**：两条线路的 key 各存一个文件（`api_key.txt` / `api_key_bailian_intl.txt`），
+> 来回切线路**不用重填** key；界面里那行「当前（线路）：来源 sk-****6789」会跟着线路变。
+> 改完线路**要重新开始翻译**才生效（正在翻译时会提示你先停）。
+
+**地域表**：
+
+| 地域 id | 城市 |
+|---|---|
+| `ap-southeast-1` | Singapore（默认） |
+| `ap-northeast-1` | Japan (Tokyo) |
+| `us-east-1` | US (Virginia) |
+| `eu-central-1` | Germany (Frankfurt) |
+| `cn-hongkong` | China (Hong Kong) |
+
+> ⚠️ **key 必须与地域一致**：key 是在哪个地域的业务空间里建的，就只能连那个地域。
+> 地域选错的表现是一直连不上/鉴权失败 —— 先回控制台确认 key 属于哪个地域，再改这里的「地域」。
+
+**对应的 `config.yaml` 四个键**（界面点「保存线路设置」时自动就地写入，不用手改）：
+
+```yaml
+session:
+  provider: qianwen          # 线路 id：qianwen（千问云）/ bailian_intl（百炼国际版）
+  region: ap-southeast-1     # 只对百炼国际版有意义
+  workspace_id: ""           # 业务空间 ID（llm-xxxx）；千问云留空
+  base_url: wss://maas.qianwenaiapi.com/api-ws/v1/realtime
+```
+
+切到百炼国际版后 `base_url` 会变成下面这样（**`{workspace_id}` 是字面占位符**，连接时才替换成你填的值，
+所以日后改业务空间 ID 不必回头改这一行）：
+
+```yaml
+  base_url: wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
+```
+
+**`base_url` 才是「实际连哪」的唯一依据**；`provider` 只决定界面默认值、key 存哪个文件、以及校验规则
+（百炼国际版**必须**有业务空间 ID —— 没填时界面会红字拒绝保存，点「开始翻译」也会被拦下并自动跳到设置页）。
+
+> 🔍 **排障**：日志里 `[net] 线路=… host=…` 就是当前实际连的地址（业务空间 ID 已打码），
+> `[gui] 服务线路已保存：…` 是界面写盘的结果。两行对不上 → 说明改完还没重新开始翻译。
+
 ## 四、自检
 
 **用 exe 的**：双击打开界面，确认三件事——
