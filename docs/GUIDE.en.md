@@ -498,7 +498,7 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    59 files, 472 test functions (all run offline; CI runs them file by
+tests/                    59 files, 469 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -549,7 +549,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
   ```
 
 ---

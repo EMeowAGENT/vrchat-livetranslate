@@ -597,7 +597,7 @@ vlt/
 
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
-tests/                    59 个文件、472 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    59 个文件、469 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -648,7 +648,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.7.4 "same_name_fallbacks,pa_index,region_supported,已回落"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
   ```
 
 ---
