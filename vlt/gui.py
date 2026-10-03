@@ -2310,14 +2310,53 @@ class TranslationGUI:
         # ---- 赞助者 ----
         # 名字**不翻译**（专有名词，各语言界面都原样显示）；名单见模块顶部的 SPONSORS。
         # 空名单时整区不出现：留一个没有内容的「赞助者」标题比不显示更难看。
-        self._sponsor_names_label = None
+        # 每个名字一个名单项控件 → 名字所在的 Label 列表挂在 self._sponsor_names_widgets，
+        # tests/test_i18n.py 的语言守卫按这些控件路径排除名字（绝不按文本内容排除）。
+        self._sponsor_names_widgets: list[tk.Label] = []
         if SPONSORS:
             ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-            ttk.Label(body, text=t("赞助者"), style="Section.TLabel").pack(anchor=tk.W)
-            self._sponsor_names_label = ttk.Label(
-                body, text=t("感谢这些朋友的支持：{names}", names=" · ".join(SPONSORS)),
-                style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
-            self._sponsor_names_label.pack(anchor=tk.W, pady=(6, 0))
+            # 标题带个心形，与上面的「开发者」区做轻重区分；心形只出现在这里，
+            # 名单项里不再重复（评审 2026-10-03：同一符号出现两遍显得杂）。
+            ttk.Label(body, text=f"❤ {t('赞助者')}", style="Section.TLabel").pack(anchor=tk.W)
+            ttk.Label(body, text=t("感谢每一位朋友的支持"),
+                      style="Muted.TLabel", justify=tk.LEFT,
+                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+            flow = ttk.Frame(body)
+            flow.pack(fill=tk.X, pady=(10, 0))
+            self._build_sponsor_list(flow)
+
+    def _build_sponsor_list(self, flow: ttk.Frame) -> None:
+        """把赞助者名字排成自动换行的**亮字名单**：加粗 + 亮色，**不加底块也不加描边**。
+
+        为什么不是"实心方块"：本界面的按钮就是实心矩形（`SURFACE` / `SURFACE_HOVER` 底 +
+        无描边），给名字加同样的实心底块会和真按钮撞脸（四轮视觉评审都提到"像按钮"）。
+        为什么不是 1px 描边的名牌：那种"幽灵按钮"同样是按钮的视觉语言（评审第 5 轮原话）。
+        为什么不是纯灰字：那样名字会被当成页脚脚注（用户最初的反馈）。
+        ⇒ 只靠**加粗 + 亮色**（`COLOR_SRC_MINE`）把名字托出来 —— 这是本页其他正文都没有的待遇，
+        既显眼又不带任何"可点击"暗示，和「关于」页的纯文字排版也统一。
+
+        为什么手排而不用 pack/grid：pack 不换行、grid 要预先知道列数，而名单个数不定（1～20+）。
+        这里用字体实测宽度做流式布局：一行排不下就开新行，行宽上限 = 设置页内容宽
+        （`SETTINGS_WRAP`），窗口尺寸逻辑不用动（页变高有设置页滚动兜底）。
+        心形符号只在「❤ 赞助者」标题出现一次，名单里不重复。
+        带名字文本的 Label 挂进 `self._sponsor_names_widgets`（属性名是 i18n 守卫的契约，不改）。
+        """
+        font = tkfont.Font(font=FONT_BOLD_MD)
+        gap_x, gap_y = 16, 6
+        row = ttk.Frame(flow)
+        row.pack(anchor=tk.W)
+        used = 0
+        for name in SPONSORS:
+            need = font.measure(name)
+            if used and used + gap_x + need > SETTINGS_WRAP:      # 本行排不下 → 开新行
+                row = ttk.Frame(flow)
+                row.pack(anchor=tk.W, pady=(gap_y, 0))
+                used = 0
+            item = tk.Label(row, text=name, font=FONT_BOLD_MD,
+                            fg=COLOR_SRC_MINE, bg=PANEL)
+            item.pack(side=tk.LEFT, padx=(0 if used == 0 else gap_x, 0))
+            used += (0 if used == 0 else gap_x) + need
+            self._sponsor_names_widgets.append(item)
 
     def _log_dir(self) -> Path:
         from .crashlog import _LOG_PATH      # noqa: SLF001  （跟着实际日志走）
