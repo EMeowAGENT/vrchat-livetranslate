@@ -2316,13 +2316,10 @@ class TranslationGUI:
         if SPONSORS:
             ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
             # 标题带个心形，与上面的「开发者」区做轻重区分；心形只出现在这里，
-            # 名单项里不再重复（评审 2026-10-03：同一符号出现两遍显得杂）。
+            # 名单里不重复（评审 2026-10-03：同一符号出现两遍显得杂）。
             ttk.Label(body, text=f"❤ {t('赞助者')}", style="Section.TLabel").pack(anchor=tk.W)
-            ttk.Label(body, text=t("感谢每一位朋友的支持"),
-                      style="Muted.TLabel", justify=tk.LEFT,
-                      wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
             flow = ttk.Frame(body)
-            flow.pack(fill=tk.X, pady=(10, 0))
+            flow.pack(fill=tk.X, pady=(8, 0))
             self._build_sponsor_list(flow)
 
     def _build_sponsor_list(self, flow: ttk.Frame) -> None:

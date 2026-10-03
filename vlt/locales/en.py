@@ -214,7 +214,6 @@ STRINGS: dict[str, str] = {
     "开发者": "Developer",
     "由可爱的赛博巫师和他的朋友们 开发": "Made by the lovely Cyber Wizard and friends",
     "赞助者": "Sponsors",
-    "感谢每一位朋友的支持": "Thanks to each and every friend for the support",
     "软件更新": "Software Update",
     "检查更新": "Check for Updates",
     "当前版本 v{ver} · 启动时会自动检查一次":
