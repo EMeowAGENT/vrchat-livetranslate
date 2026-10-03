@@ -59,6 +59,21 @@ def _port_line(t: str) -> str | None:
     return None
 
 
+def _port_value(line: str | None) -> str | None:
+    """从 port 行里取「键: 值」部分（**忽略行尾注释** —— 模板里的 port 行就有注释，
+    CI 上 config.yaml 是由模板生成的，拿整行做等值比较会假红，本文件第一版就踩了）。"""
+    if line is None:
+        return None
+    return line.split("#", 1)[0].strip()
+
+
+def _port_comment(line: str | None) -> str | None:
+    """port 行尾注释（没有则 None）。"""
+    if line is None or "#" not in line:
+        return None
+    return line.split("#", 1)[1].strip()
+
+
 def _prepare() -> str:
     """确保有 config.yaml（CI / 新克隆上没有 → 照程序规矩从模板生成），返回原文。"""
     if not CONFIG.exists():
@@ -85,6 +100,7 @@ def _destroy(gui) -> None:  # noqa: ANN001
 def test_backfill_and_save_keeps_comments() -> None:
     before = _prepare()
     n_before = _n_comments(before)
+    comment_before = _port_comment(_port_line(before))
     gui = None
     try:
         gui = _make_gui()
@@ -95,7 +111,11 @@ def test_backfill_and_save_keeps_comments() -> None:
         gui._osc_port_var.set("9001")
         gui._on_save_osc_port()
         after = CONFIG.read_text(encoding="utf-8")
-        assert _port_line(after) == "  port: 9001", f"没写对：{_port_line(after)!r}"
+        assert _port_value(_port_line(after)) == "port: 9001", \
+            f"没写对：{_port_line(after)!r}"
+        # 模板里的 port 行本来就带行尾注释 → 写入后必须还在（就地写不许把它抹掉）
+        if comment_before:
+            assert _port_comment(_port_line(after)) == comment_before, "同行注释被抹掉"
         assert _n_comments(after) == n_before, "注释被破坏"
         # 3) 内存同步（否则本轮「开始翻译」还用旧端口）
         assert gui._cfg.chatbox["port"] == 9001, "内存没同步"
@@ -141,7 +161,8 @@ def test_missing_chatbox_section_recreated() -> None:
         gui._on_save_osc_port()
         after = CONFIG.read_text(encoding="utf-8")
         assert "chatbox:" in after, "没补建 chatbox 段"
-        assert _port_line(after) == "  port: 9010", f"补建后没写对：{_port_line(after)!r}"
+        assert _port_value(_port_line(after)) == "port: 9010", \
+            f"补建后没写对：{_port_line(after)!r}"
     finally:
         CONFIG.write_text(before, encoding="utf-8")
         if gui is not None:
