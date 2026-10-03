@@ -197,6 +197,49 @@ def test_no_duplicate_popup() -> None:
         _destroy(gui)
 
 
+def test_about_sponsors_listed() -> None:
+    """⑥ 「设置 → 关于」页里有赞助者名单；空名单时整区不出现（不留空标题）。
+
+    为什么单钉：名单是**数据**（`gui.SPONSORS`），界面只负责渲染。改名单时最容易犯的错是
+    「改了常量、界面那行还写着旧名字」，或者空名单时留下一个光秃秃的「赞助者」标题。
+    断言直接拿常量比，不抄死名字。
+    """
+    import tkinter as tk
+    import tkinter.ttk as ttk
+
+    import vlt.gui as gui_mod
+
+    gui = _make_gui()
+    try:
+        names = gui_mod.SPONSORS
+        assert names, "SPONSORS 为空 —— 这个用例的前提就是名单非空"
+        label = gui._sponsor_names_label
+        assert label is not None, "关于页没有渲染赞助者名单标签"
+        text = str(label.cget("text"))
+        assert " · ".join(names) in text, f"名字没按 SPONSORS 的顺序出现在文案里：{text!r}"
+        # 名字是**专有名词**：不进词表，中文界面下就是原样（`test_i18n` 的语言守卫按控件排除它）
+        for n in names:
+            assert n in text, f"名单里少了 {n!r}：{text!r}"
+        print(f"  ✓ 关于页赞助者名单：{text}")
+
+        # 空名单 → 整区不出现（不留一个没有内容的标题）
+        orig = gui_mod.SPONSORS
+        frame = ttk.Frame(gui._root)
+        try:
+            gui_mod.SPONSORS = ()
+            gui._build_settings_about(frame)
+            assert gui._sponsor_names_label is None, "空名单时不该渲染名字标签"
+            texts = [str(w.cget("text")) for w in frame.winfo_children()
+                     if "text" in w.keys()]
+            assert not any("赞助者" in x for x in texts), f"空名单却留了标题：{texts}"
+            print("  ✓ 空名单时不显示这一区（无空标题）")
+        finally:
+            gui_mod.SPONSORS = orig
+            frame.destroy()
+    finally:
+        _destroy(gui)
+
+
 def main() -> int:
     tests = [
         test_sponsor_button_exists,
@@ -204,6 +247,7 @@ def main() -> int:
         test_kofi_button_calls_webbrowser,
         test_missing_qr_images_degrade,
         test_no_duplicate_popup,
+        test_about_sponsors_listed,
     ]
     print("赞助弹窗验收：")
     failed = 0

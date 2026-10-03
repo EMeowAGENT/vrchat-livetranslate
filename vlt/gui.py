@@ -171,6 +171,12 @@ COLOR_SRC_THEIRS = TEXT_DIM
 SPONSOR_URL = "https://ko-fi.com/kcmnixi"
 SPONSOR_QR_SIZE = 240          # 收款码等比缩放的目标边长（严禁拉伸：拉变形就扫不出来）
 
+# ---- 赞助者名单（「设置 → 关于」页里展示）----
+# 只是**名字**：专有名词，**不进词表、不翻译** —— 界面语言换成英/日/韩/俄时也照原样显示
+# （`tests/test_i18n.py` 的语言守卫按**控件**显式排除这一行，见那里的说明）。
+# 加人 = 往元组末尾追加一项（顺序即展示顺序）；留空元组 = 整区不显示（宁可没有，也不留空标题）。
+SPONSORS: tuple[str, ...] = ("小夜",)
+
 # ---- 千问云开通页（未配置 API key 时，状态按钮点击跳转）----
 # 链接逐字符照抄，不做任何 URL 解码/重组。
 # ⚠️ 这个常量**必须原样保留**：tests/test_api_key_gui.py 直接断言它的值，
@@ -2300,6 +2306,18 @@ class TranslationGUI:
         ttk.Label(body, text=t("由可爱的赛博巫师和他的朋友们 开发"),
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+
+        # ---- 赞助者 ----
+        # 名字**不翻译**（专有名词，各语言界面都原样显示）；名单见模块顶部的 SPONSORS。
+        # 空名单时整区不出现：留一个没有内容的「赞助者」标题比不显示更难看。
+        self._sponsor_names_label = None
+        if SPONSORS:
+            ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+            ttk.Label(body, text=t("赞助者"), style="Section.TLabel").pack(anchor=tk.W)
+            self._sponsor_names_label = ttk.Label(
+                body, text=t("感谢这些朋友的支持：{names}", names=" · ".join(SPONSORS)),
+                style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+            self._sponsor_names_label.pack(anchor=tk.W, pady=(6, 0))
 
     def _log_dir(self) -> Path:
         from .crashlog import _LOG_PATH      # noqa: SLF001  （跟着实际日志走）

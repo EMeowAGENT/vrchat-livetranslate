@@ -213,6 +213,8 @@ STRINGS: dict[str, str] = {
     "所有文件": "All Files",
     "开发者": "Developer",
     "由可爱的赛博巫师和他的朋友们 开发": "Made by the lovely Cyber Wizard and friends",
+    "赞助者": "Sponsors",
+    "感谢这些朋友的支持：{names}": "Thanks to these friends for their support: {names}",
     "软件更新": "Software Update",
     "检查更新": "Check for Updates",
     "当前版本 v{ver} · 启动时会自动检查一次":
