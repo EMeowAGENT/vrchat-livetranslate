@@ -13,12 +13,10 @@ import queue
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter as tk
 import webbrowser
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tkinter import font as tkfont
@@ -78,7 +76,6 @@ from . import ui_tk
 from .glossary_text import (
     _glossary_line_issues,
     _glossary_to_lines,
-    _iter_glossary_lines,
     _parse_glossary_lines,
 )
 from .ui_text import (
@@ -88,8 +85,6 @@ from .ui_text import (
     VOICE_PREVIEW_TEXT,
     _Bubble,
     _DownloadCancelled,
-    _ROOM_SECTION_TEMPLATE,
-    _UNSUPPORTED_VOICE_MARKERS,
     _dir_writable,
     _is_unsupported_voice_err,
     _lang_key,
@@ -100,12 +95,10 @@ from .ui_text import (
     _source_name,
     _sponsor_qr_specs,
     _target_name,
-    _yaml_quote,
     updater_env,
 )
 from .ui_theme import (
     ACCENT,
-    ACCENT_ACTIVE,
     ACCENT_HOVER,
     BG,
     BORDER,
@@ -119,9 +112,6 @@ from .ui_theme import (
     COLOR_TEXT,
     COLOR_THEIRS,
     COLOR_WARN,
-    DANGER,
-    DANGER_ACTIVE,
-    DANGER_HOVER,
     FONT_MAX,
     FONT_MIN,
     MAX_BUBBLES,
@@ -130,7 +120,9 @@ from .ui_theme import (
     PANEL_H_MIN,
     PANEL_W_MAX,
     PANEL_W_MIN,
-    QIANWEN_SIGNUP_URL,
+    # 显式重导出（`X as X` 是 ruff 认可的写法）：`tests/test_api_key_gui.py` 会
+    # `from vlt.gui import QIANWEN_SIGNUP_URL`，所以这个名字必须留在 vlt.gui 的命名空间里。
+    QIANWEN_SIGNUP_URL as QIANWEN_SIGNUP_URL,
     SETTINGS_CHROME_H,
     SETTINGS_MAX_H,
     SETTINGS_MIN_H,
@@ -154,7 +146,6 @@ from .ui_tk import (
     _int_fmt,
     apply_theme,
     combo_values,
-    resolve_ui_family,
     round_rect,
 )
 from .ui_state import (
