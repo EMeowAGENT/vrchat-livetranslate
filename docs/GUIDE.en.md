@@ -190,7 +190,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **Language mirroring**: one pair covers both directions — pick "Chinese → English" and the others-speak direction automatically becomes "English → Chinese".
   Source language can be `Auto-detect` / Chinese / English / Japanese / Korean / French / German / Spanish / Russian / Thai (the target list is the same minus "Auto-detect");
   with `Auto-detect` as source, the other direction's target falls back to Chinese and the status bar says so. Changes **take effect immediately**, are written back to config, and persist across launches
-- **Settings dialog** (`⚙ Settings`): API key entry / clearing, three audio device dropdowns + `Refresh`, log area (`Export log bundle…`)
+- **Settings dialog** (`⚙ Settings`): API key entry / clearing, VRChat OSC port, three audio device dropdowns + `Refresh`, log area (`Export log bundle…`)
 - **Fine-tune panel** (`Fine-tune ▸`): wrist-display anchor + 14 sliders, **drag to hot-reload, no restart needed** (see "6. Configuration")
 - **Typing input**: use the keyboard instead of the microphone when you don't want to talk — type in the bottom bar, **Enter sends**. The translation goes through the **exact same** downstream as speech (chat bubbles / wrist display / chatbox); with "Audio output" ticked **it also speaks**: the translation is synthesized via TTS and written into the virtual sound card so the other person hears it (see `text_input.tts` in "6. Configuration"). It replaces the **microphone**, so it's only available when the direction includes "I speak" (the box is greyed out otherwise)
 
@@ -501,7 +501,8 @@ vlt/
 
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    59 files, 469 test functions (all run offline; CI runs them file by
+                          + run_tests.py (test runner) + verify/ (on-device acceptance scripts, need a real desktop/hardware — not run in CI)
+tests/                    64 files, 492 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -530,6 +531,20 @@ reconnect, log rotation and sanitization, the sponsor popup, wrist-display self-
 The only exception is `tests/test_engine.py`: it opens one real session and **requires a configured API key on the machine**;
 CI skips it explicitly (the workflow prints a `::notice::` explaining why — no silent skip).
 
+To run everything with one command (coverage summary included), the repo's bundled runner works too:
+
+```bat
+.venv\Scripts\python.exe scripts\run_tests.py             :: runs every file, auto-skipping test_engine.py
+.venv\Scripts\python.exe scripts\run_tests.py --coverage  :: also prints a coverage summary (no threshold)
+.venv\Scripts\python.exe scripts\run_tests.py --only i18n  :: only run tests whose name contains i18n
+```
+
+After changing code, run the static check too (a **blocking** gate in CI):
+
+```bat
+.venv\Scripts\python.exe -m ruff check --select F,E9 .
+```
+
 ### Packaging
 
 ```bat
@@ -544,7 +559,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
 ### CI / Release
 
 - **CI** (`.github/workflows/ci.yml`, on push to main / PR / manual):
-  syntax check → credential scan → all offline tests file by file → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
+  syntax check → static check (ruff `F,E9` tier, blocking) → credential scan → all offline tests file by file (coverage accumulated along the way, summary printed at the end, no threshold, non-blocking) → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
 - **Release** (`.github/workflows/release.yml`, triggered by pushing a `v*` tag):
   first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages the **exe and the Linux AppImage** →
   creates the Release with the **exe**, **`VRChatLiveTranslate-x86_64.AppImage`** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
@@ -552,7 +567,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
   ```
 
 ---

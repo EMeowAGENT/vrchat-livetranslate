@@ -186,7 +186,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **언어 미러링**: 하나의 쌍으로 양방향을 모두 커버합니다. "중국어 → 영어"를 고르면 상대 방향은 자동으로 "영어 → 중국어"가 됩니다.
   원문 언어는 `자동 감지` / 중국어 / 영어 / 일본어 / 한국어 / 프랑스어 / 독일어 / 스페인어 / 러시아어 / 태국어 중에서 고를 수 있습니다(번역문 쪽은 같은 표에서 "자동 감지"만 뺀 것입니다).
   원문에서 `자동 감지` 를 고르면 상대 방향의 번역문은 중국어로 폴백되고 상태 표시줄에 그 사실이 표시됩니다. 변경은 **즉시 적용**되고 설정 파일에 기록되어 다음 실행에도 유지됩니다
-- **설정 창**(`⚙ 설정`): API key 입력 / 삭제, 오디오 장치 드롭다운 3개와 `다시 검색`, 로그 영역(`로그를 ZIP으로 내보내기…`)
+- **설정 창**(`⚙ 설정`): API key 입력 / 삭제, VRChat OSC 포트, 오디오 장치 드롭다운 3개와 `다시 검색`, 로그 영역(`로그를 ZIP으로 내보내기…`)
 - **미세 조정 패널**(`미세 조정 ▸`): 손목 오버레이 앵커와 슬라이더 14개. **끌면 바로 반영되고 재시작이 필요 없습니다** ("6. 설정" 참고)
 - **텍스트 입력**: 말하기 싫을 때 키보드로 대신합니다. 하단 줄에 입력하고 **Enter로 전송**. 번역문은 음성 경로와 **완전히 같은** 하류(채팅 말풍선 / 손목 오버레이 / chatbox)를 지납니다. "번역 음성 출력"이 켜져 있으면 **읽어 주기도 하며**, 번역문을 TTS로 합성해 가상 사운드카드에 넣으므로 상대방도 듣습니다("6. 설정"의 `text_input.tts` 참고). 이것은 **마이크를 대체**하므로 방향에 "나"가 포함될 때만 쓸 수 있습니다(아니면 입력칸이 회색으로 비활성화됩니다)
 
@@ -477,7 +477,8 @@ vlt/
 
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
-tests/                    59개 파일, 469개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+                          + run_tests.py(테스트 실행기) + verify/(실기 검수 스크립트. 실제 데스크톱/하드웨어 필요, CI에서는 실행되지 않음)
+tests/                    64개 파일, 492개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -507,6 +508,20 @@ for %t in (tests\test_*.py) do @.venv\Scripts\python.exe %t
 유일한 예외는 `tests/test_engine.py` 로, 실제 세션을 하나 열기 때문에 **그 PC에 설정된 API key가 필요**합니다.
 CI에서는 명시적으로 건너뜁니다(워크플로가 이유를 `::notice::` 로 출력합니다 — 조용히 건너뛰지 않습니다).
 
+한 줄 명령으로 전부 돌리고 싶다면(덤으로 커버리지까지) 저장소에 딸린 실행기를 써도 됩니다:
+
+```bat
+.venv\Scripts\python.exe scripts\run_tests.py             :: 파일 단위로 실행, test_engine.py 는 자동으로 건너뜀
+.venv\Scripts\python.exe scripts\run_tests.py --coverage  :: 커버리지 요약을 추가로 출력(임계값 없음)
+.venv\Scripts\python.exe scripts\run_tests.py --only i18n  :: 이름에 i18n 이 들어간 테스트만 실행
+```
+
+코드를 고쳤으면 정적 검사도 한 번 돌려 주세요(CI에서는 **차단** 게이트입니다):
+
+```bat
+.venv\Scripts\python.exe -m ruff check --select F,E9 .
+```
+
 ### 패키징
 
 ```bat
@@ -521,7 +536,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
 ### CI / 릴리스
 
 - **CI**(`.github/workflows/ci.yml`, main 푸시 / PR / 수동):
-  구문 검사 → 자격 증명 스캔 → 오프라인 테스트 전체 파일 단위 실행 → 이어서 별도의 **패키징 파이프라인** 검사(산출물 존재 및 20MB 이상)
+  구문 검사 → **정적 검사(ruff 의 `F,E9` 등급, 차단)** → 자격 증명 스캔 → 오프라인 테스트 전체 파일 단위 실행(덤으로 커버리지를 누적해 끝에 요약을 출력, 임계값 없음·차단 없음) → 이어서 별도의 **패키징 파이프라인** 검사(산출물 존재 및 20MB 이상)
 - **릴리스**(`.github/workflows/release.yml`, `v*` 태그 푸시로 시작):
   먼저 태그와 `vlt/__init__.py` 의 `__version__` 을 대조(불일치면 즉시 실패) → **exe 와 Linux AppImage** 패키징 →
   **exe**, **`VRChatLiveTranslate-x86_64.AppImage`**, `SHA256SUMS.txt` 세 가지를 첨부한 Release 생성(체크섬은 GitHub가 첨부 파일 옆에 `sha256:…` 로 표시합니다. 이 파일은 **v0.2.0 이하 클라이언트**를 위한 과도기 조치로, 이 클라이언트들은 이 첨부만 인식하므로 없으면 조용히 업데이트를 찾지 못합니다)
@@ -529,7 +544,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
   ```
 
 ---

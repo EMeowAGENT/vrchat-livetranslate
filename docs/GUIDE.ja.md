@@ -187,7 +187,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 - **言語のミラーリング**：1 つのペアで両方向をカバーします。「中国語 → 英語」を選べば、相手の発話方向は自動的に「英語 → 中国語」になります。
   原文側は `自動検出` / 中国語 / 英語 / 日本語 / 韓国語 / フランス語 / ドイツ語 / スペイン語 / ロシア語 / タイ語から選べます（訳文側は同じ表から「自動検出」を除いたもの）。
   原文側で `自動検出` を選ぶと、相手方向の訳文は中国語にフォールバックし、その旨がステータスバーに出ます。変更は**即時反映**され、設定に書き戻されて次回起動時も保持されます
-- **設定ダイアログ**（`⚙ 設定`）：API key の登録／削除、3 つのオーディオデバイスドロップダウンと `再スキャン`、ログ欄（`ログを ZIP でエクスポート…`）
+- **設定ダイアログ**（`⚙ 設定`）：API key の登録／削除、VRChat OSC ポート、3 つのオーディオデバイスドロップダウンと `再スキャン`、ログ欄（`ログを ZIP でエクスポート…`）
 - **微調整パネル**（`微調整 ▸`）：手首オーバーレイのアンカーと 14 個のスライダー。**ドラッグで即時反映、再起動不要**（「6. 設定」参照）
 - **テキスト入力**：話したくないときにキーボードで代用します。下部バーに入力して **Enter で送信**。訳文は音声経路と**まったく同じ**下流（チャット吹き出し／手首オーバーレイ／chatbox）を通ります。「翻訳音声を出力」をオンにすると**読み上げも行い**、訳文を TTS で合成して仮想サウンドカードへ書き込むので相手にも聞こえます（「6. 設定」の `text_input.tts` 参照）。これは**マイクの代替**なので、方向に「自分」が含まれるときだけ使えます（含まれないときは入力欄がグレーアウトします）
 
@@ -492,7 +492,8 @@ vlt/
 
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
-tests/                    59 ファイル・469 のテスト関数（オフラインで実行可、CI はファイル単位で
+                          + run_tests.py（テスト実行器）+ verify/（実機検収スクリプト。実デスクトップ/実ハードが必要、CI では走らない）
+tests/                    64 ファイル・492 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -522,6 +523,20 @@ for %t in (tests\test_*.py) do @.venv\Scripts\python.exe %t
 唯一の例外は `tests/test_engine.py` で、実際のセッションを 1 つ開くため**そのマシンに設定済みの API key が必要**です。
 CI では明示的にスキップされます（ワークフローが理由を `::notice::` で出力します — 黙ってスキップはしません）。
 
+1 コマンドでまとめて実行したい（ついでにカバレッジも出したい）ときは、リポジトリ同梱のランナーも使えます：
+
+```bat
+.venv\Scripts\python.exe scripts\run_tests.py             :: ファイル単位で実行、test_engine.py は自動でスキップ
+.venv\Scripts\python.exe scripts\run_tests.py --coverage  :: カバレッジの要約も出力（しきい値は設けない）
+.venv\Scripts\python.exe scripts\run_tests.py --only i18n  :: 名前に i18n を含むテストだけ実行
+```
+
+コードを変更したら、ついでに静的チェックも 1 回実行してください（CI では**ブロッキング**のゲートです）：
+
+```bat
+.venv\Scripts\python.exe -m ruff check --select F,E9 .
+```
+
 ### パッケージング
 
 ```bat
@@ -536,7 +551,7 @@ build_exe.bat                                              :: ビルド + その
 ### CI / リリース
 
 - **CI**（`.github/workflows/ci.yml`、main への push / PR / 手動）：
-  構文チェック → 認証情報スキャン → オフラインテストをファイル単位で全実行 → さらに別途**パッケージング工程**の確認（成果物が存在し 20 MB 以上）
+  構文チェック → **静的チェック（ruff の `F,E9`、ブロッキング）** → 認証情報スキャン → オフラインテストをファイル単位で全実行（ついでにカバレッジを累積し、末尾に要約を出力。**しきい値なし・非ブロッキング**）→ さらに別途**パッケージング工程**の確認（成果物が存在し 20 MB 以上）
 - **リリース**（`.github/workflows/release.yml`、`v*` タグの push で起動）：
   まずタグと `vlt/__init__.py` の `__version__` を突き合わせ（不一致なら即失敗）→ **exe と Linux の AppImage** をパッケージ →
   **exe**、**`VRChatLiveTranslate-x86_64.AppImage`**、`SHA256SUMS.txt` を添付した Release を作成（チェックサムは GitHub が添付の横に `sha256:…` として表示します。このファイルは v0.2.0 以前のクライアント向けの移行措置です）
@@ -544,7 +559,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
   ```
 
 ---

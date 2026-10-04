@@ -1,21 +1,20 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.8.0 "qwencloud,千问云·海外版,小夜"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.8.0）**：本版把海外线路从「阿里云百炼·国际版」整体换成
-「千问云·海外版（Qwen Cloud）」，并给「关于」页加了赞助者名单，每个改动各取一个串做 needle ——
-  ① 新线路标识：`qwencloud`（`vlt/endpoints.py` 的线路表 + `config.py` 的迁移分支 + `gui.py`）；
-  ② 新线路中文名：`千问云·海外版`（`vlt/endpoints.py` 的 `describe()`）；
-  ③ 赞助者名单：`小夜`（`vlt/gui.py` 的 `SPONSORS`）。
-改动全在**共享代码**（`vlt/endpoints.py` + `vlt/config.py` + `vlt/session/base.py` + `vlt/engine.py`
-+ `vlt/gui.py` + 四套词表 + 五份 GUIDE），Windows 产物与 AppImage 用的是同一份 —— 所以 exe 那几项
-（尤其 needle）就是本版改动的直接证据；AppImage 侧仍按惯例核附件与体积。
+⚠️ **功能型发布（v0.9.0）**：本版三处改动各取一个**新增符号名**做 needle
+（修复/重构型改动往往没有新文案，符号名比文案可靠）——
+  ① OSC 端口可在界面里改：`_on_save_osc_port`（`vlt/gui.py`）；
+  ② 快封句判据换成电平信号：`user_quiet_s`（`vlt/session/base.py` + `vlt/engine.py`）；
+  ③ `gui.py` 纯逻辑抽成独立模块：`ui_tk`（新模块 `vlt/ui_tk.py`）。
+这三个符号在 **v0.8.0 的代码里都不存在**（上面已逐一核对），所以命中即证明新代码真进了产物。
 
-⚠️ **旧线路的名字照样能在包里搜到**（`config.py` 里留着迁移提示文案），所以别拿「旧名字不在包里」
-当验证；要证明新代码进包，只认上面这些**新增**串。
+⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（`win.py` 的 `_SM_CXSCREEN`
+在 v0.8.0 里**就有**这个名字，只是从没被用对过），这类改动没有新增字符串可搜 ——
+它的证据是行为（`screen_work_area()` 真机返回值）与本次改动清单，不是 needle。
 
 复核项：
   1. 附件下载（只认 exe）
