@@ -102,7 +102,6 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         self._buf: list[str] = []          # 本段已确认文本的增量累加
         self._src_buf: list[str] = []
         self._last_text_at: float = 0.0    # 最近一次文本增量时间（静默兜底用）
-        self._last_audio_at: float = 0.0   # 最近一次**上送音频**时刻（快封句的「麦克风静音」依据）
         self._last_final_text = ""         # 最近一次已发出的最终版文本（允许再次终结）
         self._budget = ConnectionBudget(cfg.max_new_sessions_per_minute)
         # 延迟埋点
@@ -162,9 +161,6 @@ class QwenLiveTranslateSession(LiveTranslateSession):
     async def send_audio(self, pcm16_16k: bytes) -> None:
         if self._ws is None:
             raise RuntimeError("会话尚未 start()")
-        # 快封句的「麦克风静音」依据：注意引擎的 _SilenceGate 静音时**只暂停上送**，
-        # 所以「距上次上送的间隔」就是用户真实的停顿长度。
-        self._last_audio_at = time.perf_counter()
         await self._ws.send(json.dumps({
             "event_id": "evt_audio",
             "type": "input_audio_buffer.append",
@@ -425,8 +421,8 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         注意三点（都是实测踩出来的）：
         1) 慢阈值必须大于服务端的增量间隔（实测最大 2.3s），否则会在句子中间抢跑；
         2) **不能一发就永久封死**——长句后续还会有增量，文本变了就应再次终结；
-        3) 那 2.3s 的大间隔是**句子中间**的停顿 → 快路径必须有「麦克风已静」这一条，
-           否则照样会抢跑。
+        3) 那 2.3s 的大间隔是**句子中间**的停顿 → 快路径必须有「上游已无人在说话」这一条
+           （`note_voice()` 上报的电平信号），否则照样会抢跑。
         """
         if self._closing or not self._buf:
             return
@@ -437,11 +433,13 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             return
         now = time.perf_counter()
         text_quiet = now - self._last_text_at
-        mic_quiet = (now - self._last_audio_at) if self._last_audio_at else None
-        if should_finalize(text_quiet_s=text_quiet, mic_quiet_s=mic_quiet,
+        # 「上游还有没有人在说话」由 _SessionProxy 按**电平**上报（note_voice()）——
+        # 不能用「距上次上送音频的间隔」：麦克风腿没有闸门，静音块照样每 ~0.1s 上送一次。
+        user_quiet = self.user_quiet_s(now)
+        if should_finalize(text_quiet_s=text_quiet, user_quiet_s=user_quiet,
                            silence_s=self.cfg.final_silence_s,
                            fast_silence_s=self.cfg.fast_final_silence_s,
-                           fast_mic_quiet_s=self.cfg.fast_final_mic_quiet_s):
+                           fast_user_quiet_s=self.cfg.fast_final_user_quiet_s):
             self._emit(confirmed=cur, pending="", is_final=True)
 
     def _map_text_event(self, etype: str, ev: dict) -> tuple[str, str, str | None] | None:
