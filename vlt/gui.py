@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
+from typing import Any
 
 import yaml
 
@@ -39,7 +40,6 @@ from .config_io import (
 from .i18n import t
 from .output.overlay import OverlayConfig, resolve_offset
 from .devices import (
-    DeviceInfo,
     enumerate_audio_out_devices,
     enumerate_loopback_devices,
     enumerate_mic_devices,
