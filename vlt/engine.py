@@ -1438,7 +1438,7 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
     print("[mic] 开始采集" + ("（Ctrl+C 结束）" if seconds <= 0 else f"（{seconds:.0f}s）"))
     await _pump_capture(session, tele, seconds, stop_event, "mic",
                         lambda: platform.capture_backend().open_mic(
-                            dev_name, rate=16000, channels=1,
+                            dev_name, rate=16000, channels=None,
                             blocksize=CHUNK_BYTES // 2))
     print("[mic] 采集结束")
 
@@ -1446,8 +1446,8 @@ async def run_mic(session, tele, seconds: float = 0.0, device_pattern: str | Non
 def _resolve_mic_name(device_name: str | None, device_pattern: str | None) -> str | None:
     """把用户配置（设备名 / 关键词）解析成一个**设备名**，交给平台层打开。
 
-    这里只负责「名字」，不碰索引：设备名怎么变成底层句柄按平台定 ——
-    Linux 直接把名字递给 `sd.RawInputStream(device="名字")`；
+    这里只负责「名字」，不碰索引/句柄：设备名怎么变成底层句柄按平台定 ——
+    Linux 把描述映射到 PipeWire `node.name` 后走 `pw-record --target=`；
     Windows 由 `vlt/platform/win.py: open_mic` 再解析成 PortAudio 索引
     （保持 v0.3.x 同名端点的打开口径，见那边的说明）。
     `device_pattern` 是界面「设备关键词」那条兼容路径：在我们的输入设备表里做子串匹配。

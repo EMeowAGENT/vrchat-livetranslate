@@ -53,7 +53,7 @@ class LinuxMicProxy(MicProxy):
     """Linux 版麦克风代理：`pw-loopback` 声明虚拟麦 + `pw-cat` 写管道驱动输出。"""
 
     def __init__(self, *, audio_cfg: dict, mic_name: str | None = None,
-                 on_status: Callable[[str, str], None] = lambda *_a: None) -> None:
+                 on_status: Callable[..., None] = lambda *_a, **_k: None) -> None:
         super().__init__(audio_cfg=audio_cfg, mic_name=mic_name, on_status=on_status)
         self._cable: Any = None
         self._out: PwCatVirtualMic | None = None
