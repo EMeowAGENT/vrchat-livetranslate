@@ -155,6 +155,71 @@ def test_reopen_with_updates_both_buffers() -> None:
     print("  reopen_with：两端缓冲参数都更新 OK")
 
 
+def test_reopen_mic_swaps_input_without_touching_cable_or_output() -> None:
+    """★ Linux：`reopen_mic` 只重启麦克风采集线程 —— pw-loopback 声明与 pw-cat 输出都不动。
+
+    Linux 走的是 `LinuxMicProxy`（覆写了 `start/close`），但麦克风线程与 `reopen_mic` 都在
+    基类 `MicProxy` 里，所以换麦不会重声明虚拟声卡、也不影响引擎手里的 `translated_sink`。
+    这条用例把「两端共享同一段换麦逻辑」钉在 Linux 侧（Windows 侧见 test_micproxy.py）。
+    """
+    import time
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.names: list = []
+
+        def open_mic(self, name, *, rate, channels, blocksize):   # noqa: ARG002
+            self.names.append(name)
+
+            class _Src:
+                rate, channels = 16000, 1
+
+                async def read(self, timeout: float = 1.0):       # noqa: ARG002
+                    import asyncio
+                    await asyncio.sleep(0.01)
+                    return None
+
+                def close(self) -> None:
+                    pass
+
+            return _Src()
+
+    class _Handle:
+        def __init__(self) -> None:
+            self.closed = 0
+            self.stopped = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+        def stop(self) -> None:
+            self.stopped += 1
+
+    p = _mk()
+    p._opened = True                          # 假装已 start()（不真声明 PipeWire 节点）
+    p._cable = _Handle()                      # noqa: SLF001
+    p._out = _Handle()                        # noqa: SLF001
+    sink_before = p.translated_sink
+    rec = _Rec()
+    orig = platform.capture_backend
+    platform.capture_backend = lambda: rec    # type: ignore[assignment]
+    try:
+        p.reopen_mic("Mic L")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and rec.names[:1] != ["Mic L"]:
+            time.sleep(0.02)
+        assert rec.names[:1] == ["Mic L"], f"Linux 侧没按新名开麦：{rec.names}"
+        assert p._cable.stopped == 0 and p._cable.closed == 0, "换麦不该动 pw-loopback 声明"
+        assert p._out.closed == 0, "换麦不该动 pw-cat 输出管道"
+        assert p.translated_sink is sink_before, "换麦不该换 translated_sink（引擎桥接不变）"
+    finally:
+        p._stop.set()
+        if p._thread is not None:
+            p._thread.join(timeout=2.0)
+        platform.capture_backend = orig       # type: ignore[assignment]
+    print("  reopen_mic（Linux）：只重启采集线程、pw-loopback / pw-cat 不动 OK")
+
+
 if __name__ == "__main__":
     print("test_micproxy_linux:")
     test_platform_facade_returns_linux_proxy()
@@ -163,4 +228,5 @@ if __name__ == "__main__":
     test_mix_translated_uses_jitter_buffer()
     test_mode_gate_and_translation_fallback()
     test_reopen_with_updates_both_buffers()
+    test_reopen_mic_swaps_input_without_touching_cable_or_output()
     print("ALL PASSED")

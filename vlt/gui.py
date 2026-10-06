@@ -54,8 +54,9 @@ _TEST_ENTRIES = ("run_tests.py", "pytest", "pytest.exe", "py.test")
 def _is_test_process() -> bool:
     """当前进程是不是**测试/自检**进程 —— 这类进程绝不构造麦克风代理。
 
-    代理会真开虚拟声卡输出流与麦克风（PortAudio）。跑用例的纪律是「绝不碰真实音频
-    设备」（见 tests/test_micproxy.py 顶部的打桩说明），所以在 GUI 构造阶段先问一句。
+    代理会真开虚拟声卡输出流与麦克风（Windows 走 PortAudio；Linux 走 PipeWire 节点/子进程）。
+    跑用例的纪律是「绝不碰真实音频设备」（见 tests/test_micproxy.py 顶部的打桩说明），
+    所以在 GUI 构造阶段先问一句。
     判据只看**进程入口 / 已导入的测试框架 / 环境变量**，不靠「有没有显示器」这类
     间接信号 —— 间接信号在 CI 的 xvfb 下会误判成「真用户」。
     """
@@ -169,12 +170,18 @@ class TranslationGUI:
         self._updated_hint_win: tk.Toplevel | None = None; self._updated_hint_job: str | None = None
         self._settings_win: tk.Toplevel | None = None; self._settings_nb: ttk.Notebook | None = None
         self._settings_pages: list = []; self._settings_size = (SETTINGS_WIDTH, SETTINGS_MIN_H); self._settings_ctx = None
-        self._mic_names: list = []; self._loopback_names: list = []; self._audio_out_names: list = []; self._device_scan_pending = False
+        self._device_scan_pending = False
         from .engine import LEVEL_FLOOR_DB
         self._gate_level_canvas: tk.Canvas | None = None; self._gate_level_lbl: ttk.Label | None = None
         self._gate_level_hold = LEVEL_FLOOR_DB; self._gate_level_tick = 0; self._gate_probe: Any = None; self._gate_save_job: str | None = None
         self._gate_hold_ms = 500.0; self._gate_preroll_ms = 250; self._audio_ctx = AudioCtx(); self._proxy = None
-        self._names_holder = {"mic": self._mic_names, "loop": self._loopback_names, "out": self._audio_out_names}
+        # 设备名唯一真源：只由设备扫描（gui_audio.on_device_scan_result）写入。
+        # ⚠️ 曾经这里另存一份 `_mic_names/_loopback_names/_audio_out_names` 镜像、并在
+        #    `gui_audio.sync_from_gui` 里回写本字典 —— 而启动扫描走的是同步路径、
+        #    不经过 `_on_device_scan_result`，镜像永远是空的，于是每次同步都把刚扫到的
+        #    设备名清空，`on_device_change` 按下标取名字失败 → `mic_device` 存成空串
+        #    （表现：改麦克风下拉无效、永远用系统默认）。别再引入第二份名字表。
+        self._names_holder: dict[str, list[str]] = {"mic": [], "loop": [], "out": []}
         self._scan_holder = {"pending": False, "names": self._names_holder}
         self._gate_holder = {"probe": self._gate_probe, "save_job": self._gate_save_job,
             "level_hold": self._gate_level_hold, "hold_ms": self._gate_hold_ms,
@@ -507,7 +514,8 @@ class TranslationGUI:
                   "（译音输出回到旧行为：随翻译启停、由引擎自建）", flush=True)
             return False
         if _is_test_process():
-            # 测试纪律：绝不碰真实音频设备（虚拟声卡输出流与麦克风都是 PortAudio 实体）
+            # 测试纪律：绝不碰真实音频设备（虚拟声卡输出流与麦克风：Windows 是 PortAudio，
+            # Linux 是 PipeWire 节点/子进程 —— 都会真的开流/起节点）
             print("[proxy] 测试/自检进程：不构造麦克风代理（避免打开真实音频设备）", flush=True)
             return False
         a = self._proxy_audio_cfg()
@@ -637,9 +645,35 @@ class TranslationGUI:
             self._proxy_hint.configure(text="" if on else t("已关闭：回到旧行为（译音输出随翻译启停，主界面切换开关置灰）"))
     def _on_device_scan_result(self, mics, loops, outs) -> None:
         self._sync_audio_ctx(); gui_audio.on_device_scan_result(self._audio_ctx, self._cfg, mics, loops, outs, self._names_holder, self._scan_holder)
-        self._mic_names = self._names_holder["mic"]; self._loopback_names = self._names_holder["loop"]; self._audio_out_names = self._names_holder["out"]
         self._device_scan_pending = self._scan_holder.get("pending", False)
-    def _on_device_change(self, _event=None) -> None: self._sync_audio_ctx(); gui_audio.on_device_change(self._audio_ctx, self._cfg, self._names_holder)
+    def _on_device_change(self, _event=None) -> None:
+        self._sync_audio_ctx()
+        old_mic = self._current_mic_device()
+        gui_audio.on_device_change(self._audio_ctx, self._cfg, self._names_holder)
+        new_mic = self._current_mic_device()
+        if new_mic != old_mic:
+            self._apply_mic_change(new_mic)
+    def _current_mic_device(self) -> str:
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        return str((out.get("capture") or {}).get("mic_device") or "")
+    def _apply_mic_change(self, device_name: str) -> None:
+        """麦克风变更后让**直通腿**即时生效：只重启代理的采集线程，不动虚拟声卡输出流
+        （引擎手里的 `translated_sink` 不受影响，翻译不断）。代理没在跑就只落盘，下次
+        `start()` 生效。翻译输入那条腿在引擎启动时读定设备，运行中切换不影响本轮 ——
+        状态栏如实说明，别让人以为翻译输入也换了（禁静默降级）。"""
+        p = self._proxy
+        if p is None:
+            return
+        try:
+            p.reopen_mic(device_name or None)
+        except Exception as exc:                        # noqa: BLE001 — 绝不因切麦打断界面
+            print(f"[proxy] ⚠️ 切换麦克风失败：{type(exc).__name__}: {exc}"
+                  "（已落盘，下次启动生效）", flush=True)
+            self._set_status("warn", t("麦克风已保存（切换未即时生效，下次启动生效）"))
+            return
+        print(f"[proxy] 直通麦克风已切换：{device_name or '自动检测'}"
+              "（仅重启采集线程；翻译输入下轮生效）", flush=True)
+        self._set_status("info", t("麦克风已切换（直通即时生效；翻译输入下轮生效）"))
     def _save_device_config(self, mic_name, loop_name, out_name) -> None: self._sync_audio_ctx(); gui_audio.save_device_config(self._audio_ctx, self._cfg, mic_name, loop_name, out_name)
     def _on_gate_change(self, _v=None) -> None:
         self._sync_audio_ctx(); gui_audio.on_gate_change(self._audio_ctx, self._cfg, self._root, self._engines, self._gate_holder); self._gate_probe = self._gate_holder["probe"]; self._gate_save_job = self._gate_holder["save_job"]

@@ -442,7 +442,7 @@ class MicProxy:
 
     async def _mic_pump(self) -> None:
         src = platform.capture_backend().open_mic(
-            self._mic_name, rate=16000, channels=1, blocksize=MIC_BLOCKSIZE)
+            self._mic_name, rate=16000, channels=None, blocksize=MIC_BLOCKSIZE)
         self._mic_src = src
         self._on_status("info", "[proxy] 麦克风直通已启动（{rate}Hz {channels}ch → 48k 立体声）",
                         rate=src.rate, channels=src.channels)
@@ -515,3 +515,37 @@ class MicProxy:
         if translated_buffer_ms is not None and self._translated is not None:
             self._translated_ms = int(translated_buffer_ms)
             self._translated.set_buffer_ms(self._translated_ms)
+
+    # ------------------------------------------------------------------ 换麦克风
+    def reopen_mic(self, mic_name: str | None) -> None:
+        """切换**直通麦克风设备**：只重启麦克风采集线程，虚拟声卡输出流不动。
+
+        为什么不是「关掉再重开整个代理」：重开虚拟声卡会断声，而且运行中引擎手里那条
+        `translated_sink` 会失效（见 `gui._restart_proxy` 的说明）。只换输入侧则
+        VRChat 那侧（虚拟麦）连续不断，翻译桥接也不受影响。
+
+        `mic_name=None` = 回到系统默认输入设备。未启动时只记下设备名（配置已落盘，
+        下次 `start()` 生效）；幂等；**绝不抛异常**（代理一条纪律：任何一步失败只降级）。
+        """
+        new = mic_name or None
+        if new == self._mic_name and self._thread is not None and self._thread.is_alive():
+            return
+        self._mic_name = new
+        if not self._opened:
+            return
+        # `_stop` 只属于麦克风采集线程（见 start()/close()），这里复用它做一次「停→起」。
+        self._stop.set()
+        th = self._thread
+        if th is not None and th.is_alive():
+            th.join(timeout=2.0)                  # 采集线程内部对 read 有超时，2s 足够退出
+        self._thread = None
+        try:
+            self._ring.clear()                    # 丢掉旧麦遗留数据，免得切换瞬间放一小段旧麦
+        except Exception:                         # noqa: BLE001 — 清缓冲失败不该挡切换
+            pass
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._mic_thread_run, daemon=True,
+                                        name="vlt-micproxy")
+        self._thread.start()
+        self._on_status("info", "[proxy] 直通麦克风已切换：{name}",
+                        name=new or "系统默认")

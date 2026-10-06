@@ -350,6 +350,7 @@ class _FakeProxy:
         self.opened = True
         self.active_calls: list[bool] = []
         self.reopen_calls: list[tuple] = []
+        self.mic_calls: list = []
         self.close_calls = 0
         self.translated_sink = _FakeSink()
 
@@ -370,6 +371,9 @@ class _FakeProxy:
 
     def reopen_with(self, passthrough_ms=None, translated_buffer_ms=None) -> None:
         self.reopen_calls.append((passthrough_ms, translated_buffer_ms))
+
+    def reopen_mic(self, mic_name) -> None:              # noqa: ANN001
+        self.mic_calls.append(mic_name)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -696,6 +700,50 @@ def test_buffer_change_reaches_running_proxy() -> None:
     print("  ✓ 缓冲改动：在跑→reopen_with 即时生效；不在跑→只落盘 + 如实提示下次生效")
 
 
+def test_mic_device_change_reopens_passthrough() -> None:
+    """改麦克风下拉 → 直通腿即时换输入（`reopen_mic`）；名字没变 / 代理没在跑 → 不调用。
+
+    接线点：`_on_device_change` 先保存，再比较前后 `capture.mic_device`，变了才动代理。
+    """
+    from vlt import gui_audio
+
+    with _wired_gui() as (gui, _cfg_path):
+        seen = _capture_statuses(gui)
+        fake = _FakeProxy()
+        gui._proxy = fake
+
+        orig = gui_audio.on_device_change
+
+        def _setter(val):                                # noqa: ANN001, ANN202
+            def _f(_ctx, cfg, _names) -> None:           # noqa: ANN001
+                cfg.output.setdefault("capture", {})["mic_device"] = val
+            return _f
+
+        try:
+            gui_audio.on_device_change = _setter("Mic Y")        # type: ignore[assignment]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                gui._on_device_change()
+            assert fake.mic_calls == ["Mic Y"], f"改麦没触发 reopen_mic：{fake.mic_calls!r}"
+            assert seen and seen[-1][0] == "info", f"状态栏级别不对：{seen[-1] if seen else None!r}"
+            assert "直通麦克风已切换" in buf.getvalue(), f"必须留痕：{buf.getvalue()!r}"
+
+            # 名字没变 → 不该再触发
+            with contextlib.redirect_stdout(io.StringIO()):
+                gui._on_device_change()
+            assert fake.mic_calls == ["Mic Y"], f"名字没变不该触发：{fake.mic_calls!r}"
+
+            # 代理没在跑 → 只落盘、不调用（下次 start() 生效）
+            gui._proxy = None
+            gui_audio.on_device_change = _setter("Mic Z")        # type: ignore[assignment]
+            with contextlib.redirect_stdout(io.StringIO()):
+                gui._on_device_change()
+            assert fake.mic_calls == ["Mic Y"], f"代理没跑不该调用：{fake.mic_calls!r}"
+        finally:
+            gui_audio.on_device_change = orig            # type: ignore[assignment]
+    print("  ✓ 改麦：在跑→reopen_mic 即时生效；名字没变 / 代理没跑→不调用")
+
+
 # ---------------------------------------------------------------- 入口
 
 
@@ -706,6 +754,7 @@ def main() -> int:
         test_translation_start_stop_notifies_proxy,
         test_settings_toggle_off_restarts_proxy_and_unwires_engine,
         test_buffer_change_reaches_running_proxy,
+        test_mic_device_change_reopens_passthrough,
     ]
     print("test_proxy_wiring:")
     failed = 0

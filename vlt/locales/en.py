@@ -480,6 +480,11 @@ STRINGS: dict[str, str] = {
         "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
     "麦克风代理已启用": "Mic Proxy enabled",
     "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "直通麦克风已切换：{name}": "Passthrough microphone switched: {name}",
+    "麦克风已切换（直通即时生效；翻译输入下轮生效）":
+        "Microphone switched (passthrough applied now; translation input takes effect when translation restarts)",
+    "麦克风已保存（切换未即时生效，下次启动生效）":
+        "Microphone saved (not applied instantly; takes effect on next start)",
     "缓冲已更新（即时生效）": "Buffers updated (applied instantly)",
     "缓冲已保存（译音缓冲下次开始翻译生效）":
         "Buffers saved (translated buffer applies next time translation starts)",

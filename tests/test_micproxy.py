@@ -504,6 +504,93 @@ def test_pick_output_device_computes_fallbacks_in_auto_chain():
     print("  代理侧回退链档也算同名回落候选 OK")
 
 
+def test_reopen_mic_swaps_device_without_touching_output():
+    """★ reopen_mic：换直通麦克风**只重启采集线程** —— 虚拟声卡输出流与 translated_sink 不变。
+
+    这是「改麦克风下拉后直通即时生效」的底座：不关虚拟声卡 → 不打扰 VRChat 那侧、不影响
+    运行中引擎手里的桥接。全程打桩，不碰真实音频。覆盖：首次按名开、换名重开、同名幂等、
+    回落到默认（None）、输出流一个都没重开/没关。
+    """
+    from vlt.output import micproxy as MP
+    from vlt import platform
+
+    class _RecBackend:
+        def __init__(self) -> None:
+            self.names: list = []
+            self.sources: list = []
+
+        def open_mic(self, name, *, rate, channels, blocksize):   # noqa: ARG002
+            self.names.append(name)
+            src = _FakeSource([], rate=16000, channels=1)
+            self.sources.append(src)
+            return src
+
+    _FakeOutStream.instances.clear()
+    fake_sd = types.ModuleType("sounddevice")
+    fake_sd.RawOutputStream = lambda **kw: _FakeOutStream(**kw)      # type: ignore[attr-defined]
+    fake_sd.query_devices = lambda *a, **k: {                        # type: ignore[attr-defined]
+        "name": "FakeCard", "default_samplerate": 48000}
+    orig_sd = sys.modules.get("sounddevice")
+    sys.modules["sounddevice"] = fake_sd
+
+    rec = _RecBackend()
+    orig_cb = platform.capture_backend
+    orig_pick = MP.pick_output_device
+    orig_guard = MP._test_process_guard
+    MP._test_process_guard = lambda *a, **k: None                    # noqa: ARG005
+    platform.capture_backend = lambda: rec                           # type: ignore[assignment]
+    MP.pick_output_device = lambda patterns=None: (11, "FakeCard", 48000)  # noqa: ARG005
+
+    p = MicProxy(audio_cfg={"sample_rate": 48000, "buffer_ms": 100, "max_buffer_ms": 2000,
+                            "device": ["voicemeeter input"],
+                            "proxy": {"enabled": True, "passthrough_buffer_ms": 150}},
+                 mic_name="Mic X")
+
+    def _wait_for(pred, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if pred():
+                return True
+            time.sleep(0.02)
+        return False
+
+    try:
+        assert p.start() is True, "打桩环境下 start() 应成功"
+        assert _wait_for(lambda: rec.names[:1] == ["Mic X"]), \
+            f"首次没按 Mic X 打开：{rec.names}"
+        n_out = len(_FakeOutStream.instances)
+        sink_before = p.translated_sink
+
+        p.reopen_mic("Mic Y")
+        assert _wait_for(lambda: rec.names[-1:] == ["Mic Y"]), \
+            f"reopen 后没按 Mic Y 打开：{rec.names}"
+        assert p.opened is True
+        assert p.translated_sink is sink_before, "换麦不该换 translated_sink（引擎桥接必须不变）"
+        assert len(_FakeOutStream.instances) == n_out, "换麦不该重开虚拟声卡输出流"
+        assert not _FakeOutStream.instances[0].closed, "虚拟声卡输出流被误关"
+
+        # 同名幂等：不该再开一次设备
+        n_before = len(rec.names)
+        p.reopen_mic("Mic Y")
+        time.sleep(0.08)
+        assert len(rec.names) == n_before, f"同名 reopen_mic 不该重新打开：{rec.names}"
+
+        # 回落到系统默认
+        p.reopen_mic(None)
+        assert _wait_for(lambda: rec.names[-1:] == [None]), \
+            f"reopen_mic(None) 没回到默认设备：{rec.names}"
+    finally:
+        p.close()
+        platform.capture_backend = orig_cb                           # type: ignore[assignment]
+        MP.pick_output_device = orig_pick
+        MP._test_process_guard = orig_guard
+        if orig_sd is not None:
+            sys.modules["sounddevice"] = orig_sd
+        else:
+            sys.modules.pop("sounddevice", None)
+    print("  reopen_mic：换采集设备、输出流与 translated_sink 不变、同名幂等、可回默认 OK")
+
+
 if __name__ == "__main__":
     print("test_micproxy:")
     test_resample_16k_to_48k_dc_byte_exact()
@@ -528,4 +615,5 @@ if __name__ == "__main__":
     test_start_no_device_degrades_gracefully()
     test_start_refused_in_test_process()
     test_pick_output_device_computes_fallbacks_in_auto_chain()
+    test_reopen_mic_swaps_device_without_touching_output()
     print("ALL PASSED")

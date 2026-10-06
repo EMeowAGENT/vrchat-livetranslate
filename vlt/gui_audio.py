@@ -73,7 +73,6 @@ def sync_from_gui(ctx: AudioCtx, gui) -> None:
     c.linux_fixed_audio = g(gui, '_linux_fixed_audio', False)
     c.set_status_fn = gui._set_status; c.is_closing_fn = lambda: gui._closing
     c.settings_win_fn = lambda: gui._settings_win
-    gui._names_holder.update(mic=gui._mic_names, loop=gui._loopback_names, out=gui._audio_out_names)
     gui._gate_holder.update(probe=gui._gate_probe, save_job=gui._gate_save_job,
         level_hold=gui._gate_level_hold, hold_ms=gui._gate_hold_ms,
         preroll_ms=gui._gate_preroll_ms, engines=gui._engines)
@@ -83,9 +82,10 @@ def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
                       scan_holder: dict) -> None:
     """扫描设备（**主线程同步执行**）。
 
-    为什么不用后台线程：PortAudio 的初始化 / 销毁是**线程绑定**的（WASAPI 用 COM
-    单元）。sounddevice 在首次调用的那个线程里 Pa_Initialize，而它的 atexit 钩子
-    在主线程 Pa_Terminate —— 跨线程销毁会抛 Tcl_AsyncDelete。
+    为什么不用后台线程（**Windows 侧的理由**）：PortAudio 的初始化 / 销毁是**线程绑定**
+    的（WASAPI 用 COM 单元）。sounddevice 在首次调用的那个线程里 Pa_Initialize，而它的
+    atexit 钩子在主线程 Pa_Terminate —— 跨线程销毁会抛 Tcl_AsyncDelete。
+    （Linux 枚举走 `pw-dump` 子进程、不碰 PortAudio；同步做只为两平台口径一致。）
     """
     if headless:
         return
