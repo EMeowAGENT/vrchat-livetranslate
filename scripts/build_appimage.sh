@@ -562,6 +562,9 @@ fi
 
 # ---------------------------------------------------------------- 7. 完成
 step "7/7 完成"
+# ⚠️ 本段是**未加引号的 heredoc**：`$VAR` / `$(...)` / 反引号都会被 shell 展开。要输出字面量的
+#    代码格式（反引号）必须写成 \`...\`，否则会被**当命令执行**（实测踩过：`pw-record` 真被跑了、
+#    还打印了帮助，文案被吞成空）。新增含反引号的行时务必转义。
 cat <<EOF
 产物：$OUT_IMG（$(du -h "$OUT_IMG" | cut -f1)）
 
@@ -573,7 +576,7 @@ cat <<EOF
   * 手腕屏还需要 **OpenXR 运行时已起 + 头显已连**（Monado / WiVRn）
   * 译音虚拟声卡由程序运行时自己声明，**不需要**事先装 VB-Cable 之类
   * 需要宿主自带一套中日韩字体
-  * X11 基础库由宿主提供；音频**全部走宿主的 PipeWire**（`pw-dump/pw-record/pw-cat`）：
-    麦克风也走 `pw-record`，**不需要** portaudio / JACK / PulseAudio 兼容层
+  * X11 基础库由宿主提供；音频**全部走宿主的 PipeWire**（\`pw-dump/pw-record/pw-cat\`）：
+    麦克风也走 \`pw-record\`，**不需要** portaudio / JACK / PulseAudio 兼容层
   * 详见 GUIDE.linux.md
 EOF
