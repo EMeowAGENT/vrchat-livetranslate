@@ -103,6 +103,7 @@ class EngineCtx:
     destroy_root_fn: Optional[Callable] = None         # () -> None
     save_ui_state_fn: Optional[Callable] = None        # () -> None
     cancel_poll_fn: Optional[Callable] = None          # () -> None（取消 poll 循环）
+    proxy_fn: Optional[Callable] = None                # () -> MicProxy | None（每次现取：代理会被重开/关闭）
 
 
 # ================================================================ API 密钥
@@ -143,6 +144,34 @@ def bind_gui_callbacks(ctx: EngineCtx, gui) -> None:
     c.maybe_replace_on_exit_fn = gui._maybe_replace_on_exit
     c.destroy_root_fn = lambda: gui._root.destroy(); c.save_ui_state_fn = gui._save_ui_state
     c.cancel_poll_fn = lambda: gui_chat.cancel_poll(gui._chat_ctx, gui._root)
+    c.proxy_fn = lambda: gui._proxy          # 现取：代理会被设置页重开/关闭，实例会变
+
+
+def _proxy_of(ctx: EngineCtx):
+    """取常驻麦克风代理；没有（Linux / 用户关掉 / 虚拟声卡没打开）则 None。"""
+    if ctx.proxy_fn is None:
+        return None
+    try:
+        return ctx.proxy_fn()
+    except Exception as exc:              # noqa: BLE001
+        print(f"[proxy] ⚠️ 读取麦克风代理失败（按「无代理」处理，译音输出回落到引擎自建）："
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def notify_proxy_translation(ctx: EngineCtx, active: bool) -> None:
+    """翻译启停 → 通知代理（译音档只在翻译运行时允许；停止即强制回落并锁定原声档）。"""
+    p = _proxy_of(ctx)
+    if p is None:
+        return
+    try:
+        p.set_translation_active(bool(active))
+        print(f"[proxy] 翻译{'开始' if active else '停止'} → "
+              f"{'允许切到译音档' if active else '强制回落原声档'}"
+              f"（当前档位 {p.mode}）", flush=True)
+    except Exception as exc:              # noqa: BLE001
+        print(f"[proxy] ⚠️ 同步翻译状态失败（忽略，代理仍可用）："
+              f"{type(exc).__name__}: {exc}", flush=True)
 
 
 def start(ctx: EngineCtx) -> bool:
@@ -223,7 +252,17 @@ def start(ctx: EngineCtx) -> bool:
         _dev = (ctx.cfg.output.get("audio") or {}).get("device_name") or "自动回退链"
     else:
         _dev = "自动回退链"
-    print(f"[gui]   译音输出={'开' if want_audio else '关'}（虚拟声卡：{_dev}）", flush=True)
+    # 代理在跑 → 译音不自己开流，而是灌进代理那条**常驻**虚拟声卡输出流。
+    # 日志里必须区分两条路：出问题时「声音从哪来」是第一个要问的。
+    _proxy = _proxy_of(ctx)
+    _via = ""
+    if _proxy is not None:
+        _via = "，经麦克风代理"
+        try:
+            _dev = _proxy.translated_sink.device_name or _dev
+        except Exception:                          # noqa: BLE001
+            pass
+    print(f"[gui]   译音输出={'开' if want_audio else '关'}（虚拟声卡：{_dev}{_via}）", flush=True)
 
     # 配置每条腿的方向
     for _who, direction, _src, src_lang, tgt_lang in specs:
@@ -248,6 +287,8 @@ def start(ctx: EngineCtx) -> bool:
     if ctx.start_room_fn:
         ctx.start_room_fn()
 
+    # 先告诉代理「翻译开始了」：译音档只在翻译运行时允许切，顺序反了会被拒
+    notify_proxy_translation(ctx, True)
     # 启动第一个引擎（后续引擎由 start_engine 错开 300ms 调度）
     start_engine(ctx, 0)
 
@@ -294,6 +335,10 @@ def start_engine(ctx: EngineCtx, index: int) -> None:
         on_status=lambda lvl, msg, _who=who: on_engine_status(ctx.q, lvl, msg, _who),
         on_stats=lambda s: ctx.q.put(("stats", s)),
     )
+    # 麦克风代理在跑 → 译音灌进代理那条**常驻**输出流（引擎不自建、也不关它，
+    # 见 engine._setup_virtualmic 的 _owns_virtualmic=False）；
+    # 没代理 → None，引擎自建虚拟声卡输出（旧行为，随翻译启停）。
+    proxy = _proxy_of(ctx)
     eng = Engine(
         cfg=ctx.cfg,
         direction=direction,
@@ -301,6 +346,7 @@ def start_engine(ctx: EngineCtx, index: int) -> None:
         sinks=own_sinks,
         events=events,
         config_path=_cfg_mod.DEFAULT_CONFIG,
+        audio_sink=(proxy.translated_sink if proxy is not None else None),
     )
     ctx.engines.append(eng)
     ctx.engine_dirs.append(direction)
@@ -557,6 +603,9 @@ def stop(ctx: EngineCtx) -> None:
             eng.request_stop()            # 只发信号：并发下发，谁都不等谁
         except Exception as exc:          # noqa: BLE001
             print(f"[gui] 下发停止信号失败（忽略）：{type(exc).__name__}: {exc}", flush=True)
+
+    # 立刻让代理回落原声档（不等引擎收尾）：译音源没了，麦克风该马上重新直通
+    notify_proxy_translation(ctx, False)
 
     # 关闭覆盖层
     _stop_overlay(ctx)

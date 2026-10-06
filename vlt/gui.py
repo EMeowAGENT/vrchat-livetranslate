@@ -5,7 +5,7 @@
   python -m vlt.gui --self-test-dual   # 双向同时验收（两个 PCM 驱动两个引擎）
 """
 from __future__ import annotations
-import argparse, queue, re, threading, tkinter as tk
+import argparse, os, queue, re, sys, threading, tkinter as tk
 import subprocess as subprocess     # 显式重导出：tests 打桩 `vlt.gui.subprocess`（更新链路）
 import webbrowser as webbrowser     # 显式重导出：tests 打桩 `vlt.gui.webbrowser`（赞助链接）
 from pathlib import Path
@@ -16,6 +16,7 @@ from .config import DEFAULT_CONFIG, load_config
 from .config_io import _fmt_scalar, _yaml_set_in_text, _yaml_set_or_create, _write_config_text
 from .i18n import t
 from .paths import APP_DIR
+from .platform import IS_WINDOWS
 # ── 重导出（保持 from vlt.gui import X 向后兼容）──
 from . import ui_tk
 from .ui_text import (SOURCE_LANGS, TARGET_LANGS, _lang_key, _lang_label,
@@ -48,6 +49,22 @@ def _yaml_write(p: Path, fn, *, err="保存"):
     if not p.exists(): return
     try: text = p.read_text(encoding="utf-8"); text = fn(text); _write_config_text(p, text)
     except Exception as exc: print(f"[gui] {err}失败：{exc}", flush=True)
+#: 一看就知道是测试入口的文件名（`python tests/test_x.py` 那条路走的是 `test_` 前缀）
+_TEST_ENTRIES = ("run_tests.py", "pytest", "pytest.exe", "py.test")
+def _is_test_process() -> bool:
+    """当前进程是不是**测试/自检**进程 —— 这类进程绝不构造麦克风代理。
+
+    代理会真开虚拟声卡输出流与麦克风（PortAudio）。跑用例的纪律是「绝不碰真实音频
+    设备」（见 tests/test_micproxy.py 顶部的打桩说明），所以在 GUI 构造阶段先问一句。
+    判据只看**进程入口 / 已导入的测试框架 / 环境变量**，不靠「有没有显示器」这类
+    间接信号 —— 间接信号在 CI 的 xvfb 下会误判成「真用户」。
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"): return True
+    if "pytest" in sys.modules or "_pytest" in sys.modules: return True
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    entry = Path(argv0).name
+    return (entry.startswith("test_") or entry in _TEST_ENTRIES
+            or "unittest" in argv0 or "pytest" in argv0)
 # gui.py ↔ EngineCtx 双向同步的属性名
 _GATE_HINT = "只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）"
 _E2G = ["engines", "engine_dirs", "specs", "sinks", "pending_starts", "current",
@@ -173,7 +190,12 @@ class TranslationGUI:
         self._room_cfg = RoomConfig.from_dict(self._cfg.room); self._publisher = SourcePublisher()
         self._room_status_next = 0.0; self._room_ctx = RoomCtx()
         gui_engine.bind_gui_callbacks(self._engine_ctx, self)
-        if not headless: self._build_ui()
+        if not headless:
+            self._build_ui()
+            # 代理与翻译解耦：程序一起来就工作（见 micproxy 模块头「生命周期」）
+            self._start_proxy()
+            # 按钮默认态是 NORMAL，不刷一次的话「无代理」时它看起来还能点
+            self._refresh_voice_mode_btn()
     def __getattr__(self, name):
         """薄壳委托：把 ~60 个简单方法代理到子模块。"""
         fn = _DELEGATE_MAP.get(name)
@@ -366,6 +388,7 @@ class TranslationGUI:
         self._sync_engine_ctx()
         need_key = gui_engine.start(self._engine_ctx)
         self._unsync_engine_ctx()
+        self._refresh_voice_mode_btn()     # 解禁条件 = 有代理 且 翻译在跑
         if need_key:                       # 无 key 被拦下 → 自动弹设置窗引导填 key
             self._open_settings()
     def _start_engine(self, index): self._sync_engine_ctx(); gui_engine.start_engine(self._engine_ctx, index); self._unsync_engine_ctx()
@@ -404,10 +427,16 @@ class TranslationGUI:
         self._sync_engine_ctx(); gui_engine.save_desktop_cfg(self._engine_ctx, config_path=DEFAULT_CONFIG); self._desktop_save_job = self._engine_ctx.desktop_save_job
     def _toggle_desktop_drag(self):
         self._sync_engine_ctx(); gui_engine.toggle_desktop_drag(self._engine_ctx); self._desktop_out = self._engine_ctx.desktop_out; self._desktop_dragging = self._engine_ctx.desktop_dragging
-    def _stop(self): self._sync_engine_ctx(); gui_engine.stop(self._engine_ctx); self._unsync_engine_ctx()
+    def _stop(self):
+        self._sync_engine_ctx(); gui_engine.stop(self._engine_ctx); self._unsync_engine_ctx()
+        self._refresh_voice_mode_btn()     # 必须在 unsync 之后：stop() 已把 engines 清空
     def _wait_stop_done(self, engines):
         self._engine_ctx.q = self._q; self._engine_ctx.stop_done_evt = self._stop_done_evt; self._engine_ctx.root = self._root; gui_engine.wait_stop_done(self._engine_ctx, engines)
-    def _on_close(self): self._sync_engine_ctx(); gui_engine.on_close(self._engine_ctx)
+    def _on_close(self):
+        # 先关代理再走引擎收尾：on_close 末尾会 destroy root + crashlog.close()，
+        # 放在后面的话「代理已关闭」这行留痕就落不进日志了。
+        self._close_proxy()
+        self._sync_engine_ctx(); gui_engine.on_close(self._engine_ctx)
     def _sync_engine_ctx(self):
         c = self._engine_ctx
         for n in _E2G: setattr(c, n, getattr(self, f"_{n}"))
@@ -423,10 +452,158 @@ class TranslationGUI:
         self._sync_audio_ctx(); gui_audio.start_device_scan(self._audio_ctx, self._root, self._headless, self._scan_holder); self._device_scan_pending = self._scan_holder["pending"]
     def _on_refresh_devices(self) -> None:
         self._sync_audio_ctx(); gui_audio.on_refresh_devices(self._audio_ctx, self._root, self._engines, self._headless, self._scan_holder)
+    # ── 麦克风代理（MicProxy）：常驻虚拟声卡路由，与翻译解耦 ──
+    def _proxy_audio_cfg(self) -> dict:
+        """取 ``output.audio`` 这一段（含 proxy 子段）的**副本**；配置畸形时回落空 dict。"""
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        a = out.get("audio")
+        return dict(a) if isinstance(a, dict) else {}
+
+    def _proxy_wanted(self) -> bool:
+        """配置里是不是想要代理（缺省即启用，见 config.py 的 proxy 归一化）。"""
+        p = self._proxy_audio_cfg().get("proxy") or {}
+        return bool(p.get("enabled", True)) if isinstance(p, dict) else True
+
+    def _sync_proxy_cfg_mem(self, *, audio: dict | None = None,
+                            proxy: dict | None = None) -> None:
+        """落盘之后同步**内存快照**：代理随时可能重开，它读的是这份而不是磁盘。"""
+        if not isinstance(self._cfg.output, dict):
+            return
+        a = self._cfg.output.get("audio")
+        if not isinstance(a, dict):
+            a = {}; self._cfg.output["audio"] = a
+        if audio:
+            a.update(audio)
+        if proxy:
+            p = a.get("proxy")
+            if not isinstance(p, dict):
+                p = {}; a["proxy"] = p
+            p.update(proxy)
+
+    def _on_proxy_status(self, level: str, msg: str) -> None:
+        """代理的 on_status：既进状态栏也进日志（与 ``gui_engine.on_engine_status`` 同口径）。
+
+        micproxy 内部每条消息自带 ``"[proxy] "`` 前缀，这里剥掉再补一个带级别的，
+        否则日志里会出现 ``[proxy][warn] [proxy] …`` 这种双重前缀。
+        """
+        body = msg[len("[proxy] "):] if msg.startswith("[proxy] ") else msg
+        print(f"[proxy][{level}] {body}", flush=True)
+        self._q.put(("status", level, body))
+
+    def _start_proxy(self) -> bool:
+        """构造并启动麦克风代理。返回是否**真的起来了**（False = 走旧行为）。
+
+        ⚠️ 绝不抛异常、绝不阻塞启动：任何一步失败都只降级 + 留痕（禁静默降级）。
+        """
+        if self._proxy is not None:
+            return True
+        if not IS_WINDOWS:
+            # Linux 的译音输出仍由引擎自建（走平台自己那条虚拟声卡路径），代理不参与
+            print("[proxy] 非 Windows：不构造麦克风代理（译音输出仍由引擎自建）", flush=True)
+            return False
+        if not self._proxy_wanted():
+            print("[proxy] 配置 output.audio.proxy.enabled=false：不启动代理"
+                  "（译音输出回到旧行为：随翻译启停、由引擎自建）", flush=True)
+            return False
+        if _is_test_process():
+            # 测试纪律：绝不碰真实音频设备（虚拟声卡输出流与麦克风都是 PortAudio 实体）
+            print("[proxy] 测试/自检进程：不构造麦克风代理（避免打开真实音频设备）", flush=True)
+            return False
+        a = self._proxy_audio_cfg()
+        out = self._cfg.output if isinstance(self._cfg.output, dict) else {}
+        mic_name = (out.get("capture") or {}).get("mic_device") or None
+        proxy = None
+        try:
+            from .output.micproxy import MicProxy
+            proxy = MicProxy(audio_cfg=a, mic_name=mic_name, on_status=self._on_proxy_status)
+            ok = bool(proxy.start())
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[proxy] 启动异常：{type(exc).__name__}: {exc}（其余功能不受影响）", flush=True)
+            ok = False
+        if not ok:
+            if proxy is not None:
+                try:
+                    proxy.close()                      # 半开的流/线程必须放掉
+                except Exception:                      # noqa: BLE001
+                    pass
+            self._proxy_degraded(
+                t("麦克风代理不可用（虚拟声卡没打开？）；原声/译音切换已禁用"),
+                "[proxy] 代理不可用 → 回到旧行为：译音输出由引擎自建（随翻译启停），"
+                "主界面「原声/译音」切换已禁用")
+            return False
+        self._proxy = proxy
+        self._refresh_voice_mode_btn()
+        pt = (a.get("proxy") or {}).get("passthrough_buffer_ms")
+        print(f"[proxy] 麦克风代理已启动（VRChat 的麦克风请**永久**指向虚拟声卡）："
+              f"直通缓冲 {pt}ms / 译音缓冲 {a.get('buffer_ms')}ms / 当前档位 {proxy.mode}",
+              flush=True)
+        return True
+
+    def _proxy_degraded(self, status_text: str, log_line: str) -> None:
+        """代理不可用 → 回到旧行为，并**各留一行痕**（状态栏一行 + stdout 一行）。"""
+        self._proxy = None
+        self._refresh_voice_mode_btn()                 # 无代理 → 按钮置灰
+        print(log_line, flush=True)
+        self._set_status("warn", status_text)
+
+    def _close_proxy(self) -> None:
+        """幂等关闭代理：先摘引用再 close，绝不让异常打断关窗流程。"""
+        p = self._proxy
+        if p is None:
+            return
+        self._proxy = None
+        try:
+            p.close()                                  # 幂等：停麦克风线程 + 关输出流
+            print("[proxy] 麦克风代理已关闭（虚拟声卡输出流与麦克风直通线程已释放）", flush=True)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[proxy] ⚠️ 关闭代理时出错（忽略）：{type(exc).__name__}: {exc}", flush=True)
+
+    def _restart_proxy(self) -> None:
+        """设置页勾选框的落地点：想开就开、想关就关，按钮态与提示一起刷新。"""
+        if self._proxy_wanted():
+            if self._start_proxy():
+                self._set_status("info", t("麦克风代理已启用"))
+            return
+        running = any(getattr(e, "running", False) for e in self._engines)
+        self._close_proxy()
+        self._refresh_voice_mode_btn()
+        if running:
+            # 引擎手里那条 audio_sink 指向刚关掉的代理缓冲：本轮译音**没人接管**了。
+            # 必须说清楚，别让人以为还在出声（禁静默降级）。
+            print("[proxy] ⚠️ 翻译进行中关掉了代理：本轮译音输出已失效，"
+                  "重新点「开始翻译」后由引擎自建虚拟声卡输出（旧行为）", flush=True)
+        self._set_status("info", t("麦克风代理已关闭（回到旧行为）"))
+
+    def _apply_proxy_buffers(self, passthrough_ms: int, translated_ms: int) -> None:
+        """缓冲改动落地：代理在跑就即时生效，不在跑就只落盘 + 如实说明下次何时生效。"""
+        p = self._proxy
+        if p is not None:
+            try:
+                p.reopen_with(passthrough_ms=passthrough_ms,
+                              translated_buffer_ms=translated_ms)
+                print(f"[proxy] 缓冲已更新：直通 {passthrough_ms}ms / 译音 {translated_ms}ms"
+                      "（软件侧参数，输出流不重开、没有静音间隙）", flush=True)
+                self._set_status("info", t("缓冲已更新（即时生效）"))
+            except Exception as exc:                   # noqa: BLE001
+                print(f"[proxy] ⚠️ 应用缓冲失败：{type(exc).__name__}: {exc}"
+                      "（已落盘，下次启动生效）", flush=True)
+                self._set_status("warn", t("缓冲已保存（译音缓冲下次开始翻译生效）"))
+            return
+        if self._proxy_wanted():
+            print(f"[proxy] 代理没在跑（虚拟声卡没打开？）：缓冲已落盘 —— "
+                  f"直通 {passthrough_ms}ms / 译音 {translated_ms}ms，下次启动代理时生效",
+                  flush=True)
+            self._set_status("warn", t("虚拟声卡未打开——检查「译音输出」设备；缓冲改动已存，下次生效"))
+        else:
+            print(f"[proxy] 代理已关闭：缓冲已落盘（直通 {passthrough_ms}ms / "
+                  f"译音 {translated_ms}ms），译音缓冲下次开始翻译生效", flush=True)
+            self._set_status("info", t("缓冲已保存（译音缓冲下次开始翻译生效）"))
+
     def _on_proxy_toggle(self) -> None:
         self._sync_audio_ctx(); self._audio_ctx.proxy_enabled = self._proxy_enabled_var.get()
         _yaml_write(DEFAULT_CONFIG, lambda t: _yaml_set_in_text(t, ["output", "audio", "proxy", "enabled"], _fmt_scalar(self._audio_ctx.proxy_enabled)), err="保存代理开关")
-        if hasattr(self, '_restart_proxy'): self._restart_proxy()
+        self._sync_proxy_cfg_mem(proxy={"enabled": bool(self._audio_ctx.proxy_enabled)})
+        self._restart_proxy()
         self._sync_proxy_controls_state()
     def _on_proxy_buffer_change(self, _event=None) -> None:
         if self._passthrough_spin is None: return
@@ -442,7 +619,8 @@ class TranslationGUI:
             t = _yaml_set_in_text(t, ["output", "audio", "proxy", "passthrough_buffer_ms"], _fmt_scalar(pt))
             return _yaml_set_in_text(t, ["output", "audio", "buffer_ms"], _fmt_scalar(tr))
         _yaml_write(DEFAULT_CONFIG, _fn, err="保存代理缓冲")
-        if hasattr(self, '_restart_proxy'): self._restart_proxy()
+        self._sync_proxy_cfg_mem(audio={"buffer_ms": tr}, proxy={"passthrough_buffer_ms": pt})
+        self._apply_proxy_buffers(pt, tr)
     def _sync_proxy_controls_state(self) -> None:
         if self._proxy_check is None: return
         on = bool(self._proxy_enabled_var.get())
