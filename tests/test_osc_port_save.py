@@ -26,7 +26,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS))
 
 # 干净环境（CI）没有 API key，而 load_config 默认 require_key=True 会 SystemExit。
 # 给一个拼接出来的假 key：本文件只验配置读写，与 key 真假无关。
@@ -37,7 +39,11 @@ import vlt.i18n as _i18n  # noqa: E402
 
 _i18n.detect_system_language = lambda: "zh"
 
-CONFIG = ROOT / "config.yaml"          # 源码运行的配置路径（与 gui.DEFAULT_CONFIG 同一个）
+# 回填断言的是模板里的 port: 9000（带行尾注释）。开发者本机 config.yaml 可能
+# 改过端口/删了注释 → 假红。统一走沙箱配置（内容 = config.example.yaml，与 CI 一致）。
+from _cfgbox import sandbox_config  # noqa: E402
+
+CONFIG = sandbox_config(reset=True)   # 沙箱配置路径（已同步改写 gui.DEFAULT_CONFIG）
 
 
 def _n_comments(t: str) -> int:

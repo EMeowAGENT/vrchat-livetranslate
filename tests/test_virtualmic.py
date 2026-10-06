@@ -480,6 +480,66 @@ def test_engine_marks_sentence_boundaries():
     print(f"  引擎在句子边界封句 OK（推入 {vm.pushed} 段，封句 {vm.marks} 次）")
 
 
+def test_engine_uses_injected_audio_sink():
+    """★ 注入 audio_sink（麦克风代理的 TranslatedSink）时：引擎**不自建** VirtualMic、
+    **不 pick 设备**；停翻译（_cleanup）时**不 close** 注入的 sink（它归代理管）。
+
+    这是「原声/译音一键切换」的地基：虚拟声卡输出流由代理独占持有，引擎只把译音 PCM
+    灌进代理那条常驻流。若引擎误自建 / 误关，切换时就会出现「两条流写同一设备」或
+    「停翻译把代理的输出流也一起关了」的事故 —— 用会炸的桩把这两条路都堵死来证明没走。
+    """
+    import asyncio
+    from vlt.config import AppConfig, Direction
+    from vlt.engine import Engine, EngineEvents
+
+    class RecordingSink:
+        def __init__(self) -> None:
+            self.closed = 0
+            self.pushed = 0
+            self.device_name = "proxy-translated-sink"
+
+        def open(self) -> bool:
+            raise AssertionError("引擎不该 open 注入的 sink（它归代理管）")
+
+        def push(self, pcm: bytes) -> None:  # noqa: ARG002
+            self.pushed += 1
+
+        def end_sentence(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed += 1
+
+    class BoomVM:
+        def __init__(self, *a, **k) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("注入 sink 时引擎不该自建 VirtualMic")
+
+    def _boom_pick(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("注入 sink 时引擎不该 pick 输出设备")
+
+    sink = RecordingSink()
+    cfg = AppConfig(
+        session_base={"model": "x", "base_url": "x", "voice": "x", "api_key": "x",
+                      "workspace_id": "", "reconnect_backoff": [1],
+                      "max_new_sessions_per_minute": 10, "final_silence_s": 1.0},
+        directions={"mine": Direction(source_lang="zh", target_lang="en", output_audio=True)},
+        chatbox={}, merger={}, overlay={},
+        output={"audio": {"enabled": True, "device": ["voicemeeter input"], "sample_rate": 48000}},
+    )
+    with _stub_audio_out(win_vm=BoomVM, win_pick=_boom_pick,
+                         linux_factory=lambda _c, _s: None):
+        eng = Engine(cfg=cfg, direction="mine", source="mic", sinks=set(),
+                     events=EngineEvents(on_status=lambda lvl, msg: None),
+                     audio_sink=sink)
+        eng._setup_virtualmic(cfg.output["audio"])       # 注入路径：直接返回，不碰桩
+        assert eng.virtualmic is sink, "应直接采用注入的 sink，不自建 VirtualMic"
+        assert eng._owns_virtualmic is False, "注入的 sink 不归引擎所有"
+        asyncio.run(eng._cleanup())                      # 停翻译收尾
+        assert sink.closed == 0, "共享 sink 归代理管，引擎停翻译时绝不能 close 它"
+        assert eng.virtualmic is None and eng._owns_virtualmic is False
+    print("  注入 audio_sink：不自建 VirtualMic、不 pick 设备、停翻译不 close OK")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     print("test_virtualmic:")
@@ -497,4 +557,5 @@ if __name__ == "__main__":
     test_overflow_drops_whole_sentences_only()
     test_playing_sentence_not_dropped()
     test_engine_marks_sentence_boundaries()
+    test_engine_uses_injected_audio_sink()
     print("ALL PASSED")

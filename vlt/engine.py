@@ -465,6 +465,7 @@ class Engine:
         config_path: str | Path | None = None,
         audio_out: bool | None = None,
         audio_device: list[str] | None = None,
+        audio_sink=None,
     ) -> None:
         self._cfg = cfg
         self._direction = direction
@@ -478,6 +479,10 @@ class Engine:
         self._config_path = config_path
         self._audio_out_override = audio_out
         self._audio_device_override = audio_device
+        # 外部注入的译音输出（麦克风代理的 TranslatedSink）：非 None 时引擎**不自建**
+        # VirtualMic，而是把译音 PCM 灌进代理那条常驻输出流（原声/译音一键切换）。
+        # 归代理管生命周期 —— 引擎停翻译时**绝不能** close 它（见 _cleanup 的 _owns_virtualmic）。
+        self._audio_sink = audio_sink
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -491,6 +496,9 @@ class Engine:
         self._merger: Merger | None = None
         self._overlay: Any | None = None
         self._virtualmic: VirtualMic | None = None
+        # True = _virtualmic 是引擎自建的（停翻译时要 close）；False = 外部注入的共享 sink
+        # （归代理管，引擎不碰它的生命周期）。
+        self._owns_virtualmic = False
         # 流式合成**串行**锁：同一时刻只让一路往虚拟声卡写分片（并发写会让分片交错，
         # 听感是「整段反复重念」—— 连打两条也会）。懒建：首次用时在事件循环线程里创建。
         self._speak_lock_obj: asyncio.Lock | None = None
@@ -768,9 +776,10 @@ class Engine:
         except Exception:
             pass
         try:
-            if self._virtualmic is not None:
+            if self._virtualmic is not None and self._owns_virtualmic:
                 self._virtualmic.close()
-                self._virtualmic = None
+            self._virtualmic = None
+            self._owns_virtualmic = False
         except Exception:
             pass
         try:
@@ -901,13 +910,23 @@ class Engine:
             造出对象（可能顺带声明设备）→ 调 open() → 失败就清成 None
         Linux 的「造」这一步还会**运行时声明**一对 PipeWire 节点
         （无配置文件、不重启任何服务、不改任何全局状态），见 `vlt/platform/linux.py`。
+
+        若外部注入了 `audio_sink`（麦克风代理的 TranslatedSink）→ 直接用它，
+        **不自建 VirtualMic、不 pick 设备**：译音灌进代理那条常驻输出流，
+        由代理的档位开关决定此刻放原声还是译音。
         """
+        if self._audio_sink is not None:
+            self._virtualmic = self._audio_sink
+            self._owns_virtualmic = False
+            return
         vm = self._make_audio_out(audio_cfg)
         if vm is None:
             return
         self._virtualmic = vm
+        self._owns_virtualmic = True
         if not vm.open():
             self._virtualmic = None
+            self._owns_virtualmic = False
             print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{vm.device_name}",
                   flush=True)
         # 打开成功不用再打印：open() 自己会报（Windows 经 on_status → 日志 + 状态栏）。

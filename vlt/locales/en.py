@@ -436,4 +436,27 @@ STRINGS: dict[str, str] = {
         "Anchor, position / rotation / font size and more for the in-headset wrist overlay.",
     "贴在 VRChat 窗口上的那块字幕窗：尺寸 / 字号 / 透明度。":
         "The subtitle window pinned to the VRChat window: size / font size / opacity.",
+    # ---- 麦克风代理（原声/译音一键切换）----
+    "麦克风代理": "Mic Proxy",
+    "启用 —— VRChat 麦克风固定选虚拟声卡，原声/译音在主界面一键切":
+        "Enable — VRChat mic stays on the virtual cable; switch Original/Translated in the main window",
+    "直通缓冲(ms):": "Passthrough buffer (ms):",
+    "译音缓冲(ms):": "Translated buffer (ms):",
+    "直通缓冲越小延迟越低（下限 60ms）；持续爆音请调大。改完即时生效。":
+        "Smaller passthrough buffer = lower latency (min 60ms); increase it if the audio keeps crackling. Applies instantly.",
+    "已关闭：回到旧行为（译音输出随翻译启停，主界面切换开关置灰）":
+        "Disabled: back to the old behavior (translated output follows translation start/stop; the main-window toggle is greyed out)",
+    "虚拟声卡未打开——检查「译音输出」设备；缓冲改动已存，下次生效":
+        "Virtual cable not open — check the Translated Output device; buffer changes saved, applied next time",
+    "麦克风代理不可用（虚拟声卡没打开？）；原声/译音切换已禁用":
+        "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
+    "麦克风代理已启用": "Mic Proxy enabled",
+    "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "缓冲已更新（即时生效）": "Buffers updated (applied instantly)",
+    "缓冲已保存（译音缓冲下次开始翻译生效）":
+        "Buffers saved (translated buffer applies next time translation starts)",
+    "未勾选「译音输出」，译音档会无声（已在输出行勾选后重试）":
+        "Translated Output is unchecked, so Translated mode will be silent (tick it in the output row and try again)",
+    "🎙 原声": "🎙 Original",
+    "🗣 译音": "🗣 Translated",
 }
