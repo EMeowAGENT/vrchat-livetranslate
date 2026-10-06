@@ -34,15 +34,14 @@ from .ui_theme import (
     PANEL,
     TEXT_MUTED,
 )
-from .ui_tk import (
-    FONT,
-    FONT_META,
-    FONT_SMALL,
-    FONT_STATUS,
-    FONT_UI,
-    _char_width_for,
-    round_rect,
-)
+# ⚠️ 字体常量**必须运行时取** `ui_tk.FONT_*`，不能在 import 期捕获快照（issue #61）：
+#    `apply_ui_font()` 是在建 root **之后**才把 ui_tk 里那份从占位字族
+#    （"Microsoft YaHei UI"）改成解析后的字族。import 期捕获的话，Linux 上该字族不存在、
+#    Tk 静默回落到另一个字体 —— 度量跟着飘，凡是按 `width=` 量出来的控件就会裁字
+#    （实测：ru 的「发送」按钮少 1 个字符宽，`test_all_ui_languages_window_guard` 抓到的就是它）。
+#    `vlt/gui_desktop.py` 里 `ui_tk.FONT_UI` 那种写法才是对的，照它来。
+from . import ui_tk
+from .ui_tk import _char_width_for, round_rect
 
 
 # ================================================================ 上下文
@@ -149,7 +148,7 @@ def build_input_row(parent, ctx: ChatCtx, cfg,
     row.pack(fill=tk.X)
     ttk.Label(row, text=t("打字:"), style="Dim.TLabel").pack(side=tk.LEFT)
     ctx.text_var = tk.StringVar()
-    ctx.text_entry = ttk.Entry(row, textvariable=ctx.text_var, font=FONT_UI,
+    ctx.text_entry = ttk.Entry(row, textvariable=ctx.text_var, font=ui_tk.FONT_UI,
                                style="Key.TEntry")
     ctx.text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
     ctx.text_entry.bind("<Return>",
@@ -159,7 +158,7 @@ def build_input_row(parent, ctx: ChatCtx, cfg,
     attach_edit_menu_fn(ctx.text_entry)
     ctx.send_btn = ttk.Button(
         row, text=t("发送"),
-        width=_char_width_for(t("发送"), FONT_UI, 8),
+        width=_char_width_for(t("发送"), ui_tk.FONT_UI, 8),
         command=lambda: send_typed(ctx))
     ctx.send_btn.pack(side=tk.LEFT)
     ttk.Label(row, text=t("回车发送 · Esc 清空"),
@@ -174,7 +173,7 @@ def build_status(parent, ctx: ChatCtx) -> None:
     # 左侧：彩色圆点（连接状态）+ 最新一条状态消息；右侧放统计汇总——两者分开，
     # 否则"等待收尾"这类瞬时消息会把"已翻译 N 条 / 首增量 Xms"覆盖掉。
     ctx.status_dot = tk.Label(bar, text="●", bg=PANEL, fg=TEXT_MUTED,
-                              font=FONT_STATUS, bd=0)
+                              font=ui_tk.FONT_STATUS, bd=0)
     ctx.status_dot.pack(side=tk.LEFT, padx=(0, 6))
     ctx.status_label = ttk.Label(bar, text=t("就绪"), style="Status.TLabel")
     ctx.status_label.pack(side=tk.LEFT)
@@ -311,7 +310,7 @@ def draw_bubble(ctx: ChatCtx, b: _Bubble) -> int:
 
     # 1) 先量尺寸：两张文字都先画在 (0,0)，量完再挪进气泡
     tid_big = cv.create_text(0, 0, text=b.text, width=maxw,
-                             anchor="nw", font=FONT, fill=COLOR_TEXT)
+                             anchor="nw", font=ui_tk.FONT, fill=COLOR_TEXT)
     bx1, by1, bx2, by2 = cv.bbox(tid_big)
     big_w, big_h = bx2 - bx1, by2 - by1
 
@@ -324,7 +323,7 @@ def draw_bubble(ctx: ChatCtx, b: _Bubble) -> int:
     if small_key and small_key != (b.text or "").strip():
         tid_small = cv.create_text(
             0, 0, text=small_raw, width=maxw, anchor="nw",
-            font=FONT_SMALL,
+            font=ui_tk.FONT_SMALL,
             fill=COLOR_SRC_MINE if b.who == "mine" else COLOR_SRC_THEIRS)
         sx1, sy1, sx2, sy2 = cv.bbox(tid_small)
         small_w, small_h = sx2 - sx1, sy2 - sy1
@@ -341,7 +340,7 @@ def draw_bubble(ctx: ChatCtx, b: _Bubble) -> int:
         items.append(cv.create_text(
             w - 18 if b.who == "mine" else 18, y, text=b.ts,
             anchor="ne" if b.who == "mine" else "nw",
-            font=FONT_META, fill=COLOR_META))
+            font=ui_tk.FONT_META, fill=COLOR_META))
         y += 14
     bx = w - 18 - bw if b.who == "mine" else 18  # 右 / 左
     fill = COLOR_MINE if b.who == "mine" else COLOR_THEIRS
