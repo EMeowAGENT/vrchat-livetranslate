@@ -344,6 +344,10 @@ class MicProxy:
                             "→ 麦克风代理不可用，其余功能不受影响。")
             return None
         idx, name, rate = picked
+        # 与 `engine._make_audio_out` 同一条纪律：回退链挑中的设备也要算同名回落候选，
+        # 否则首选端点打不开时代理这条腿只试一次就被判死（逐条留痕见 `_open_output`）。
+        if not fallbacks:
+            fallbacks = platform.output_device_fallbacks(name, exclude=idx)
         return (idx, name, rate, fallbacks)
 
     def _open_output(self, idx: int, name: str, fallbacks: list[int]) -> bool:
