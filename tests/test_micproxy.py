@@ -430,6 +430,39 @@ def test_start_no_device_degrades_gracefully():
     print("  无虚拟声卡时优雅降级 OK（返回 False + 留痕，不抛异常）")
 
 
+def test_pick_output_device_computes_fallbacks_in_auto_chain():
+    """★ 代理侧同一条纪律：回退链档（无 device_name）挑中的设备也要算同名回落候选。
+
+    与 `engine._make_audio_out` 同因（2026-10-06 真机：档位落到回退链后首选端点打不开，
+    没有候选就只试一次、代理这条腿直接不可用）。
+    """
+    from vlt.output import micproxy as MP
+    from vlt import platform
+
+    asked: list[tuple[str, object]] = []
+    orig_pick, orig_fb = MP.pick_output_device, platform.output_device_fallbacks
+
+    def _fb(name, exclude=None):
+        asked.append((name, exclude))
+        return [31]
+
+    MP.pick_output_device = lambda patterns=None: (40, "FakeCard", 48000)  # noqa: ARG005
+    platform.output_device_fallbacks = _fb            # type: ignore[assignment]
+    try:
+        p = MicProxy(audio_cfg={"device": ["voicemeeter input"]})
+        got = p._pick_output_device()
+    finally:
+        MP.pick_output_device = orig_pick
+        platform.output_device_fallbacks = orig_fb    # type: ignore[assignment]
+
+    assert got is not None, "有设备时应返回四元组"
+    idx, name, rate, fallbacks = got
+    assert (idx, name) == (40, "FakeCard"), got
+    assert fallbacks == [31], f"回退链档没算同名回落候选：{fallbacks!r}"
+    assert asked and asked[0][1] == 40, f"算候选时应排除首选本身：{asked!r}"
+    print("  代理侧回退链档也算同名回落候选 OK")
+
+
 if __name__ == "__main__":
     print("test_micproxy:")
     test_resample_16k_to_48k_dc_byte_exact()
@@ -452,4 +485,5 @@ if __name__ == "__main__":
     test_reopen_with_updates_params_idempotent()
     test_start_close_stubbed()
     test_start_no_device_degrades_gracefully()
+    test_pick_output_device_computes_fallbacks_in_auto_chain()
     print("ALL PASSED")

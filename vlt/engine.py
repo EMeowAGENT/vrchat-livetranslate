@@ -974,6 +974,12 @@ class Engine:
                 f"没找到匹配的输出设备（回退链：{chain}）。虚拟声卡装好了吗？其余功能不受影响。")
             return None
         idx, name, rate = picked
+        # 同名回落候选：**两条选设备的分支都要算** —— 「自动回退链」档挑中的设备同样可能
+        # 打不开（虚拟声卡的 WASAPI 端点真机必现 `-9999`），而这条分支原先 `fallbacks`
+        # 一直是空的 → 只试一次就把「译音输出」整条腿判死（2026-10-06 测试者真机复现：
+        # 设备名一空、档位落到回退链，译音输出直接禁用；指定设备名时反而没事）。
+        if not fallbacks:
+            fallbacks = platform.output_device_fallbacks(name, exclude=idx)
         return VirtualMic(
             device_index=idx,
             device_name=name,
