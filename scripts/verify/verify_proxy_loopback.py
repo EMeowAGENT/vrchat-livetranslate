@@ -50,6 +50,7 @@ DEFAULT_IN_PATTERNS = ("cable output", "voicemeeter output", "vb-audio")
 # 假正弦频率、主频容差、假麦克风源、FFT 判据 —— 全部与 Linux 版共用（`_proxy_probe.py`）。
 # 判据抄两份必然漂移，而「看着绿、其实没测到」正是这类探针最要命的失败模式。
 from _proxy_probe import (          # noqa: E402  同目录下的共用件
+    TOLERANCE_HZ as TOLERANCE_HZ,   # ↖ 显式重导出给 verify_proxy_app_start.py 用（ruff 认这个写法）
     TONE_MIC_HZ,
     TONE_TRANSLATED_HZ,
     FakeCaptureBackend,
@@ -144,7 +145,8 @@ def main() -> int:
            "buffer_ms": 300, "max_buffer_ms": 2000,
            "proxy": {"enabled": True, "passthrough_buffer_ms": 150}}
     proxy = MicProxy(audio_cfg=cfg, mic_name=None,
-                     on_status=lambda lvl, msg: print(f"    {lvl}: {msg}"))
+                     on_status=lambda lvl, msg, **kw: print(
+                         f"    {lvl}: {msg.format(**kw) if kw else msg}"))
     results: dict[str, float] = {}
     stop_push = threading.Event()
     push_thread = None
