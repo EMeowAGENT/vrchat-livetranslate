@@ -42,56 +42,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-TONE_MIC_HZ = 1000.0          # 假麦克风喂进去的正弦
-TONE_TRANSLATED_HZ = 500.0    # 译音档推进去的正弦
-TOLERANCE_HZ = 30.0
-
 #: 输出端（程序往里推）的默认关键词：VB-CABLE → CABLE Input；VoiceMeeter → VoiceMeeter Input
 DEFAULT_OUT_PATTERNS = ("cable input", "voicemeeter input", "vb-audio")
 #: 录音端（我们从这里抓）的默认关键词
 DEFAULT_IN_PATTERNS = ("cable output", "voicemeeter output", "vb-audio")
 
-
-# ---------------------------------------------------------------- 假麦克风源
-
-def tone_16k_mono(freq: float, ms: int, amp: float = 0.3) -> bytes:
-    n = int(16000 * ms / 1000)
-    return b"".join(
-        struct.pack("<h", int(amp * 32767 * math.sin(2 * math.pi * freq * i / 16000)))
-        for i in range(n)
-    )
-
-
-class FakeMicSource:
-    """假麦克风源：按实时节奏吐 100ms 一块的已知正弦（16k 单声道）。
-
-    接口与 `platform.capture_backend().open_mic()` 的返回值一致：
-    `rate` / `channels` / `async read(timeout)` / `close()`。
-    """
-
-    def __init__(self, freq: float = TONE_MIC_HZ) -> None:
-        self.rate, self.channels = 16000, 1
-        self.closed = False
-        self._chunk = tone_16k_mono(freq, 100)
-
-    async def read(self, timeout: float = 0.5):        # noqa: ARG002
-        import asyncio
-
-        await asyncio.sleep(0.1)
-        return self._chunk
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class FakeCaptureBackend:
-    """替掉 `vlt.platform.capture_backend()` —— 只为了不碰真实麦克风。"""
-
-    def __init__(self, src: FakeMicSource) -> None:
-        self._src = src
-
-    def open_mic(self, name, *, rate, channels, blocksize):   # noqa: ARG002, ANN001
-        return self._src
+# 假正弦频率、主频容差、假麦克风源、FFT 判据 —— 全部与 Linux 版共用（`_proxy_probe.py`）。
+# 判据抄两份必然漂移，而「看着绿、其实没测到」正是这类探针最要命的失败模式。
+from _proxy_probe import (          # noqa: E402  同目录下的共用件
+    TONE_MIC_HZ,
+    TONE_TRANSLATED_HZ,
+    FakeCaptureBackend,
+    FakeMicSource,
+    analyse,
+    report,
+)
 
 
 # ---------------------------------------------------------------- 设备 / 抓取 / 分析
@@ -148,22 +113,6 @@ def capture(seconds: float, dev: int, samplerate: int = 48000):
         stream.close()
     return np.frombuffer(bytes(got), dtype="<i2").reshape(-1, 2)
 
-
-def analyse(samples, label: str, samplerate: int = 48000) -> tuple[float, float]:
-    """返回 (主频 Hz, RMS dBFS)，并打印一行。"""
-    import numpy as np
-
-    mono = samples.astype(np.float64).mean(axis=1)
-    rms = float(np.sqrt((mono ** 2).mean())) if len(mono) else 0.0
-    db = 20 * math.log10(rms / 32768) if rms > 0 else -120.0
-    spec = np.abs(np.fft.rfft(mono * np.hanning(len(mono))))
-    freqs = np.fft.rfftfreq(len(mono), 1 / samplerate)
-    peak = float(freqs[int(np.argmax(spec))]) if len(spec) else 0.0
-    print(f"    {label}: 主频 {peak:7.1f} Hz | RMS {rms:8.1f} ({db:6.1f} dBFS)")
-    return peak, db
-
-
-# ---------------------------------------------------------------- 主流程
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="麦克风代理 + 虚拟声卡的真机回环验收")
@@ -241,15 +190,9 @@ def main() -> int:
         proxy.close()
         platform.capture_backend = saved_backend          # type: ignore[assignment]
 
-    print(f"\n=== 判定（主频容差 ±{TOLERANCE_HZ:.0f}Hz）===")
-    checks = [("原声档应为 1kHz", results.get("原声", 0.0), TONE_MIC_HZ),
-              ("译音档应为 500Hz", results.get("译音", 0.0), TONE_TRANSLATED_HZ),
-              ("切回原声应为 1kHz", results.get("回原声", 0.0), TONE_MIC_HZ)]
-    all_ok = True
-    for label, got, want in checks:
-        good = abs(got - want) <= TOLERANCE_HZ
-        all_ok &= good
-        print(f"  {'✅' if good else '❌'} {label}：实测 {got:.1f} Hz")
+    all_ok = report([("原声档应为 1kHz", results.get("原声", 0.0), TONE_MIC_HZ),
+                     ("译音档应为 500Hz", results.get("译音", 0.0), TONE_TRANSLATED_HZ),
+                     ("切回原声应为 1kHz", results.get("回原声", 0.0), TONE_MIC_HZ)])
     print("  假麦克风源已释放：", src.closed)
     print("\n结论：", "✅ 原声直通 + 档位路由在真虚拟声卡上成立" if all_ok else "❌ 有判据未通过")
     return 0 if all_ok else 1
