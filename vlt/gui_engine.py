@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from . import config as _cfg_mod
-from . import crashlog, gui_chat, gui_update, gui_voice
+from . import crashlog, gui_chat, gui_voice
 from . import platform
 from .config import Direction
 from .config_io import (

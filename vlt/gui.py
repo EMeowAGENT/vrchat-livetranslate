@@ -5,27 +5,36 @@
   python -m vlt.gui --self-test-dual   # 双向同时验收（两个 PCM 驱动两个引擎）
 """
 from __future__ import annotations
-import argparse, queue, re, subprocess, threading, tkinter as tk, webbrowser
+import argparse, queue, re, threading, tkinter as tk
+import subprocess as subprocess     # 显式重导出：tests 打桩 `vlt.gui.subprocess`（更新链路）
+import webbrowser as webbrowser     # 显式重导出：tests 打桩 `vlt.gui.webbrowser`（赞助链接）
 from pathlib import Path
 from tkinter import ttk
 from typing import Any
-from . import __version__, crashlog, i18n, update_check
-from .config import Direction, DEFAULT_CONFIG, load_config
+from . import crashlog, i18n, update_check
+from .config import DEFAULT_CONFIG, load_config
 from .config_io import _fmt_scalar, _yaml_set_in_text, _yaml_set_or_create, _write_config_text
 from .i18n import t
 from .paths import APP_DIR
 # ── 重导出（保持 from vlt.gui import X 向后兼容）──
 from . import ui_tk
-from .ui_text import (SOURCE_LANGS, TARGET_LANGS, _is_unsupported_voice_err, _lang_key, _lang_label,
-    _play_pcm_local as _play_pcm_local, _persist_provider, _source_name, _sponsor_qr_specs, _target_name, updater_env)
-from .ui_theme import (COLOR_SRC_MINE, FONT_MAX, FONT_MIN, MAX_BUBBLES, PANEL, PANEL_H_MAX, PANEL_H_MIN,
-    PANEL_W_MAX, PANEL_W_MIN, QIANWEN_SIGNUP_URL as QIANWEN_SIGNUP_URL, SETTINGS_MIN_H, SETTINGS_WIDTH,
-    SPONSOR_QR_SIZE, SPONSOR_URL, SPONSORS, SRC_FONT_MIN, TAB_INSET_X, TEXT, TEXT_DIM, TEXT_MUTED)
-from .ui_tk import _char_width_for, _combo_width, _int_fmt, apply_theme, combo_values, round_rect
+from .ui_text import (SOURCE_LANGS, TARGET_LANGS, _lang_key, _lang_label,
+    _play_pcm_local as _play_pcm_local, _source_name, _target_name)
+from .ui_theme import (QIANWEN_SIGNUP_URL as QIANWEN_SIGNUP_URL, SETTINGS_MIN_H, SETTINGS_WIDTH)
+from .ui_tk import apply_theme
 from .ui_state import room_status_text, save_room_cfg
 from .gui_selftest import run_self_test
-from .glossary_text import _glossary_line_issues, _glossary_to_lines, _parse_glossary_lines
-from .level_probe import LevelProbe
+# 显式重导出（`X as X`）：这些名字 gui.py 自己不再用，但 `tests/` 与 `run_gui.py` 仍从
+# `vlt.gui` 取。不写 `as` 的话 ruff 的 F401 会把它们当未用导入删掉（CI 门禁阻断）。
+from .ui_text import (_is_unsupported_voice_err as _is_unsupported_voice_err,
+    _persist_provider as _persist_provider, _sponsor_qr_specs as _sponsor_qr_specs,
+    updater_env as updater_env)
+from .ui_theme import (COLOR_SRC_MINE as COLOR_SRC_MINE, PANEL as PANEL, SPONSORS as SPONSORS,
+    SPONSOR_QR_SIZE as SPONSOR_QR_SIZE, SPONSOR_URL as SPONSOR_URL, TAB_INSET_X as TAB_INSET_X)
+from .glossary_text import (_glossary_line_issues as _glossary_line_issues,
+    _glossary_to_lines as _glossary_to_lines, _parse_glossary_lines as _parse_glossary_lines)
+from .level_probe import LevelProbe as LevelProbe
+from .ui_tk import _char_width_for as _char_width_for
 from . import gui_room, gui_voice, gui_audio, gui_update, gui_settings
 from . import gui_desktop, gui_chat, gui_engine, gui_layout
 from .gui_room import RoomCtx; from .gui_voice import VoiceCtx

@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import struct
 import sys
-import threading
 import time
 import types
 from pathlib import Path
@@ -26,7 +25,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vlt.output.micproxy import (          # noqa: E402
-    DEFAULT_PASSTHROUGH_MS,
     MODE_PASSTHROUGH,
     MODE_TRANSLATED,
     MicProxy,

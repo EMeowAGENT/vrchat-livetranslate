@@ -32,7 +32,6 @@ from .ui_text import (
 )
 from .ui_theme import (
     ACCENT_HOVER,
-    BG,
     BORDER,
     PANEL,
     SPONSOR_QR_SIZE,

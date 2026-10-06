@@ -9,17 +9,15 @@ from tkinter import ttk
 
 from . import ui_tk
 from . import gui_voice
-from .glossary_text import _parse_glossary_lines
 from .i18n import t
 from .platform import IS_WINDOWS
 from .paths import BUNDLE_DIR
 from .ui_text import (
     SOURCE_LANGS, TARGET_LANGS,
-    _lang_label, _source_name, _target_name,
+    _lang_label,
 )
 from .ui_theme import (
-    ACCENT, BORDER, FONT_MAX, FONT_MIN, PANEL, SETTINGS_WIDTH,
-    SRC_FONT_MIN, SURFACE, TAB_INSET_X, TEXT, TEXT_MUTED,
+    ACCENT, BORDER, PANEL, SURFACE, TEXT,
 )
 from .ui_tk import _combo_width, _char_width_for
 

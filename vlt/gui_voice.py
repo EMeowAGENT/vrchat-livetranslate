@@ -10,8 +10,7 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import yaml
 
@@ -30,14 +29,13 @@ from .glossary_text import (
 )
 from .i18n import t
 from .output.micproxy import MODE_PASSTHROUGH, MODE_TRANSLATED
-from .ui_state import current_key_slot, provider
+from .ui_state import current_key_slot
 from .ui_text import (
     VOICE_PREVIEW_MODEL,
     VOICE_PREVIEW_TEXT,
     _is_unsupported_voice_err,
     _play_pcm_local,
 )
-from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
 
 
 # ================================================================ 上下文
