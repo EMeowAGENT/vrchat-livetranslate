@@ -236,8 +236,17 @@ def test_gui_proxy_controls_state_and_writeback() -> None:
     gui = None
     try:
         gui = _make_gui(cfg_path)
+
+        # ⓪ 初始态：**建完就断言**，不许先调一次刷新函数（否则只验了函数、漏掉出厂态）。
+        #    `_proxy` 在本仓库恒为 None（Linux 永远无代理；Windows 的麦克风代理尚未接线），
+        #    说明 `refresh_voice_mode_btn` 的判定是「无 proxy → 禁用」——按钮出厂就该是灰的。
+        #    少了这条，Linux 上会出现一颗看着能点、点了只 `return` 的死按钮（本机实测）。
+        assert str(gui._voice_mode_btn.cget("state")) == "disabled", \
+            f"初始态就该置灰（无 proxy），实际 {gui._voice_mode_btn.cget('state')!r}"
+
         if gui._passthrough_spin is None:
-            print("  [skip] 非 Windows：麦克风代理设置控件未建，跳过 GUI 态用例")
+            print("  [skip] 非 Windows：麦克风代理设置控件未建，跳过后续 GUI 态用例"
+                  "（按钮初始态已在上方断言）")
             return
 
         # ① 初始（proxy 默认启用）：直通/译音缓冲都可编辑；测试进程守卫生效 → 不真开代理
@@ -303,8 +312,34 @@ def test_gui_proxy_controls_state_and_writeback() -> None:
         assert (audio.get("proxy") or {}).get("passthrough_buffer_ms") == 500, audio
         assert audio.get("buffer_ms") == 50, audio
 
+        # ⑨ ★ 解锁时序：引擎是往 `ctx.engines` 追加的，界面按钮读的却是自己的
+        #    `_engines` —— 只有 `_unsync_engine_ctx()`（ctx→界面）之后才一致。
+        #    实测事故：刷新放在同步**之前**，按钮被判成「没有引擎在跑」而一直置灰，
+        #    用户根本切不到译音档（现象是「只能听原声、听不到译音」）。
+        gui._proxy = _FakeProxy(mode=MODE_PASSTHROUGH)
+        gui._engines = []
+        gui._voice_ctx.proxy = None
+        gui._engine_ctx.engines = [_FakeEngine(running=True)]
+        gui._engine_ctx.engine_dirs = ["mine"]
+
+        # ⑨-1 未同步就刷 = 旧行为 → 仍置灰（复现事故）
+        gui._refresh_voice_mode_btn()
+        assert str(gui._voice_mode_btn.cget("state")) == "disabled", \
+            "未同步就刷时应当还是置灰（否则这条用例守不住那个 bug）"
+
+        # ⑨-2 先同步再刷 = `_start()` 里的正确顺序 → 解禁
+        gui._unsync_engine_ctx()
+        gui._refresh_voice_mode_btn()
+        assert str(gui._voice_mode_btn.cget("state")) == "normal", \
+            "同步之后再刷应当解禁（翻译在跑 + 有代理）"
+        assert gui._voice_ctx.proxy is gui._proxy, "刷完 VoiceCtx 该拿到代理"
+        gui._engine_ctx.engines = []
+        gui._unsync_engine_ctx()
+        gui._proxy = None
+
         print("  ✓ GUI 代理控件态（关代理置灰直通缓冲）+ 切换按钮置灰（翻译停弹回原声）"
               " + 缓冲写回持久化往返（含越界夹取）全对")
+        print("  ✓ 切换按钮解锁时序：必须「先 ctx→界面同步、再刷新」（复现了旧 bug 并守住）")
     finally:
         _destroy(gui)
         _restore_env(saved_env)

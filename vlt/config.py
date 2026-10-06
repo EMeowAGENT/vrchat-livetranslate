@@ -382,7 +382,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             "sample_rate": int(raw_audio.get("sample_rate", 48000)),
             "buffer_ms": int(raw_audio.get("buffer_ms", 300)),
             "max_buffer_ms": int(raw_audio.get("max_buffer_ms", 2000)),
-            # 麦克风代理（仅 Windows）：常驻把麦克风直通虚拟声卡，界面一键切「原声/译音」。
+            # 麦克风代理（两端都支持）：常驻把麦克风直通虚拟声卡，界面一键切「原声/译音」。
             # ⚠️ passthrough_buffer_ms 的下限不能太小：麦克风输入块约 100ms，缓冲帽小于一个
             #    输入块会把每块削掉大半 → 严重断续（见 vlt/output/micproxy.py 模块头说明）。
             "proxy": {

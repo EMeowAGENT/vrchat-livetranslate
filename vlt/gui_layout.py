@@ -245,6 +245,11 @@ def build_output_row(gui) -> None:
             set_status=gui._set_status, refresh_btn=gui._refresh_voice_mode_btn))
     gui._voice_mode_btn.pack(side=tk.LEFT, padx=(10, 0))
     gui._voice_ctx.voice_mode_btn = gui._voice_mode_btn  # 同步到 ctx
+    # ★ 建完立刻对齐一次档位/可用态，**不能**等到有人点它才刷新：
+    #   本仓库当前 `_proxy` 恒为 None（Linux 永远无 proxy；Windows 的麦克风代理尚未接线），
+    #   而 `refresh_voice_mode_btn` 对「无 proxy」的判定是**禁用**。少了这一行，按钮会以
+    #   NORMAL 出厂，成了一颗看着能点、点了只 `return` 的死按钮（Linux 实测）。
+    gui._refresh_voice_mode_btn()
     gui._desktop_var = tk.BooleanVar(
         value=bool((gui._cfg.ui or {}).get("desktop_overlay", False)))
     tk.Checkbutton(out_frame, text=t("桌面字幕"), variable=gui._desktop_var,

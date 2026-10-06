@@ -37,7 +37,6 @@ from .engine import (
 )
 from .i18n import t
 from .paths import APP_DIR
-from .platform import IS_WINDOWS
 from .ui_state import current_key_slot, provider
 from .ui_text import _persist_provider, _provider_choices
 from .ui_theme import (
@@ -505,57 +504,57 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
-    # ---- 麦克风代理（仅 Windows）----
+    # ---- 麦克风代理（**两端都建**：Windows 走 PortAudio 输出流，Linux 走 pw-cat 管道 +
+    #      运行时声明的虚拟麦。语义完全一致，见 vlt/output/micproxy*.py 的模块头）----
     gui._proxy_check = None
     gui._passthrough_spin = None
     gui._translated_spin = None
-    if IS_WINDOWS:
-        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
-        ttk.Label(body, text=t("麦克风代理"), style="Section.TLabel").pack(anchor=tk.W)
-        _proxy_cfg = audio_cfg.get("proxy") or {}
-        gui._proxy_enabled_var = tk.BooleanVar(value=bool(_proxy_cfg.get("enabled", True)))
-        gui._proxy_check = tk.Checkbutton(
-            body, variable=gui._proxy_enabled_var,
-            text=t("启用 —— VRChat 麦克风固定选虚拟声卡，原声/译音在主界面一键切"),
-            command=lambda: gui._on_proxy_toggle(), wraplength=SETTINGS_WRAP,
-            justify=tk.LEFT, anchor="w", **_indicator_kw(gui))
-        gui._proxy_check.pack(anchor=tk.W, pady=(8, 4))
+    ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)
+    ttk.Label(body, text=t("麦克风代理"), style="Section.TLabel").pack(anchor=tk.W)
+    _proxy_cfg = audio_cfg.get("proxy") or {}
+    gui._proxy_enabled_var = tk.BooleanVar(value=bool(_proxy_cfg.get("enabled", True)))
+    gui._proxy_check = tk.Checkbutton(
+        body, variable=gui._proxy_enabled_var,
+        text=t("启用 —— VRChat 麦克风固定选虚拟声卡，原声/译音在主界面一键切"),
+        command=lambda: gui._on_proxy_toggle(), wraplength=SETTINGS_WRAP,
+        justify=tk.LEFT, anchor="w", **_indicator_kw(gui))
+    gui._proxy_check.pack(anchor=tk.W, pady=(8, 4))
 
-        pgrid = ttk.Frame(body)
-        pgrid.pack(fill=tk.X)
-        pgrid.columnconfigure(1, weight=1)
-        gui._passthrough_var = tk.IntVar(
-            value=int(_proxy_cfg.get("passthrough_buffer_ms", 150)))
-        ttk.Label(pgrid, text=t("直通缓冲(ms):"), style="Dim.TLabel").grid(
-            row=0, column=0, sticky="w", pady=3)
-        gui._passthrough_spin = ttk.Spinbox(
-            pgrid, from_=60, to=500, increment=10, width=8,
-            textvariable=gui._passthrough_var,
-            command=lambda: gui._on_proxy_buffer_change())
-        gui._passthrough_spin.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=3)
-        gui._passthrough_spin.bind("<FocusOut>",
-                                   lambda _e: gui._on_proxy_buffer_change())
-        gui._passthrough_spin.bind("<Return>",
-                                   lambda _e: gui._on_proxy_buffer_change())
+    pgrid = ttk.Frame(body)
+    pgrid.pack(fill=tk.X)
+    pgrid.columnconfigure(1, weight=1)
+    gui._passthrough_var = tk.IntVar(
+        value=int(_proxy_cfg.get("passthrough_buffer_ms", 150)))
+    ttk.Label(pgrid, text=t("直通缓冲(ms):"), style="Dim.TLabel").grid(
+        row=0, column=0, sticky="w", pady=3)
+    gui._passthrough_spin = ttk.Spinbox(
+        pgrid, from_=60, to=500, increment=10, width=8,
+        textvariable=gui._passthrough_var,
+        command=lambda: gui._on_proxy_buffer_change())
+    gui._passthrough_spin.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=3)
+    gui._passthrough_spin.bind("<FocusOut>",
+                               lambda _e: gui._on_proxy_buffer_change())
+    gui._passthrough_spin.bind("<Return>",
+                               lambda _e: gui._on_proxy_buffer_change())
 
-        gui._translated_buf_var = tk.IntVar(
-            value=int(audio_cfg.get("buffer_ms", 300)))
-        ttk.Label(pgrid, text=t("译音缓冲(ms):"), style="Dim.TLabel").grid(
-            row=1, column=0, sticky="w", pady=3)
-        gui._translated_spin = ttk.Spinbox(
-            pgrid, from_=50, to=2000, increment=50, width=8,
-            textvariable=gui._translated_buf_var,
-            command=lambda: gui._on_proxy_buffer_change())
-        gui._translated_spin.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=3)
-        gui._translated_spin.bind("<FocusOut>",
-                                  lambda _e: gui._on_proxy_buffer_change())
-        gui._translated_spin.bind("<Return>",
-                                  lambda _e: gui._on_proxy_buffer_change())
+    gui._translated_buf_var = tk.IntVar(
+        value=int(audio_cfg.get("buffer_ms", 300)))
+    ttk.Label(pgrid, text=t("译音缓冲(ms):"), style="Dim.TLabel").grid(
+        row=1, column=0, sticky="w", pady=3)
+    gui._translated_spin = ttk.Spinbox(
+        pgrid, from_=50, to=2000, increment=50, width=8,
+        textvariable=gui._translated_buf_var,
+        command=lambda: gui._on_proxy_buffer_change())
+    gui._translated_spin.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=3)
+    gui._translated_spin.bind("<FocusOut>",
+                              lambda _e: gui._on_proxy_buffer_change())
+    gui._translated_spin.bind("<Return>",
+                              lambda _e: gui._on_proxy_buffer_change())
 
-        gui._proxy_hint = ttk.Label(body, text="", style="Muted.TLabel",
-                                    justify=tk.LEFT, wraplength=SETTINGS_WRAP)
-        gui._proxy_hint.pack(anchor=tk.W, pady=(6, 0))
-        gui._sync_proxy_controls_state()
+    gui._proxy_hint = ttk.Label(body, text="", style="Muted.TLabel",
+                               justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+    gui._proxy_hint.pack(anchor=tk.W, pady=(6, 0))
+    gui._sync_proxy_controls_state()
 
     # ---- 输入门限 ----
     ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=14)

@@ -728,6 +728,20 @@ def open_audio_out(audio_cfg: dict, on_status) -> LinuxAudioOut | None:  # noqa:
     return LinuxAudioOut(cable, sink)
 
 
+def create_mic_proxy(audio_cfg: dict, mic_name: str | None = None,
+                     on_status=None):  # noqa: ANN001
+    """Linux 麦克风代理：`pw-loopback` 声明虚拟麦 + `pw-cat` 写管道驱动输出。
+
+    与 Windows 版同构（见 `vlt/output/micproxy_linux.py` 的模块头）；本函数只是
+    把「平台独占的模块」挡在共享代码之外 —— 与 `open_audio_out` / `create_wrist_overlay`
+    同一条纪律。
+    """
+    from ..output.micproxy_linux import LinuxMicProxy
+
+    return LinuxMicProxy(audio_cfg=audio_cfg, mic_name=mic_name,
+                         on_status=on_status or (lambda *_a: None))
+
+
 
 # ---------------------------------------------------------------- 平台能力探测
 
