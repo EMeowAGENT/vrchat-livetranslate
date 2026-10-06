@@ -36,7 +36,9 @@ from .ui_theme import (
     PANEL,
     SPONSOR_QR_SIZE,
 )
-from .ui_tk import _char_width_for, FONT_BOLD_LG
+from . import ui_tk
+from .ui_tk import _char_width_for
+# 字体常量运行时取 `ui_tk.FONT_*`（import 期快照在 Linux 上会静默回落，见 issue #61）
 
 
 def _m(gui):
@@ -105,7 +107,7 @@ def build_sponsor_dialog(gui) -> None:
     body.pack(fill=tk.BOTH, expand=True)
 
     ttk.Label(body, text=t("☕ 请我喝一杯"),
-              font=FONT_BOLD_LG).pack(anchor=tk.CENTER)
+              font=ui_tk.FONT_BOLD_LG).pack(anchor=tk.CENTER)
 
     ttk.Button(body, text=t("打开 Ko-fi 赞助页面"), style="Accent.TButton",
                command=lambda: open_kofi(gui)).pack(anchor=tk.CENTER, pady=(12, 14))

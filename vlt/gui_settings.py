@@ -56,7 +56,8 @@ from .ui_theme import (
     TEXT,
 )
 from . import ui_tk as _ui_tk
-from .ui_tk import _char_width_for, FONT_BOLD_MD
+from .ui_tk import _char_width_for
+# 字体常量运行时取 `_ui_tk.FONT_*`（import 期快照在 Linux 上会静默回落，见 issue #61）
 
 ROOT = APP_DIR
 
@@ -826,7 +827,7 @@ def build_settings_about(gui, body: ttk.Frame) -> None:
 
 def build_sponsor_list(flow: ttk.Frame, gui) -> None:
     """把赞助者名字排成自动换行的亮字名单。"""
-    font = tkfont.Font(font=FONT_BOLD_MD)
+    font = tkfont.Font(font=_ui_tk.FONT_BOLD_MD)
     gap_x, gap_y = 16, 6
     row = ttk.Frame(flow)
     row.pack(anchor=tk.W)
@@ -837,7 +838,7 @@ def build_sponsor_list(flow: ttk.Frame, gui) -> None:
             row = ttk.Frame(flow)
             row.pack(anchor=tk.W, pady=(gap_y, 0))
             used = 0
-        item = tk.Label(row, text=name, font=FONT_BOLD_MD,
+        item = tk.Label(row, text=name, font=_ui_tk.FONT_BOLD_MD,
                         fg=COLOR_SRC_MINE, bg=PANEL)
         item.pack(side=tk.LEFT, padx=(0 if used == 0 else gap_x, 0))
         used += (0 if used == 0 else gap_x) + need
