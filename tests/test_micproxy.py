@@ -3,14 +3,18 @@
 ## ⚠️ 打桩纪律（与 test_virtualmic.py 同一条）
 
 `MicProxy.start()` 会**真的打开音频流**（虚拟声卡输出 + 麦克风采集）。本文件里
-除了 `test_start_close_stubbed` 一条外，其余用例都只在**构造出来、没 start()** 的
+调用 `start()` 的只有下面三条，其余用例都只在**构造出来、没 start()** 的
 MicProxy 上验证纯逻辑（重采样 / 环形缓冲 / 档位切换 / 译音垫片 / 缓冲参数）——
 构造函数不开任何流，所以这些用例在没装虚拟声卡的机器上也照跑。
 
-唯一涉及开流的 `test_start_close_stubbed`：
-  · 用假 `sounddevice` 模块（塞进 sys.modules）替换 `RawOutputStream`；
-  · 用假采集后端替换 `platform.capture_backend`；
-  · 用假 `pick_output_device` 替换设备枚举。
+三条涉及 start() 的用例，各自都把该桩的东西桩住：
+
+  · `test_start_close_stubbed`：假 `sounddevice` + 假采集后端 + 假设备枚举
+    + **放行测试进程守卫**（守卫是最后一道保险，正常用例要显式放行才算「两侧都打桩」）；
+  · `test_start_no_device_degrades_gracefully`：设备枚举返回 None（同样放行守卫）；
+  · `test_start_refused_in_test_process`：★ **故意不放行守卫**，并且把设备枚举换成
+    「一调就抛」的桩 —— 用来钉住「守卫必须在碰任何设备之前就拒绝」。
+
 三者都在 finally 里还原，全程不触碰用户的音频图。
 """
 from __future__ import annotations
@@ -201,7 +205,7 @@ def test_translated_sink_push_and_end_sentence():
 def test_set_mode_rejects_translated_when_inactive():
     """翻译没运行时切译音档：拒绝、留痕、保持原声档。"""
     statuses: list[tuple[str, str]] = []
-    p = MicProxy(audio_cfg={}, on_status=lambda lvl, msg: statuses.append((lvl, msg)))
+    p = MicProxy(audio_cfg={}, on_status=lambda lvl, msg, **kw: statuses.append((lvl, msg)))
     p._translated = _TranslatedBuffer(device_index=0, device_name="x", sample_rate=48000,
                                       buffer_ms=100, max_buffer_ms=2000)
     assert p.set_mode(MODE_TRANSLATED) is False, "未激活翻译时不该允许切译音档"
@@ -371,6 +375,10 @@ def test_start_close_stubbed():
     src = _FakeSource([dc], rate=16000, channels=1)
     orig_cb = platform.capture_backend
     orig_pick = MP.pick_output_device
+    # ★ 必须**两侧都打桩**：`start()` 第一件事就是测试进程守卫（见 test_micproxy.py 头部的
+    #   打桩纪律与 `test_start_refused_in_test_process`）。这里放行它，好走完整条打桩链路。
+    orig_guard = MP._test_process_guard
+    MP._test_process_guard = lambda *a, **k: None        # noqa: ARG005
     platform.capture_backend = lambda: _FakeCaptureBackend(src)      # type: ignore[assignment]
     MP.pick_output_device = lambda patterns=None: (11, "FakeCard", 48000)  # noqa: ARG005
 
@@ -401,6 +409,7 @@ def test_start_close_stubbed():
         p.close()                                     # 幂等
         platform.capture_backend = orig_cb            # type: ignore[assignment]
         MP.pick_output_device = orig_pick
+        MP._test_process_guard = orig_guard
         if orig_sd is not None:
             sys.modules["sounddevice"] = orig_sd
         else:
@@ -418,16 +427,48 @@ def test_start_no_device_degrades_gracefully():
 
     statuses: list[tuple[str, str]] = []
     orig_pick = MP.pick_output_device
+    orig_guard = MP._test_process_guard
+    MP._test_process_guard = lambda *a, **k: None        # noqa: ARG005
     MP.pick_output_device = lambda patterns=None: None       # noqa: ARG005
     p = MicProxy(audio_cfg={"device": ["nonexistent_xyz"]},
-                 on_status=lambda lvl, msg: statuses.append((lvl, msg)))
+                 on_status=lambda lvl, msg, **kw: statuses.append((lvl, msg)))
     try:
         assert p.start() is False, "没设备时 start() 应返回 False"
     finally:
         MP.pick_output_device = orig_pick
+        MP._test_process_guard = orig_guard
     assert p.opened is False
     assert any(lvl == "error" for lvl, _ in statuses), "应经 on_status 报 error"
     print("  无虚拟声卡时优雅降级 OK（返回 False + 留痕，不抛异常）")
+
+
+def test_start_refused_in_test_process():
+    """★ 测试进程守卫：`start()` 必须**在碰任何设备之前**就拒绝。
+
+    本仓库实测踩过四次「单元测试绕过打桩、真的拉起了设备」；Windows 上尤其危险 ——
+    用户机器上通常真的装着 VoiceMeeter / VB-Cable，一跑测试就会打开他们的虚拟声卡、
+    实时把麦克风直通出去。所以这条守卫是**最后一道保险**，必须有用例钉住它。
+    """
+    from vlt.output import micproxy as MP
+
+    statuses: list[tuple[str, str]] = []
+    orig_pick = MP.pick_output_device
+
+    def _boom(patterns=None):                              # noqa: ARG001
+        raise AssertionError("守卫没拦住：竟然去枚举设备了")
+
+    MP.pick_output_device = _boom
+    p = MicProxy(audio_cfg={"device": ["voicemeeter input"]},
+                 on_status=lambda lvl, msg, **kw: statuses.append((lvl, msg)))
+    try:
+        assert p.start() is False, "测试进程里 start() 必须被拒"
+    finally:
+        MP.pick_output_device = orig_pick
+    assert p.opened is False, "被拒后不许标记为已开"
+    assert p._out_stream is None, "被拒后不许留下输出流句柄"
+    assert p._thread is None, "被拒后不许起麦克风线程"
+    assert any("测试进程" in msg for _, msg in statuses), "被拒要留痕（说清原因）"
+    print("  测试进程守卫：start() 在任何设备操作之前被拒 + 留痕 OK")
 
 
 def test_pick_output_device_computes_fallbacks_in_auto_chain():
@@ -485,5 +526,6 @@ if __name__ == "__main__":
     test_reopen_with_updates_params_idempotent()
     test_start_close_stubbed()
     test_start_no_device_degrades_gracefully()
+    test_start_refused_in_test_process()
     test_pick_output_device_computes_fallbacks_in_auto_chain()
     print("ALL PASSED")

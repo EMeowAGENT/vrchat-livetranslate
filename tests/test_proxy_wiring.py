@@ -209,10 +209,24 @@ def _stubbed_audio(*, device=(11, "FakeCard", 48000), gui=None):
     saved_sd = sys.modules.get("sounddevice")
     saved_cb = platform.capture_backend
     saved_pick = MP.pick_output_device
+    # ★ 「两侧都桩」：`MicProxy.start()` 的**最后一道保险**（测试进程守卫）也得在这里
+    #   显式放行 —— 本上下文里所有真开流的动作都已经打桩了，放行是安全的；不放行的话
+    #   代理永远起不来，而这两条用例验的正是「打桩环境下代理能起来并接上引擎」。
+    saved_guard = MP._test_process_guard
+    MP._test_process_guard = lambda *a, **k: None                    # type: ignore[assignment]
+    # ★ 门面也钉成 Windows 那个实现：本文件测接线，平台差异（Linux 走 pw-cat 管道 +
+    #   运行时声明节点）不该在这里被触发 —— 不钉的话 Linux 上会真去声明 PipeWire 节点。
+    #   门面被钉住后，下面那套「假 sounddevice」正好就是它需要的全部依赖。
+    from vlt.output.micproxy import MicProxy as _WinMicProxy
+    saved_factory = platform.create_mic_proxy
 
     sys.modules["sounddevice"] = fake_sd
     platform.capture_backend = lambda: _FakeCaptureBackend(src)      # type: ignore[assignment]
     MP.pick_output_device = lambda patterns=None: device             # type: ignore[assignment]
+    platform.create_mic_proxy = (                                    # type: ignore[assignment]
+        lambda audio_cfg, mic_name=None, on_status=None:
+            _WinMicProxy(audio_cfg=audio_cfg, mic_name=mic_name,
+                         on_status=on_status or (lambda *_a: None)))
     try:
         yield src
     finally:
@@ -222,6 +236,8 @@ def _stubbed_audio(*, device=(11, "FakeCard", 48000), gui=None):
                     gui._close_proxy()
             except Exception:                        # noqa: BLE001
                 pass
+        platform.create_mic_proxy = saved_factory                # type: ignore[assignment]
+        MP._test_process_guard = saved_guard                     # type: ignore[assignment]
         if saved_sd is None:
             sys.modules.pop("sounddevice", None)
         else:
@@ -235,12 +251,16 @@ def _stubbed_audio(*, device=(11, "FakeCard", 48000), gui=None):
 
 @contextlib.contextmanager
 def _wired_gui():
-    """起一个 **headless** GUI，并把「构造代理」的两道门放开（临时配置 + 假 Windows）。
+    """起一个 **headless** GUI，并把「构造代理」的两道门放开（临时配置 + 假测试号）。
 
     · `DEFAULT_CONFIG` 指到临时文件：既隔绝用户真实配置，也让 YAML 写回可断言；
-    · `IS_WINDOWS=True`：代理只在 Windows 构造（本用例在 Linux CI 上也要能跑）；
     · `_is_test_process=lambda: False`：**只在这一个上下文里**放开——所有真会开流的
       动作都在 `_stubbed_audio()` 里面，绝不触碰用户音频图。
+
+    ⚠️ 本文件测的是**接线**（GUI ↔ 代理 ↔ 引擎），不是平台驱动：平台差异现在只在
+    `platform.create_mic_proxy()` 门面里，由 `_stubbed_audio()` 把它钉成 Windows 那个
+    实现（假 `sounddevice` 正好满足它）。所以在 Linux CI 上照样跑，也不会去声明
+    PipeWire 节点。
     """
     import vlt.config as cfg_mod
     import vlt.gui as gui_mod
@@ -248,10 +268,9 @@ def _wired_gui():
     saved_env = _isolate_env(Path(tempfile.mkdtemp(prefix="vlt-proxy-wenv-")))
     cfg_path = _temp_config()
     saved = (cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG,
-             gui_mod.IS_WINDOWS, gui_mod._is_test_process)
+             gui_mod._is_test_process)
     cfg_mod.DEFAULT_CONFIG = cfg_path
     gui_mod.DEFAULT_CONFIG = cfg_path
-    gui_mod.IS_WINDOWS = True
     gui_mod._is_test_process = lambda: False         # type: ignore[assignment]
 
     from vlt.gui import TranslationGUI
@@ -274,7 +293,7 @@ def _wired_gui():
             except Exception:                        # noqa: BLE001
                 pass
         cfg_mod.DEFAULT_CONFIG, gui_mod.DEFAULT_CONFIG, \
-            gui_mod.IS_WINDOWS, gui_mod._is_test_process = saved
+            gui_mod._is_test_process = saved
         _restore_env(saved_env)
         from vlt import i18n
         i18n.set_language("zh")

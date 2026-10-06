@@ -299,9 +299,9 @@ output:
     sample_rate: 48000       # VRChat / VoiceMeeter 统一要 48k
     buffer_ms: 300           # 起播前先攒这么多，避免断续（界面「设置→音频」可调）
     max_buffer_ms: 2000      # 排队上限：超了就**整句**丢弃最旧的（绝不从句中切断，正在播的那句不丢）
-    # 麦克风代理（**仅 Windows**）：程序一启动就把真实麦克风直通到虚拟声卡，VRChat 里
-    # 麦克风永久固定选虚拟声卡，改「原声/译音」在界面一键切，不必再去 VRChat 里换麦克风。
-    # Linux 忽略本段（译音仍走运行时声明的 PipeWire 节点）。
+    # 麦克风代理（**两端都支持**）：程序一启动就把真实麦克风直通到虚拟声卡，VRChat 里
+    # 麦克风永久固定选虚拟声卡（Windows = VoiceMeeter/VB-Cable，Linux = 程序自己声明的
+    # 「VLT Mic」），改「原声/译音」在界面一键切，不必再去 VRChat 里换麦克风。
     proxy:
       enabled: true            # 关掉 = 回到旧行为（引擎自建译音输出，界面切换开关置灰）
       passthrough_buffer_ms: 150  # 原声直通的缓冲容量：越大越不易断续、但延迟越高。

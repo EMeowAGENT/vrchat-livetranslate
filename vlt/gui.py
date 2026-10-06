@@ -16,7 +16,7 @@ from .config import DEFAULT_CONFIG, load_config
 from .config_io import _fmt_scalar, _yaml_set_in_text, _yaml_set_or_create, _write_config_text
 from .i18n import t
 from .paths import APP_DIR
-from .platform import IS_WINDOWS
+from . import platform
 # ── 重导出（保持 from vlt.gui import X 向后兼容）──
 from . import ui_tk
 from .ui_text import (SOURCE_LANGS, TARGET_LANGS, _lang_key, _lang_label,
@@ -480,15 +480,20 @@ class TranslationGUI:
                 p = {}; a["proxy"] = p
             p.update(proxy)
 
-    def _on_proxy_status(self, level: str, msg: str) -> None:
-        """代理的 on_status：既进状态栏也进日志（与 ``gui_engine.on_engine_status`` 同口径）。
+    def _on_proxy_status(self, level: str, msg: str, **params) -> None:
+        """代理的 on_status：**日志打中文原文、状态栏走 i18n**（与 ``gui_engine.on_engine_status`` 同口径）。
+
+        `msg` 是**中文模板**（同时就是 i18n 词条 key），带值的部分走 `**params`：
+
+          · 日志：`msg.format(**params)` —— 全仓日志统一中文，中英混排只会更难读；
+          · 状态栏：`t(msg, **params)` —— 用户看的地方必须能翻译（英文界面下不许闪中文）。
 
         micproxy 内部每条消息自带 ``"[proxy] "`` 前缀，这里剥掉再补一个带级别的，
         否则日志里会出现 ``[proxy][warn] [proxy] …`` 这种双重前缀。
         """
         body = msg[len("[proxy] "):] if msg.startswith("[proxy] ") else msg
-        print(f"[proxy][{level}] {body}", flush=True)
-        self._q.put(("status", level, body))
+        print(f"[proxy][{level}] {body.format(**params) if params else body}", flush=True)
+        self._q.put(("status", level, t(body, **params) if params else t(body)))
 
     def _start_proxy(self) -> bool:
         """构造并启动麦克风代理。返回是否**真的起来了**（False = 走旧行为）。
@@ -497,10 +502,6 @@ class TranslationGUI:
         """
         if self._proxy is not None:
             return True
-        if not IS_WINDOWS:
-            # Linux 的译音输出仍由引擎自建（走平台自己那条虚拟声卡路径），代理不参与
-            print("[proxy] 非 Windows：不构造麦克风代理（译音输出仍由引擎自建）", flush=True)
-            return False
         if not self._proxy_wanted():
             print("[proxy] 配置 output.audio.proxy.enabled=false：不启动代理"
                   "（译音输出回到旧行为：随翻译启停、由引擎自建）", flush=True)
@@ -514,8 +515,10 @@ class TranslationGUI:
         mic_name = (out.get("capture") or {}).get("mic_device") or None
         proxy = None
         try:
-            from .output.micproxy import MicProxy
-            proxy = MicProxy(audio_cfg=a, mic_name=mic_name, on_status=self._on_proxy_status)
+            # ★ 平台差异**只在门面里**：Windows → `vlt/output/micproxy.py`（PortAudio 输出流，
+            #   虚拟声卡是用户自备的 VoiceMeeter/VB-Cable）；Linux → `vlt/output/micproxy_linux.py`
+            #   （`pw-cat` 管道 + 运行时声明的 `VLT Mic` 节点）。档位语义两端一致。
+            proxy = platform.create_mic_proxy(a, mic_name, self._on_proxy_status)
             ok = bool(proxy.start())
         except Exception as exc:                       # noqa: BLE001
             print(f"[proxy] 启动异常：{type(exc).__name__}: {exc}（其余功能不受影响）", flush=True)

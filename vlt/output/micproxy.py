@@ -43,8 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from ..devices import resolve_device_name
@@ -57,6 +59,30 @@ DEFAULT_PASSTHROUGH_MS = 150
 MIC_BLOCKSIZE = 1600
 #: 欠载告警的最小汇报间隔（秒）。
 UNDERRUN_REPORT_S = 5.0
+
+
+def _test_process_guard(action: str = "真的打开虚拟声卡与麦克风采集") -> dict | None:
+    """防呆：**测试进程里拒绝做「会碰用户音频图」的真实操作**。
+
+    与 `vlt/platform/linux.py` / `vlt/output/openxr_overlay.py` 的那两份同款（本仓库
+    这是第三份，原因是三个入口分属不同模块、彼此不能 import；口径与判据完全一致）。
+
+    写它同样不是洁癖：本仓库实测**踩过四次**「单元测试绕过打桩、真的拉起了设备」。
+    在 Windows 上尤其危险 —— 用户机器上通常真的装着 VoiceMeeter / VB-Cable，
+    测试一跑就会打开他们的虚拟声卡、实时把麦克风直通出去（对方能听到）。
+
+    正确修法是测试两侧都打桩（见 `tests/test_micproxy.py`），这里只是**最后一道保险**：
+    万一又漏了，宁可这条腿在测试里不启用，也不能动用户的音频。
+    """
+    main = sys.modules.get("__main__")
+    path = getattr(main, "__file__", None)
+    if not path:
+        return None
+    p = Path(path)
+    if p.name.startswith("test_") or "tests" in p.parts:
+        # 返回**参数**而不是成句：模板留在调用点，好让界面层拿去查 i18n 词条
+        return {"name": p.name, "action": action}
+    return None
 
 MODE_PASSTHROUGH = "passthrough"
 MODE_TRANSLATED = "translated"
@@ -217,7 +243,10 @@ class MicProxy:
         *,
         audio_cfg: dict,
         mic_name: str | None = None,
-        on_status: Callable[[str, str], None] = lambda *_a: None,
+        #: `on_status(level, msg, **params)`：`msg` 是**中文模板**（同时充当 i18n 词条 key），
+        #: 带值的地方走 `**params`。界面层负责「日志用中文原文、状态栏走 t()」——见
+        #: `gui._on_proxy_status`。这样日志全仓统一中文、不会中英混排。
+        on_status: Callable[..., None] = lambda *_a, **k: None,
     ) -> None:
         self._audio_cfg = audio_cfg or {}
         self._mic_name = mic_name or None
@@ -272,6 +301,12 @@ class MicProxy:
         """打开虚拟声卡输出流 + 启动麦克风直通线程。失败只降级（返回 False），不抛异常。"""
         if self._opened or self._closed:
             return self._opened
+        blocked = _test_process_guard()
+        if blocked:
+            self._on_status("warn",
+                            "[proxy] 检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）",
+                            **blocked)
+            return False
         self._stop.clear()
         dev = self._pick_output_device()
         if dev is None:
@@ -327,13 +362,15 @@ class MicProxy:
                 picked = (idx, str(info["name"]), int(info.get("default_samplerate", 48000)))
                 fallbacks = platform.output_device_fallbacks(device_name, exclude=idx)
             else:
-                self._on_status("warn", f"[proxy] 未找到输出设备 {device_name!r}，回退回退链")
+                self._on_status("warn", "[proxy] 未找到输出设备 {dev}，回退到回退链",
+                                dev=repr(device_name))
         if picked is None:
             patterns = self._audio_cfg.get("device")
             try:
                 picked = pick_output_device(patterns)
             except Exception as exc:       # noqa: BLE001
-                self._on_status("error", f"[proxy] 枚举输出设备失败：{exc}（其余功能不受影响）")
+                self._on_status("error", "[proxy] 枚举输出设备失败：{err}（其余功能不受影响）",
+                                err=exc)
                 return None
         if picked is None:
             # ⚠️ 别在这条**实现**字符串里写死具体虚拟声卡商品名（VoiceMeeter/VB-Audio）：
@@ -364,12 +401,15 @@ class MicProxy:
                 stream.start()
                 self._out_stream = stream
                 self._out_device = (dev, name)
-                self._on_status("info", f"[proxy] 虚拟声卡已打开：#{dev} {name}")
+                self._on_status("info", "[proxy] 虚拟声卡已打开：#{idx} {name}",
+                                idx=dev, name=name)
                 return True
             except Exception as exc:       # noqa: BLE001 — 换候选再试
                 last_exc = exc
-                self._on_status("warn", f"[proxy] 虚拟声卡 #{dev} 打不开：{exc}")
-        self._on_status("error", f"[proxy] 打开虚拟声卡失败：{last_exc}（其余功能不受影响）")
+                self._on_status("warn", "[proxy] 虚拟声卡 #{idx} 打不开：{err}",
+                                idx=dev, err=exc)
+        self._on_status("error", "[proxy] 打开虚拟声卡失败：{err}（其余功能不受影响）",
+                        err=last_exc)
         return False
 
     def _out_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
@@ -392,8 +432,8 @@ class MicProxy:
         try:
             self._loop.run_until_complete(self._mic_pump())
         except Exception as exc:           # noqa: BLE001 — 线程绝不能把异常抛出去
-            self._on_status("error",
-                            f"[proxy] 麦克风直通线程异常退出：{type(exc).__name__}: {exc}")
+            self._on_status("error", "[proxy] 麦克风直通线程异常退出：{kind}: {err}",
+                            kind=type(exc).__name__, err=exc)
         finally:
             try:
                 self._loop.close()
@@ -404,8 +444,8 @@ class MicProxy:
         src = platform.capture_backend().open_mic(
             self._mic_name, rate=16000, channels=1, blocksize=MIC_BLOCKSIZE)
         self._mic_src = src
-        self._on_status("info",
-                        f"[proxy] 麦克风直通已启动（{src.rate}Hz {src.channels}ch → 48k 立体声）")
+        self._on_status("info", "[proxy] 麦克风直通已启动（{rate}Hz {channels}ch → 48k 立体声）",
+                        rate=src.rate, channels=src.channels)
         last_report = time.monotonic()
         last_under = self._underruns
         try:
@@ -421,8 +461,9 @@ class MicProxy:
                     if delta > 0:
                         self._on_status(
                             "warn",
-                            f"[proxy] 直通缓冲欠载 {delta} 次/{UNDERRUN_REPORT_S:.0f}s"
-                            "（可能爆音）：可在 设置→音频 调大直通缓冲")
+                            "[proxy] 直通缓冲欠载 {n} 次/{secs}s（可能爆音）："
+                            "可在 设置→音频 调大直通缓冲",
+                            n=delta, secs=f"{UNDERRUN_REPORT_S:.0f}")
                     last_report = now
                     last_under = self._underruns
         finally:

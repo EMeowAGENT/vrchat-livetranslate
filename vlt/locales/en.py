@@ -437,6 +437,34 @@ STRINGS: dict[str, str] = {
     "贴在 VRChat 窗口上的那块字幕窗：尺寸 / 字号 / 透明度。":
         "The subtitle window pinned to the VRChat window: size / font size / opacity.",
     # ---- 麦克风代理（原声/译音一键切换）----
+    # 运行期状态（经 `gui._on_proxy_status`：日志打中文原文、状态栏查这里的词条）。
+    # key = 代理发出的中文模板（与 vlt/output/micproxy*.py 逐字一致，含 {占位符}）。
+    "检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）":
+        "Test process detected ({name}) → refusing to {action} (this leg stays off)",
+    "未找到输出设备 {dev}，回退到回退链":
+        "Output device {dev} not found — falling back to the fallback chain",
+    "枚举输出设备失败：{err}（其余功能不受影响）":
+        "Failed to enumerate output devices: {err} (everything else still works)",
+    "没找到匹配的虚拟声卡输出设备（虚拟声卡装好了吗？）→ 麦克风代理不可用，其余功能不受影响。":
+        "No matching virtual sound card output found (is it installed?) — Mic Proxy unavailable; everything else still works.",
+    "虚拟声卡已打开：#{idx} {name}": "Virtual sound card opened: #{idx} {name}",
+    "虚拟声卡 #{idx} 打不开：{err}": "Cannot open virtual sound card #{idx}: {err}",
+    "打开虚拟声卡失败：{err}（其余功能不受影响）":
+        "Failed to open the virtual sound card: {err} (everything else still works)",
+    "麦克风直通线程异常退出：{kind}: {err}":
+        "Mic passthrough thread exited with an error: {kind}: {err}",
+    "麦克风直通已启动（{rate}Hz {channels}ch → 48k 立体声）":
+        "Mic passthrough started ({rate}Hz {channels}ch → 48k stereo)",
+    "直通缓冲欠载 {n} 次/{secs}s（可能爆音）：可在 设置→音频 调大直通缓冲":
+        "Passthrough buffer underran {n} times in {secs}s (may crackle) — raise it in Settings → Audio",
+    "翻译未运行，无法切到译音档（保持原声）":
+        "Translation isn't running — can't switch to Translated (staying on Original)",
+    "已切到「译音」档": "Switched to Translated",
+    "已切到「原声」档": "Switched to Original",
+    "虚拟声卡声明失败 → 麦克风代理不可用（其余功能不受影响）":
+        "Failed to declare the virtual sound card — Mic Proxy unavailable (everything else still works)",
+    "麦克风代理输出已接到虚拟声卡节点：{target}":
+        "Mic Proxy output connected to the virtual sound card node: {target}",
     "麦克风代理": "Mic Proxy",
     "启用 —— VRChat 麦克风固定选虚拟声卡，原声/译音在主界面一键切":
         "Enable — VRChat mic stays on the virtual cable; switch Original/Translated in the main window",

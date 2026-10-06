@@ -434,6 +434,20 @@ def create_wrist_overlay(cfg: Any, config_path: Any = None, dry_run: bool = Fals
     return WristOverlay(cfg, config_path=config_path, dry_run=dry_run)
 
 
+# ---------------------------------------------------------------- 麦克风代理
+
+def create_mic_proxy(audio_cfg: dict, mic_name: str | None = None,
+                     on_status=None) -> Any:  # noqa: ANN001
+    """麦克风代理（原声 / 译音一键切）：Windows 走 PortAudio 输出流的原版实现。
+
+    与 Linux 版（`vlt/output/micproxy_linux.py`，`pw-cat` 管道 + 运行时声明虚拟麦）
+    接口与语义对齐；工厂留在平台模块里，共享代码里不出现任何后端名字。
+    """
+    from ..output.micproxy import MicProxy
+    return MicProxy(audio_cfg=audio_cfg, mic_name=mic_name,
+                    on_status=on_status or (lambda *_a: None))
+
+
 # ---------------------------------------------------------------- 桌面叠加窗（issue #11）
 #
 # 桌面（非 VR）模式下的字幕窗：Tk 负责画，这里只提供 Tk 拿不到的那几件 Win32 事实 ——
