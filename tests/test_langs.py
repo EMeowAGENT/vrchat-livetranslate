@@ -20,6 +20,18 @@
 泰语比俄语多一层风险：**默认 CJK 字体（微软雅黑）不含泰文字形**，界面选得到、
 模型也翻得出，画到手腕屏上却是静默的豆腐块 —— 那一层由 `tests/test_thai_font.py`
 用位图比对钉住，本文件只守「语言表两侧都登记了 th」。
+
+实测背景（2026-10-04）：用户要求加意大利语（it）。**真链路实测通过** ——
+
+  语音腿 zh→it：源「你好，我叫 SAND。今天我们测试意大利语的翻译。」→
+    译文 `Ciao. Mi chiamo Sand.`（模型自带音频 2.08s；探针只取到第一个 turn 的译文，
+    是探针按句喂、每个 turn 各出一段响应所致 —— 同一句文本腿译全了，见下）
+  语音腿 it→zh：把上面那段意大利语音频**回喂** → `你好！`（往返闭环，模型认得出自己的意大利语）
+  文本腿 `qwen-mt-flash`：zh→it `Ciao, mi chiamo SAND. Oggi testiamo la traduzione in italiano.`
+    ／ it→zh `你好。我叫桑德。`
+文档级依据：`qwen3-livetranslate-flash` 的 18 语种表里 `it` Italian 标注「音频+文本」；
+内置音色 `Cherry` / `Nofish` 的支持语言表含 Italian。意大利语是拉丁字母，
+不像泰语那样要字形守卫（无需 `test_thai_font.py` 那类处理）。
 """
 from __future__ import annotations
 
@@ -109,6 +121,49 @@ def test_thai_has_ui_label_and_tts_name() -> None:
     print("  泰语界面译名（zh/en/ja/ko/ru）+ TTS 语种名 都就位 OK")
 
 
+def test_italian_supported() -> None:
+    """用户要求：意大利语（it）。模型侧已实测（见模块文档），界面两个方向都必须能选到。"""
+    from vlt.gui import SOURCE_LANGS, TARGET_LANGS
+
+    assert TARGET_LANGS.get("意大利语") == "it", f"目标语言表里没有意大利语：{TARGET_LANGS}"
+    assert SOURCE_LANGS.get("意大利语") == "it", f"源语言表里没有意大利语：{SOURCE_LANGS}"
+    print("  意大利语在源/目标两侧都可选 OK")
+
+
+def test_italian_name_lookup_does_not_silently_fall_back() -> None:
+    """★ 意大利语取名不许回落 —— 回落是静默的（表里没 it 就默默给你「英语」/「自动检测」），
+    现象是「我明明选了意大利语，它没生效」，与俄语/泰语那两条同类。"""
+    from vlt.gui import _source_name, _target_name
+
+    assert _target_name("it") == "意大利语", f"目标取名回落了：{_target_name('it')!r}"
+    assert _source_name("it") == "意大利语", f"源取名回落了：{_source_name('it')!r}"
+    print("  意大利语取名不回落 OK")
+
+
+def test_italian_has_ui_label_and_tts_name() -> None:
+    """意大利语的两处配套词条：界面译名（四套词表）+ TTS 语种名。
+
+    漏了界面译名的现象：外国用户在方向下拉里看到汉字「意大利语」；
+    漏了 `LANG_NAMES` 的现象：qwen3-tts-flash 的 prompt 里被塞语言码而不是语种名。
+    """
+    from vlt import i18n
+    from vlt.gui import _lang_label
+    from vlt.tts import LANG_NAMES
+
+    want = {"zh": "意大利语", "en": "Italian", "ja": "イタリア語",
+            "ko": "이탈리아어", "ru": "Итальянский"}
+    try:
+        for lang, label in want.items():
+            i18n.set_language(lang)
+            got = _lang_label("意大利语")
+            assert got == label, f"界面语言 {lang} 下意大利语显示 {got!r}，期望 {label!r}"
+    finally:
+        i18n.set_language("zh")
+    assert LANG_NAMES.get("it") == "Italian", f"TTS 语种名缺意大利语：{LANG_NAMES.get('it')!r}"
+    print("  意大利语界面译名（zh/en/ja/ko/ru）+ TTS 语种名 都就位 OK")
+
+
+
 if __name__ == "__main__":
     print("test_langs:")
     test_lang_tables_are_symmetric()
@@ -117,4 +172,7 @@ if __name__ == "__main__":
     test_thai_supported()
     test_thai_name_lookup_does_not_silently_fall_back()
     test_thai_has_ui_label_and_tts_name()
+    test_italian_supported()
+    test_italian_name_lookup_does_not_silently_fall_back()
+    test_italian_has_ui_label_and_tts_name()
     print("ALL PASSED")
