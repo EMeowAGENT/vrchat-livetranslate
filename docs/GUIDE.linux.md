@@ -42,7 +42,8 @@ Linux 侧的实现依据（为什么这么做、哪些路试过不通）都在
    - 判断是否就绪：`XR_RUNTIME_JSON` 指向一个运行时清单，**或** `~/.config/openxr/1/active_runtime.json`
      存在（系统级路径也可能生效）。`./setup.sh` 只检查「装了哪些运行时」，**装了 ≠ 被选中**
 4. **Python 3.11** —— 只用 `setup.sh` 的话这条它会自己处理（有 `uv` 就自动拉一份 3.11）
-5. **`libportaudio`**（麦克风采集）：`pacman -S portaudio` / `apt install libportaudio2`
+5. ~~`libportaudio`~~ —— **Linux 已不需要**：麦克风走 PipeWire 原生 `pw-record`（见第 2 条），
+   不再经过 PortAudio。只有 **Windows 版**用 sounddevice/PortAudio。
 6. **一套中日韩字体**（`pacman -S noto-fonts-cjk` / `apt install fonts-noto-cjk`）。
    ⚠️ **AppImage 自 2026-10 起不再自带字体**，GUI 与手腕屏都靠宿主机 fontconfig 提供字形；
    缺字体时界面会是空壳/豆腐块。
@@ -64,7 +65,7 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ```
 
 - Python 解释器与全部 Python 依赖都打在包里 —— **不需要**装 Python、不需要跑 `./setup.sh`。
-  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行）、**portaudio**（麦克风）、
+  系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行，麦克风也走它）、
   X11 基础库（XWayland）与一套中日韩字体
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
@@ -80,8 +81,8 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
 ./setup.sh
 ```
 
-它会：建 Python 3.11 虚拟环境 → 装依赖 → **体检系统依赖**（PipeWire 工具 / OpenXR 运行时 /
-libportaudio）→ 提示 API key 怎么配。
+它会：建 Python 3.11 虚拟环境 → 装依赖 → **体检系统依赖**（PipeWire 工具 / OpenXR 运行时）
+→ 提示 API key 怎么配（麦克风走 PipeWire 原生 `pw-record`，不再需要 libportaudio）。
 
 脚本**不会**改你的系统配置、**不会**重启任何服务。缺什么它只告诉你缺什么。
 
@@ -176,6 +177,11 @@ Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」�
   同样不需要选输出设备；「输出」那一行的「译音输出」勾选框照旧是这条腿的总开关。
 - `config.yaml` 里的 `capture.loopback_device` 与 `output.audio.device_name` 在 Linux 上**被忽略**
   （键仍保留，Windows 侧照常生效），界面也不再把它们写出来。
+- **改「麦克风」后**：麦克风代理的**直通腿（VRChat 听到的原声）即时切换**，不用重开程序；
+  但**翻译输入**那条腿在点「开始翻译」时读定设备，运行中切换要**重开翻译**才生效（状态栏会说明）。
+- **多声道输入**（双声道 / 5.1 / 7.1）会**按设备原生声道数全采**，再降为单声道送模型 ——
+  不会只取第一路（见 `docs/平台约束记录.md` 第十五节）。
+- **「自动检测」= 当前系统默认输入源**：程序会把它解析成一个具体设备，走与手选**完全相同**的通路。
 
 ### 手腕屏位置怎么调
 
@@ -288,7 +294,7 @@ overlay:
 
 | 配置项 | Windows | Linux |
 |---|---|---|
-| `capture.mic_device` | 设备名 | 设备名（`sounddevice` 按名打开） |
+| `capture.mic_device` | 设备名 | 设备名（映射到 PipeWire `node.name`，走 `pw-record`） |
 | `capture.loopback_device` | WASAPI loopback 设备名 | **忽略** —— 采集目标固定为 VRChat 自己的输出流（自动等待 VRChat 启动） |
 | `output.audio.device` / `device_name` | 虚拟声卡回退链（VoiceMeeter / VB-Cable） | **不用管** —— 程序自己声明 `vlt_mic_sink`，`device_name` 被忽略 |
 | `overlay.font` | `C:/Windows/Fonts/msyh.ttc` | **留空即可**，自动用 fontconfig 找中日韩字体 |
