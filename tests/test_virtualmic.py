@@ -557,6 +557,16 @@ def test_fallback_computed_in_auto_chain_branch():
     from vlt.output.virtualmic import VirtualMic as RealVirtualMic
     from vlt import platform
 
+    if not platform.IS_WINDOWS:
+        # `Engine._make_audio_out` 在 Linux 上是**早返回**（走 `platform.open_audio_out`
+        # 运行时声明 PipeWire 节点），而「同名回落候选」是 **Windows 独占**分支的补丁 ——
+        # 只有 WASAPI 端点才会 `-9999` 打不开、需要按 host API 回落。
+        # 所以这里照仓库口径**显式跳过、不静默**（上游这条用例没有平台守卫，
+        # 在 Linux CI 上会假红；已在本机复现 upstream/main 原样即失败）。
+        print("  [skip] 非 Windows：同名回落候选是 Windows 独占分支"
+              "（Linux 走运行时声明节点，没有 host API 回落这回事）")
+        return
+
     cfg = AppConfig(
         session_base={"model": "x", "base_url": "x", "voice": "x", "api_key": "x",
                       "workspace_id": "", "reconnect_backoff": [1],
