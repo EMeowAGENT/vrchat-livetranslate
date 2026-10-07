@@ -327,29 +327,37 @@ class TranslationGUI:
         gui_room.publish_to_room(self._room, self._room_cfg, self._publisher, source_id, src_text, is_final)
     # ── 手腕屏微调 ──
     def _ov_fn(self): return self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
+    def _wire_desktop_ctx(self) -> None:
+        """把设置页的「落盘 / 拖动」回调接到本类的薄壳上。
+
+        ⚠️ 桌面字幕的**唯一**保存在 gui_engine（root / 活实例 / 引擎 ctx 同步都在那边）。
+        设置页的滑块只认自己那份 DesktopCtx，持久化必须回调进来 —— 早先 gui_desktop 里
+        另留了一整套同名实现且 `root` 没接上，于是滑块改了既不落盘也不热重载（回归）。
+        """
+        c = self._desktop_ctx
+        c.schedule_overlay_save_fn = self._schedule_overlay_save
+        c.schedule_desktop_save_fn = self._schedule_desktop_save
+        c.toggle_desktop_drag_fn = self._toggle_desktop_drag
+        c.desktop_out_fn = lambda: self._desktop_out
     def _build_tune_page(self, body) -> None:
+        self._wire_desktop_ctx()
         gui_desktop.build_tune_page(body, self._desktop_ctx, self._ov_fn(), overlay_fn=self._ov_fn, settings_width=SETTINGS_WIDTH)
         for a in ("anchor_combo", "tracker_var", "tune_panel_w", "anchor_label_to_key", "tune_values",
                   "tune_vars", "tune_lbls", "tune_units", "tune_grid", "ov_save_job"):
             setattr(self, f"_{a}", getattr(self._desktop_ctx, a))
-    def _build_tune_grid(self, grid, specs, label_w, cols):
-        gui_desktop.build_tune_grid(grid, specs, label_w, cols, self._desktop_ctx, overlay_fn=self._ov_fn)
     def _build_desktop_tune_page(self, body) -> None:
+        self._wire_desktop_ctx()
         gui_desktop.build_desktop_tune_page(body, self._desktop_ctx, self._desktop_cfg())
         for a in ("desktop_font_var", "desktop_font_lbl", "desktop_srcfont_var", "desktop_srcfont_lbl",
                   "desktop_w_var", "desktop_w_lbl", "desktop_h_var", "desktop_h_lbl",
                   "desktop_alpha_var", "desktop_alpha_lbl", "desktop_drag_btn", "desktop_tuned"):
             setattr(self, f"_{a}", getattr(self._desktop_ctx, a))
-    @staticmethod
-    def _apply_desktop_slider(key, var, lbl, fmt, gui): gui_desktop.apply_desktop_slider(key, var, lbl, fmt, gui._desktop_ctx)
     def _on_desktop_font(self, _v=""): gui_desktop.on_desktop_font(self._desktop_ctx)
     def _on_desktop_srcfont(self, _v=""): gui_desktop.on_desktop_srcfont(self._desktop_ctx)
     def _on_desktop_width(self, _v=""): gui_desktop.on_desktop_width(self._desktop_ctx)
     def _on_desktop_height(self, _v=""): gui_desktop.on_desktop_height(self._desktop_ctx)
     def _current_anchor(self): return gui_desktop.current_anchor(self._desktop_ctx)
     def _load_anchor_offset(self, anchor): gui_desktop.load_anchor_offset(self._desktop_ctx, anchor, self._ov_fn())
-    def _make_tune_handler(self, key, var, lbl, unit):
-        return gui_desktop.make_tune_handler(key, var, lbl, unit, self._desktop_ctx, overlay_fn=self._ov_fn)
     def _on_anchor_change(self): gui_desktop.on_anchor_change(self._desktop_ctx, overlay_fn=self._ov_fn)
     def _schedule_overlay_save(self): gui_desktop.schedule_overlay_save(self._desktop_ctx, root=self._root, overlay_fn=self._ov_fn)
     def _save_overlay_cfg(self): gui_desktop.save_overlay_cfg(self._desktop_ctx, cfg=self._cfg, overlay_fn=self._ov_fn)
@@ -448,13 +456,18 @@ class TranslationGUI:
         self._sync_engine_ctx(); gui_engine.stop_desktop(self._engine_ctx); self._desktop_out = self._engine_ctx.desktop_out; self._desktop_dragging = False; self._unsync_engine_ctx()
     def _push_desktop(self, force=False): self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.bubbles = self._bubbles; gui_engine.push_desktop(self._engine_ctx, force=force)
     def _on_desktop_alpha(self, _v=""):
-        self._desktop_alpha_touched = True; a = float(self._desktop_alpha_var.get())
-        lbl = getattr(self, "_desktop_alpha_lbl", None)
-        if lbl is not None: lbl.configure(text=f"{a:.2f}")
-        if self._desktop_out is not None: self._desktop_out.set_alpha(a); self._schedule_desktop_save()
+        # 透明度：立刻贴到活窗口 + 防抖落盘。实现只有 gui_desktop 一份（它读 DesktopCtx），
+        # 落盘再回调到 _schedule_desktop_save；改完后把「动过」标志镜像回本类（供同步/测试读）。
+        gui_desktop.on_desktop_alpha(self._desktop_ctx)
+        self._desktop_alpha_touched = self._desktop_ctx.desktop_alpha_touched
     def _schedule_desktop_save(self):
-        self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.desktop_save_job = self._desktop_save_job; self._engine_ctx.root = self._root
-        gui_engine.schedule_desktop_save(self._engine_ctx); self._desktop_save_job = self._engine_ctx.desktop_save_job
+        # 设置页的滑块状态记在 DesktopCtx 上，这里先汇入本类属性再同步给引擎 ctx
+        # （gui_engine.save_desktop_cfg 读的是引擎 ctx，二者必须同源）。
+        self._desktop_tuned = self._desktop_ctx.desktop_tuned
+        self._desktop_alpha_touched = self._desktop_ctx.desktop_alpha_touched
+        self._sync_engine_ctx()
+        gui_engine.schedule_desktop_save(self._engine_ctx)
+        self._desktop_save_job = self._engine_ctx.desktop_save_job
     def _save_desktop_cfg(self):
         self._sync_engine_ctx(); gui_engine.save_desktop_cfg(self._engine_ctx, config_path=DEFAULT_CONFIG); self._desktop_save_job = self._engine_ctx.desktop_save_job
     def _toggle_desktop_drag(self):
@@ -713,12 +726,15 @@ class TranslationGUI:
     # ── 轮询 / 气泡 / 状态 ──
     def _poll(self):
         gui_chat.setup_poll_ctx(self._chat_ctx, self)
-        _ov = [self._overlay_out]; _dov = [self._desktop_out]
-        gui_chat.poll(self._chat_ctx, self._root, self._set_status, self._add_text, self._refresh_status, self._stats, [self._pending_starts], _ov, _dov)
-        self._pending_starts = [self._pending_starts][0]; self._overlay_out = _ov[0]; self._desktop_out = _dov[0]
-        c = self._chat_ctx
-        self._room_status_next = c.room_status_next; self._gate_level_tick = c.gate_level_tick
-        if c.engines_ref is not self._engines: self._engines = c.engines_ref; self._engine_dirs = c.engine_dirs_ref
+        # ⚠️ 手腕屏/桌面字幕实例**不在这里传**：它们在「开始翻译」后才建，而 poll 在
+        #    构建期就起跑了。早先传单元素 list 容器且从不写回 → 两个 tick() 永不执行
+        #    （桌面字幕收不到内容 / 拖不动 / 配置热重载失效，commit 6083052 回归）。
+        #    现在由 setup_poll_ctx 绑活引用（*_out_fn），poll 每跳现取。
+        gui_chat.poll(self._chat_ctx, self._root, self._set_status, self._add_text,
+                      self._refresh_status, self._stats)
+        if (self._chat_ctx.engines_ref is not self._engines):
+            self._engines = self._chat_ctx.engines_ref
+            self._engine_dirs = self._chat_ctx.engine_dirs_ref
     def _add_text(self, source, text, is_final, who="mine", label=""):
         gui_chat.add_text(self._chat_ctx, source, text, is_final, who, label)
         self._bubbles = self._chat_ctx.bubbles; self._current = self._chat_ctx.current; self._auto_scroll = self._chat_ctx.auto_scroll
