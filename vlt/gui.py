@@ -71,7 +71,7 @@ _GATE_HINT = "只有响度超过门限的声音才会被翻译；改完立刻生
 _E2G = ["engines", "engine_dirs", "specs", "sinks", "pending_starts", "current",
     "auto_scroll", "closing", "overlay_out", "desktop_out", "desktop_dragging",
     "desktop_save_job", "desktop_alpha_touched", "start_job"]
-_G2E = ["start_btn", "stop_btn", "direction_var", "chatbox_var", "overlay_var",
+_G2E = ["power_btn", "direction_var", "chatbox_var", "overlay_var",
     "desktop_var", "vmic_var", "desktop_alpha_var", "desktop_alpha_lbl",
     "desktop_font_var", "desktop_srcfont_var", "desktop_w_var", "desktop_h_var", "desktop_drag_btn"]
 _DELEGATE_MAP = {
@@ -187,6 +187,7 @@ class TranslationGUI:
             "level_hold": self._gate_level_hold, "hold_ms": self._gate_hold_ms,
             "preroll_ms": self._gate_preroll_ms, "engines": []}
         self._desktop_ctx = DesktopCtx(); self._chat_ctx = ChatCtx(); self._engine_ctx = EngineCtx()
+        self._power_state = "idle"      # 开始/停止单按钮态："idle" | "running" | "stopping"
         self._cfg = load_config(require_key=False)
         _sl = (self._cfg.ui or {}).get("lang"); i18n.set_language(_sl if _sl else i18n.detect_system_language())
         mine = self._cfg.directions.get("mine")
@@ -428,6 +429,16 @@ class TranslationGUI:
         ctx = self._engine_ctx; ctx.cfg = self._cfg; ctx.lang_pair = self._lang_pair; ctx.engines = self._engines; ctx.engine_dirs = self._engine_dirs
         gui_engine.push_lang_to_engines(ctx)
     # ── 引擎控制 ──
+    def _on_power(self) -> None:
+        """主控制行那个单按钮的分发：翻译中就停，否则就开。"""
+        if self._power_state == "running":
+            self._stop()
+        elif self._power_state != "stopping":   # stopping：按钮已置灰，理论上点不到
+            self._start()
+    def _set_power_state(self, state: str) -> None:
+        """刷「开始/停止」单按钮（唯一入口；文案/颜色/可用态都由它一处决定）。"""
+        self._power_state = state
+        gui_layout.apply_power_state(getattr(self, "_power_btn", None), state)
     def _start(self):
         self._sync_engine_ctx()
         need_key = gui_engine.start(self._engine_ctx)
