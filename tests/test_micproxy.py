@@ -258,11 +258,21 @@ def test_set_mode_rejects_unknown():
 # ---------------------------------------------------------------- 输出回调
 
 def test_out_callback_passthrough_and_underrun():
-    """原声档：从环形缓冲排空；空了补静音并累计欠载。"""
+    """原声档：从环形缓冲排空；空了补静音并累计欠载。
+
+    ⚠️ 收到第一块麦克风数据**之前**不计欠载（启动/换麦瞬态，见 `_got_mic_data`）——
+    先钉「无数据不计数」，置位后再钉「空了计数」。
+    """
     p = MicProxy(audio_cfg={})
     p._mode = MODE_PASSTHROUGH
+
+    out0 = bytearray(960 * 2 * 2)
+    p._out_callback(out0, 960, None, None)              # 还没有任何麦克风数据
+    assert p.underrun_count == 0, "收到第一块之前不该计欠载"
+
     frame = struct.pack("<h", 500) * 2                  # 一帧立体声 DC=500
     p._ring.push(frame * 960)                           # 960 帧 = 一个输出块
+    p._got_mic_data = True                              # 模拟已收到第一块麦克风数据
     out = bytearray(960 * 2 * 2)
     p._out_callback(out, 960, None, None)
     assert bytes(out) == frame * 960, "应原样排出直通数据"
@@ -350,8 +360,10 @@ class _FakeSource:
 class _FakeCaptureBackend:
     def __init__(self, source) -> None:
         self._src = source
+        self.last_rate = None
 
     def open_mic(self, name, *, rate, channels, blocksize):   # noqa: ARG002
+        self.last_rate = rate                    # 记录代理请求的采集率（回归用）
         return self._src
 
 
@@ -379,7 +391,8 @@ def test_start_close_stubbed():
     #   打桩纪律与 `test_start_refused_in_test_process`）。这里放行它，好走完整条打桩链路。
     orig_guard = MP._test_process_guard
     MP._test_process_guard = lambda *a, **k: None        # noqa: ARG005
-    platform.capture_backend = lambda: _FakeCaptureBackend(src)      # type: ignore[assignment]
+    backend = _FakeCaptureBackend(src)
+    platform.capture_backend = lambda: backend           # type: ignore[assignment]
     MP.pick_output_device = lambda patterns=None: (11, "FakeCard", 48000)  # noqa: ARG005
 
     p = MicProxy(audio_cfg={"sample_rate": 48000, "buffer_ms": 100, "max_buffer_ms": 2000,
@@ -391,6 +404,8 @@ def test_start_close_stubbed():
         assert p.start() is True, "重复 start() 应幂等返回已开状态"
         assert _FakeOutStream.instances, "输出流没被打开"
         assert _FakeOutStream.instances[0].started, "输出流没 start()"
+        # ★ 代理原声直通必须以**虚拟声卡输出率**（48k）采集，不能降到 16k（否则丢 8kHz 以上）
+        assert backend.last_rate == 48000, f"代理请求了 {backend.last_rate}，应为 48000（全带宽）"
 
         # 轮询等麦克风线程把直通数据推进环形缓冲（避免固定 sleep 在慢机上翻车）
         frame48 = struct.pack("<h", 500) * 2

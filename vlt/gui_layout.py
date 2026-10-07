@@ -275,11 +275,11 @@ def apply_power_state(btn, state: str) -> None:
     if btn is None:
         return                          # headless 下没有控件
     if state == "running":
-        text, style, wstate = t("停止翻译"), "Danger.TButton", tk.NORMAL
+        text, style, wstate = t("停止翻译"), "PowerDanger.TButton", tk.NORMAL
     elif state == "stopping":
-        text, style, wstate = t("停止翻译"), "Danger.TButton", tk.DISABLED
+        text, style, wstate = t("停止翻译"), "PowerDanger.TButton", tk.DISABLED
     else:                               # 其它任何值（含 "idle"）→ 蓝底「开始翻译」，防御：绝不抛
-        text, style, wstate = t("开始翻译"), "Primary.TButton", tk.NORMAL
+        text, style, wstate = t("开始翻译"), "Power.TButton", tk.NORMAL
     try:
         btn.configure(text=text, style=style, state=wstate)
     except Exception as exc:            # noqa: BLE001
@@ -298,7 +298,7 @@ def build_controls(gui) -> None:
     gui._sponsor_btn = ttk.Button(ctrl, text=t("☕ 赞助"),
                                    command=gui._open_sponsor)
     gui._sponsor_btn.pack(side=tk.RIGHT, padx=(0, 8))
-    gui._power_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Primary.TButton",
+    gui._power_btn = ttk.Button(ctrl, text=t("开始翻译"), style="Power.TButton",
                                 command=gui._on_power)
     gui._power_btn.pack(side=tk.LEFT)
     _vsep(ctrl)

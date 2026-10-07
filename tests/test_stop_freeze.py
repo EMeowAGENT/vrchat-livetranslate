@@ -387,7 +387,7 @@ def test_gui_stop_does_not_block_main_thread() -> None:
         "收尾期间必须禁掉「开始翻译」：否则会与还在关设备的旧引擎抢麦克风/虚拟声卡")
     assert gui._power_btn.kw.get("text") == t("停止翻译"), (
         f"收尾期间单按钮文案应仍是「停止翻译」：{gui._power_btn.kw!r}")
-    assert gui._power_btn.kw.get("style") == "Danger.TButton", (
+    assert gui._power_btn.kw.get("style") == "PowerDanger.TButton", (
         f"收尾期间单按钮应是红底（Danger）：{gui._power_btn.kw!r}")
     assert not gui._engines, "引擎列表应当立刻移走（收尾由后台线程负责）"
     assert seen[-1][1] == t("正在停止…"), f"停止中应先提示「正在停止…」：{seen[-1]!r}"
@@ -400,7 +400,7 @@ def test_gui_stop_does_not_block_main_thread() -> None:
         "收尾完成后界面没恢复（用户会以为还卡着）")
     assert gui._power_btn.kw.get("text") == t("开始翻译"), (
         f"收尾完成后单按钮文案应弹回「开始翻译」：{gui._power_btn.kw!r}")
-    assert gui._power_btn.kw.get("style") == "Primary.TButton", (
+    assert gui._power_btn.kw.get("style") == "Power.TButton", (
         f"收尾完成后单按钮应弹回蓝底（Primary）：{gui._power_btn.kw!r}")
     assert seen[-1] == ("info", t("已停止")), (
         f"正常收尾完成就该显示「已停止」，别把如实提示滥用成常态：{seen[-1]!r}")
@@ -444,7 +444,7 @@ def test_gui_stop_timeout_reports_honestly_in_status_bar() -> None:
         "（用户只能重启应用）")
     assert gui._power_btn.kw.get("text") == t("开始翻译"), (
         f"收尾超时后单按钮文案应弹回「开始翻译」：{gui._power_btn.kw!r}")
-    assert gui._power_btn.kw.get("style") == "Primary.TButton", (
+    assert gui._power_btn.kw.get("style") == "Power.TButton", (
         f"收尾超时后单按钮应弹回蓝底（Primary）：{gui._power_btn.kw!r}")
     assert gui._stop_done_evt.is_set(), (
         "超时后必须置位：否则关窗路径 `_on_close` 会白等 CLOSE_WAIT_STOP_S")

@@ -120,6 +120,38 @@ try:
 except Exception as e:  # noqa: BLE001
     check(False, f"边界输入不应抛异常，实际：{type(e).__name__}: {e}")
 
+# ---------------------------------------------------------------------------
+# 麦克风代理直通重采样（resample_to_48k_stereo）——降采样必须先抗混叠
+# ---------------------------------------------------------------------------
+print("麦克风代理直通：降采样（>48k 声卡）必须先低通，否则混叠成怪声")
+from vlt.output.micproxy import resample_to_48k_stereo  # noqa: E402
+
+_sr = 96000
+_t = np.arange(int(_sr * 0.5)) / _sr
+# 1kHz（应保留）+ 30kHz（超过 48k 奈奎斯特/2=24k；不滤波直接抽点会混叠到 18kHz）
+_sig = 0.5 * np.sin(2 * np.pi * 1000 * _t) + 0.5 * np.sin(2 * np.pi * 30000 * _t)
+_sig16 = (np.clip(_sig, -1, 1) * 20000).astype(np.int16)
+_out48 = np.frombuffer(resample_to_48k_stereo(_sig16.tobytes(), 96000, 1), dtype=np.int16)
+_o = _out48[::2].astype(np.float64)[: 1 << 14]            # 取单声道（L/R 相同），FFT @48k
+_sp = np.abs(np.fft.rfft(_o * np.hanning(len(_o))))
+_f = np.fft.rfftfreq(len(_o), 1 / 48000.0)
+
+
+def _band(f0, f1):
+    m = (_f >= f0) & (_f < f1)
+    return float(_sp[m].sum())
+
+
+_base = _band(900, 1100)
+_alias = _band(17000, 19000)
+check(_base > 0, "降采样后 1kHz 主音保留")
+check(_alias < _base * 0.2,
+      f"30kHz 未混叠到 18kHz（alias/base={_alias / (_base + 1e-9):.3f} < 0.2）")
+# 48k 源：退化为「单声道复制双声道」，字节数 = 输入 * 2（单→双），样点不变
+_src48 = _speech[:8000].astype(np.int16)
+_out48b = resample_to_48k_stereo(_src48.tobytes(), 48000, 1)
+check(len(_out48b) == len(_src48) * 2 * 2, "48k 源：退化为单→双声道复制（样点数不变）")
+
 print()
 if FAILED:
     print(f"FAILED：{len(FAILED)} 项未通过")

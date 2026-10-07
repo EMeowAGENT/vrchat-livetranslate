@@ -41,7 +41,6 @@ Windows 走 `vlt/output/micproxy.py` 的原版；打包时本模块会被
 """
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any, Callable
 
@@ -71,7 +70,6 @@ class LinuxMicProxy(MicProxy):
         """
         if self._opened or self._closed:
             return self._opened
-        self._stop.clear()
 
         # 延迟 import：本模块只在 Linux 上被构造，但 `vlt/platform/linux.py` 同样是
         # 平台独占模块，放函数里 import 可让「模块级 import 图」保持平台干净。
@@ -91,6 +89,11 @@ class LinuxMicProxy(MicProxy):
             on_status=self._on_status,
         )
 
+        # ★ 顺序与父类 start() 同一条纪律：**先起采集、等第一块落进环形缓冲，再开
+        #   pw-cat 输出**。反过来会实测量化出启动头 ~200ms 的欠载爆音 + 告警刷屏。
+        self._start_mic_thread()
+        self._prime_ring()
+
         self._out = PwCatVirtualMic(
             cable.sink_name, sample_rate=self._sample_rate,
             buffer_ms=self._translated_ms, max_buffer_ms=self._max_buffer_ms,
@@ -99,13 +102,11 @@ class LinuxMicProxy(MicProxy):
         if not self._out.open():
             self._out = None
             self._translated = None
+            self._stop_mic_thread()
             cable.stop()
             self._cable = None
             return False
 
-        self._thread = threading.Thread(target=self._mic_thread_run, daemon=True,
-                                        name="vlt-micproxy")
-        self._thread.start()
         self._opened = True
         return True
 

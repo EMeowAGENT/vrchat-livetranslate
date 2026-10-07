@@ -49,7 +49,7 @@ HIDDEN = [
     "pyaudiowpatch", "openvr", "sounddevice", "miniaudio",
     "pythonosc", "websockets", "yaml", "PIL", "numpy",
     "vlt", "vlt.paths", "vlt.config", "vlt.credentials", "vlt.crashlog",
-    "vlt.devices", "vlt.engine", "vlt.gui", "vlt.app",
+    "vlt.devices", "vlt.engine", "vlt.audio_dsp", "vlt.gui", "vlt.app",
     "vlt.session", "vlt.session.base", "vlt.session.qwen38", "vlt.session.qwen35",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
     "vlt.output.openvr_overlay",        # Windows/SteamVR 手腕屏后端（Linux 产物里没有它）
