@@ -80,6 +80,15 @@ class ChatCtx:
     engines_ref: list = field(default_factory=list)       # 可变 list 容器
     engine_dirs_ref: list = field(default_factory=list)   # 同上
 
+    # ── 每跳现取的活引用（**不许缓存实例**） ──
+    # 桌面字幕 / 手腕屏是「开始翻译」后才建的，而构建期就跑起了 poll：那时它们还是
+    # None。早先拆分（6083052）把这里做成单元素 list 容器，却**从没写回** ——
+    # poll 永远读到 None → `tick()` 一次都不跑 → 桌面字幕「收不到内容 / 拖不动 /
+    # 配置热重载失效」（三条症状同源）。现在改成每跳现取，谁先谁后都对。
+    overlay_out_fn: Optional[Callable] = None      # () -> Overlay | None
+    desktop_out_fn: Optional[Callable] = None      # () -> DesktopOverlay | None
+    pending_starts_fn: Optional[Callable] = None   # () -> int
+
     # ── 状态栏 ──
     last_status_level: str = "info"
 
@@ -472,6 +481,11 @@ def setup_poll_ctx(ctx: ChatCtx, gui) -> None:
     """设置 ChatCtx 上的回调引用（从 gui 实例读取）。"""
     c = ctx; c.q = gui._q; c.engines_ref = gui._engines; c.engine_dirs_ref = gui._engine_dirs
     c.room_status_next = gui._room_status_next; c.gate_level_tick = gui._gate_level_tick
+    # 活引用：闭包捕获的是 gui 实例，取值发生在**每跳 poll 里**，所以
+    # 桌面字幕/手腕屏晚于构建期创建也能被 tick（见 ChatCtx 里那段说明）
+    c.overlay_out_fn = lambda: gui._overlay_out
+    c.desktop_out_fn = lambda: gui._desktop_out
+    c.pending_starts_fn = lambda: gui._pending_starts
     c.push_overlay_fn = gui._push_overlay; c.push_desktop_fn = gui._push_desktop
     c.on_device_scan_result_fn = gui._on_device_scan_result; c.on_update_check_result_fn = gui._on_update_check_result
     c.on_download_progress_fn = gui._on_download_progress; c.on_download_done_fn = gui._on_download_done
@@ -487,15 +501,11 @@ def poll(ctx: ChatCtx, root: tk.Misc,
          add_text_fn: Callable,
          refresh_status_fn: Callable,
          stats: dict,
-         pending_starts_holder: list,
-         overlay_out_holder: list,
-         desktop_out_holder: list,
          ) -> None:
     """主轮询：从队列读取消息并分发到各处理器（每 50ms 一次）。
 
-    *pending_starts_holder* / *overlay_out_holder* / *desktop_out_holder*
-    是单元素 ``list``，充当可变引用容器（gui.py 的薄壳 ``self._xxx``
-    可能是任意类型，用 list 统一兜底）。
+    手腕屏 / 桌面字幕实例**不通过参数传进来** —— 它们是「开始翻译」后才创建的，
+    而本循环在构建期就起跑了；一律走 ``ctx.*_out_fn()`` 每跳现取（见 ChatCtx）。
     """
     try:
         while True:
@@ -572,7 +582,8 @@ def poll(ctx: ChatCtx, root: tk.Misc,
 
     # 引擎全部退出 → 恢复按钮
     engines = ctx.engines_ref
-    if (pending_starts_holder[0] == 0 and engines
+    pending_starts = ctx.pending_starts_fn() if ctx.pending_starts_fn else 0
+    if (pending_starts == 0 and engines
             and all(not e.running for e in engines)):
         if ctx.start_btn_fn:
             ctx.start_btn_fn(tk.NORMAL)
@@ -582,11 +593,13 @@ def poll(ctx: ChatCtx, root: tk.Misc,
             set_status_fn("info", t("已停止"))
         # gui.py 薄壳负责清空 engines / engine_dirs
 
-    # 手腕屏 / 桌面字幕的热重载 / 淡出
-    ov = overlay_out_holder[0] if overlay_out_holder else None
+    # 手腕屏 / 桌面字幕的热重载 / 淡出。
+    # ⚠️ 必须**每跳现取**：两个实例都是「开始翻译」后才创建的，构建期这里还是 None；
+    #    早先缓存进 list 容器却从不写回 → tick() 永不执行（桌面字幕内容/拖动/热重载全废）。
+    ov = ctx.overlay_out_fn() if ctx.overlay_out_fn else None
     if ov is not None:
         ov.tick()
-    dov = desktop_out_holder[0] if desktop_out_holder else None
+    dov = ctx.desktop_out_fn() if ctx.desktop_out_fn else None
     if dov is not None:
         dov.tick()
 
@@ -606,6 +619,4 @@ def poll(ctx: ChatCtx, root: tk.Misc,
             ctx.refresh_gate_level_fn()
 
     ctx.poll_job = root.after(50, lambda: poll(
-        ctx, root, set_status_fn, add_text_fn, refresh_status_fn,
-        stats, pending_starts_holder, overlay_out_holder,
-        desktop_out_holder))
+        ctx, root, set_status_fn, add_text_fn, refresh_status_fn, stats))
