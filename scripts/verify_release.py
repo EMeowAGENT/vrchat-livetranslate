@@ -1,20 +1,24 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.9.0 "_on_save_osc_port,user_quiet_s,ui_tk"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.10.0 "MicProxy,toggle_voice_mode,chatbox_text,passthrough_buffer_ms,意大利语"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.9.0）**：本版三处改动各取一个**新增符号名**做 needle
-（修复/重构型改动往往没有新文案，符号名比文案可靠）——
-  ① OSC 端口可在界面里改：`_on_save_osc_port`（`vlt/gui.py`）；
-  ② 快封句判据换成电平信号：`user_quiet_s`（`vlt/session/base.py` + `vlt/engine.py`）；
-  ③ `gui.py` 纯逻辑抽成独立模块：`ui_tk`（新模块 `vlt/ui_tk.py`）。
-这三个符号在 **v0.8.0 的代码里都不存在**（上面已逐一核对），所以命中即证明新代码真进了产物。
+⚠️ **功能型发布（v0.10.0）**：本版四处改动各取一个**新增符号名**做 needle
+（符号名比文案可靠：文案会被改，符号进 pyc 必留）——
+  ① 麦克风代理（原声 / 译音一键切）：`MicProxy`（新模块 `vlt/output/micproxy.py`，
+     接线在 `gui_engine.py` / `gui_voice.py` / `vlt/platform/{win,linux}.py`）；
+  ② 主界面那颗「原声 / 译音」按钮：`toggle_voice_mode`（`vlt/gui_voice.py` + `gui_layout.py`）；
+  ③ chatbox 气泡可切原文 / 译文：`chatbox_text`（配置键 + `vlt/engine.py` 里的分支）；
+  ④ 两个缓冲可调：`passthrough_buffer_ms`（`vlt/config.py` + `vlt/gui_settings.py`）；
+  ⑤ 界面对话语言清单新增意大利语：`意大利语`（`vlt/ui_text.py` + 四套词表）。
+这五个符号在 **v0.9.0 的代码里都不存在**（上面已逐一用 `git grep <符号> v0.9.0 -- vlt/` 核对），
+所以命中即证明新代码真进了产物。
 
-⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（`win.py` 的 `_SM_CXSCREEN`
-在 v0.8.0 里**就有**这个名字，只是从没被用对过），这类改动没有新增字符串可搜 ——
-它的证据是行为（`screen_work_area()` 真机返回值）与本次改动清单，不是 needle。
+⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（桌面字幕 tick、设置页滑块落盘、
+交换链 sRGB 格式、Linux 麦克风采集），这类改动没有新增字符串可搜 ——
+它们的证据是真机行为与本次改动清单，不是 needle。
 
 复核项：
   1. 附件下载（只认 exe）
