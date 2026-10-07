@@ -67,15 +67,18 @@ def test_argv_targets_selected_source() -> None:
     assert "--channels=1" in argv, f"必须是单声道（PipeWire 服务端降混）：{argv}"
     assert "--rate=16000" in argv, f"必须直接 16k 采集：{argv}"
     assert "--format=s16" in argv and "--raw" in argv, f"裸 PCM 口径被破坏：{argv}"
-    print(f"  pw-record argv 靶向/格式口径 OK：{argv}")
+    # ★ 靶向时必须钉死目标，否则切系统默认麦会被 WirePlumber 拽走（见 linux.py 注释）
+    assert "node.dont-reconnect=true" in argv, f"靶向流没钉死（会被默认麦拽走）：{argv}"
+    print(f"  pw-record argv 靶向/格式/钉死口径 OK：{argv}")
 
 
 def test_argv_without_target_omits_target() -> None:
     """目标为空 → **不带** `--target`（用 PipeWire 默认输入），而不是写一个空的 --target=。"""
     argv = _argv_of("")
     assert not any(a.startswith("--target") for a in argv), f"空目标不该带 --target：{argv}"
+    assert "node.dont-reconnect=true" not in argv, f"空目标应保留跟随默认、不该钉死：{argv}"
     assert argv[0] == "pw-record", argv
-    print("  空目标 → 不带 --target（用 PipeWire 默认输入）OK")
+    print("  空目标 → 不带 --target（用 PipeWire 默认输入）、不钉死 OK")
 
 
 def test_mic_target_node_maps_description_to_node_name() -> None:
@@ -90,14 +93,17 @@ def test_mic_target_node_maps_description_to_node_name() -> None:
                    node_name="alsa_input.fake-00.analog-stereo")]
     try:
         assert _mic_target_node("Fake Mic") == "alsa_input.fake-00.analog-stereo", "没映射出 node.name"
+        # ★ 兜底：直接按稳定 node.name 匹配（WiVRn 描述漂移时不再丢设备）
+        assert _mic_target_node("alsa_input.fake-00.analog-stereo") == \
+            "alsa_input.fake-00.analog-stereo", "按 node.name 匹配失败"
         assert _mic_target_node("Unknown") == "", "查不到应返回空串"
         assert _mic_target_node(None) == "", "空描述应返回空串"
-        print("  描述 → node.name 映射（命中/未命中/空）OK")
+        print("  描述 / node.name → node.name 映射（命中/兜底/未命中/空）OK")
     finally:
         D.enumerate_mic_devices = orig                       # type: ignore[assignment]
 
 
-def _open_mic_capture(target_node, *, device_name=None, auto_node=None):   # noqa: ANN001, ANN202
+def _open_mic_capture(target_node, *, device_name=None, auto_node=None, rate=16000):   # noqa: ANN001, ANN202
     """在事件循环里调 `open_mic`，记录交给 `LinuxMicSource` 的 target。"""
     import vlt.platform.linux as L
 
@@ -111,7 +117,7 @@ def _open_mic_capture(target_node, *, device_name=None, auto_node=None):   # noq
         loop = asyncio.new_event_loop()
         try:
             async def _go():                                 # noqa: ANN202
-                return L.open_mic(device_name, rate=16000, channels=None, blocksize=1600)
+                return L.open_mic(device_name, rate=rate, channels=None, blocksize=1600)
 
             loop.run_until_complete(_go())
         finally:
@@ -153,6 +159,21 @@ def test_open_mic_explicit_resolves_device_to_target() -> None:
         D.enumerate_mic_devices = orig                       # type: ignore[assignment]
 
 
+def test_open_mic_honors_requested_rate() -> None:
+    """★ 回归：Linux `open_mic` 必须**尊重传入的 rate**。
+
+    历史上这里硬编码 16k，而麦克风代理的原声直通复用同一个 `open_mic` ——
+    于是真人原声被降到 16kHz（8kHz 以上全丢）再插值升回 48k → 发闷/电话音
+    （原声下尤其明显）。代理现在显式请求 48k，本用例钉住「请求多少就采多少」。
+    """
+    src = _open_mic_capture(None, device_name=None, auto_node="rnnoise_source", rate=48000)
+    assert src.rate == 48000, f"没尊重请求的 48k：{src.rate}"
+    assert (src.rate, src.channels) == (48000, 1), (src.rate, src.channels)
+    argv = _argv_of("", rate=48000, channels=1)
+    assert "--rate=48000" in argv, f"argv 没按 48k 采集：{argv}"
+    print("  open_mic(rate=48000) → 48k 采集（代理原声直通全带宽）OK")
+
+
 if __name__ == "__main__":
     print("test_mic_rate:")
     test_argv_targets_selected_source()
@@ -160,4 +181,5 @@ if __name__ == "__main__":
     test_mic_target_node_maps_description_to_node_name()
     test_open_mic_auto_resolves_default_source_node()
     test_open_mic_explicit_resolves_device_to_target()
+    test_open_mic_honors_requested_rate()
     print("ALL PASSED")
