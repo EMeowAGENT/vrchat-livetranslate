@@ -159,21 +159,21 @@ def test_apply_power_state_matrix() -> None:
     w = _Widget()
     gui_layout.apply_power_state(w, "idle")
     assert w.kw.get("text") == t("开始翻译"), f"idle 文案不对：{w.kw!r}"
-    assert w.kw.get("style") == "Primary.TButton", f"idle 应是蓝底 Primary：{w.kw!r}"
+    assert w.kw.get("style") == "Power.TButton", f"idle 应是蓝底 Power：{w.kw!r}"
     assert w.kw.get("state") == "normal", f"idle 应可点：{w.kw!r}"
 
     # running：红底「停止翻译」，可点
     w = _Widget()
     gui_layout.apply_power_state(w, "running")
     assert w.kw.get("text") == t("停止翻译"), f"running 文案不对：{w.kw!r}"
-    assert w.kw.get("style") == "Danger.TButton", f"running 应是红底 Danger：{w.kw!r}"
+    assert w.kw.get("style") == "PowerDanger.TButton", f"running 应是红底 PowerDanger：{w.kw!r}"
     assert w.kw.get("state") == "normal", f"running 应可点：{w.kw!r}"
 
     # stopping：红底「停止翻译」，但置灰
     w = _Widget()
     gui_layout.apply_power_state(w, "stopping")
     assert w.kw.get("text") == t("停止翻译"), f"stopping 文案不对：{w.kw!r}"
-    assert w.kw.get("style") == "Danger.TButton", f"stopping 应是红底 Danger：{w.kw!r}"
+    assert w.kw.get("style") == "PowerDanger.TButton", f"stopping 应是红底 PowerDanger：{w.kw!r}"
     assert w.kw.get("state") == "disabled", f"stopping 应置灰：{w.kw!r}"
     print("  ✓ apply_power_state 三态矩阵：idle/running/stopping 的 text+style+state 全对")
 
@@ -186,7 +186,7 @@ def test_apply_power_state_none_and_garbage() -> None:
     w = _Widget()
     gui_layout.apply_power_state(w, "garbage")        # 未知值 → 当 idle
     assert w.kw.get("text") == t("开始翻译"), f"未知值应回落到 idle 文案：{w.kw!r}"
-    assert w.kw.get("style") == "Primary.TButton", f"未知值应回落到 idle 蓝底：{w.kw!r}"
+    assert w.kw.get("style") == "Power.TButton", f"未知值应回落到 idle 蓝底：{w.kw!r}"
     assert w.kw.get("state") == "normal", f"未知值应回落到 idle 可点：{w.kw!r}"
     print("  ✓ apply_power_state 防御：None 不抛、未知值当 idle")
 
@@ -198,6 +198,8 @@ def test_build_controls_has_single_power_button() -> None:
     """`build_controls` 里只建一个 `_power_btn`、不再有 `_stop_btn`，且开始文案只出现一次。"""
     src = inspect.getsource(gui_layout.build_controls)
     assert "_power_btn" in src, "build_controls 里必须建 _power_btn（单按钮开关）"
+    assert '"Power.TButton"' in src, (
+        "初始（未翻译）那只按钮必须用 Power.TButton —— 用 Primary 的话点一下就会换尺寸")
     assert "_stop_btn" not in src, (
         "build_controls 里不许再出现 _stop_btn —— 两个按钮已合并成一个，"
         "留旧控件就是没删干净")
@@ -206,6 +208,33 @@ def test_build_controls_has_single_power_button() -> None:
         f'build_controls 里 t("开始翻译") 只该出现一次（= 只剩一个开始/停止按钮），'
         f"实际 {n_start} 次")
     print("  ✓ 结构守卫：build_controls 只有一个 _power_btn、无 _stop_btn、开始文案仅 1 次")
+
+
+def test_power_styles_are_same_size() -> None:
+    """两个档位样式必须**同尺寸**（字体 + 内边距同一份常量）。
+
+    用户实测反馈：合并成单按钮后「按一下变大、按一下变小」—— 根因是蓝底用了
+    `Primary.TButton`（粗体 + padding (20,9)）、红底用了 `Danger.TButton`（常规字体 +
+    padding (14,6)）。这里做**源码级**守卫（真窗口里的实测尺寸一致性由
+    `out/test_power_probe.py` 验，那才是最终判据）。
+    """
+    import vlt.ui_tk as ui_tk
+
+    src = inspect.getsource(ui_tk.apply_theme)
+    assert '"Power.TButton"' in src and '"PowerDanger.TButton"' in src, \
+        "两个档位样式必须都在 apply_theme 里定义"
+    n_font = src.count("font=_POWER_FONT")
+    assert n_font == 2, (
+        "两个 Power 样式的字体必须取自同一份常量 _POWER_FONT，"
+        f"否则换档时按钮尺寸会变（实际 {n_font} 处）")
+    n_pad = src.count("padding=_POWER_PAD")
+    assert n_pad == 2, (
+        "两个 Power 样式的内边距必须取自同一份常量 _POWER_PAD，"
+        f"否则换档时按钮尺寸会变（实际 {n_pad} 处）")
+    ap = inspect.getsource(gui_layout.apply_power_state)
+    assert '"Primary.TButton"' not in ap and '"Danger.TButton"' not in ap, (
+        "apply_power_state 不许在尺寸不同的 Primary/Danger 之间切换（会按一下变大变小）")
+    print("  ✓ 两个档位样式同字体同内边距（单按钮尺寸恒定，不许退回 Primary/Danger）")
 
 
 # ---------------------------------------------------------------- 3) 点击分发
@@ -248,11 +277,11 @@ def test_set_power_state_refreshes_widget() -> None:
     gui._set_power_state("running")
     assert gui._power_state == "running", f"状态没记下：{gui._power_state!r}"
     assert gui._power_btn.kw.get("text") == t("停止翻译"), f"按钮文案没刷：{gui._power_btn.kw!r}"
-    assert gui._power_btn.kw.get("style") == "Danger.TButton", f"按钮样式没刷：{gui._power_btn.kw!r}"
+    assert gui._power_btn.kw.get("style") == "PowerDanger.TButton", f"按钮样式没刷：{gui._power_btn.kw!r}"
     gui._set_power_state("idle")
     assert gui._power_state == "idle"
     assert gui._power_btn.kw.get("text") == t("开始翻译"), f"按钮文案没刷回：{gui._power_btn.kw!r}"
-    assert gui._power_btn.kw.get("style") == "Primary.TButton", f"按钮样式没刷回：{gui._power_btn.kw!r}"
+    assert gui._power_btn.kw.get("style") == "Power.TButton", f"按钮样式没刷回：{gui._power_btn.kw!r}"
     print("  ✓ _set_power_state：记状态 + 刷按钮（文案/颜色同源）")
 
 
@@ -300,6 +329,7 @@ def main() -> int:
         test_apply_power_state_matrix,
         test_apply_power_state_none_and_garbage,
         test_build_controls_has_single_power_button,
+        test_power_styles_are_same_size,
         test_on_power_dispatch,
         test_set_power_state_refreshes_widget,
         test_engine_wiring_running_stopping_idle,
