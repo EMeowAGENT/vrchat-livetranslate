@@ -347,5 +347,6 @@ room:
 ui:
   direction: mine          # mine=我说的话 | theirs=别人说 | dual=双向同时
   chatbox: true            # 输出勾选：chatbox 气泡
+  chatbox_text: translated # chatbox 气泡显示什么：translated=译文（默认）| source=原文（ASR 识别结果）
   overlay: false           # 输出勾选：手腕屏（需要 SteamVR 在跑）
   desktop_overlay: false   # 输出勾选：桌面字幕（PC 桌面模式，贴在 VRChat 窗口上）

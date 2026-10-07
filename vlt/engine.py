@@ -48,6 +48,33 @@ SENTENCE_GAP_S = 0.6
 CHATBOX_DRAIN_BUDGET_S = 2.0
 CHATBOX_DRAIN_TICK_S = 0.05     # 隔一会儿再问一次令牌桶；刻意不与 min_gap_s 耦合
 
+# ---- chatbox 气泡显示哪种文本（界面上是 `chatbox` 勾选框右边那颗切换按钮）----
+# 互斥二选一，**只影响 chatbox 气泡**：手腕屏 / 桌面字幕 / 聊天区恒为译文。
+CHATBOX_TEXT_TRANSLATED = "translated"   # 默认：气泡显示译文
+CHATBOX_TEXT_SOURCE = "source"           # 气泡显示 ASR 源文（「我说的话」本身）
+_CHATBOX_TEXT_VALUES = (CHATBOX_TEXT_TRANSLATED, CHATBOX_TEXT_SOURCE)
+# 脏值只在**首次见到**时留痕一次：本函数每条文本增量都要调，不去重就会刷屏。
+_CHATBOX_TEXT_WARNED: set[str] = set()
+
+
+def chatbox_text_mode(cfg) -> str:
+    """读 `ui.chatbox_text`：`translated`（默认）| `source`。脏值回落 `translated` 并留痕。
+
+    每次调用都现读（**不缓存**）：界面点一下切换就要在同一次会话里立刻生效，
+    所以判据不能是启动时算好的一份快照。
+    """
+    raw = (getattr(cfg, "ui", None) or {}).get("chatbox_text", CHATBOX_TEXT_TRANSLATED)
+    if isinstance(raw, str) and raw.strip() in _CHATBOX_TEXT_VALUES:
+        return raw.strip()
+    key = repr(raw)
+    if key not in _CHATBOX_TEXT_WARNED:
+        _CHATBOX_TEXT_WARNED.add(key)
+        print(f"[config] ui.chatbox_text={raw!r} 不是 "
+              f"{' / '.join(_CHATBOX_TEXT_VALUES)} 之一 → 回落 translated（气泡显示译文）",
+              flush=True)
+    return CHATBOX_TEXT_TRANSLATED
+
+
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
 SILENCE_PEAK = 220
 
@@ -616,6 +643,22 @@ class Engine:
         return self._merger
 
     @property
+    def chatbox_text_mode(self) -> str:
+        """当前 chatbox 气泡显示哪种文本（每条现读，界面点一下立刻生效）。"""
+        return chatbox_text_mode(self._cfg)
+
+    def chatbox_payload(self, d: TextDelta) -> str:
+        """本条 TextDelta 该往 chatbox 送什么文本（空串 = 本条不发）。
+
+        译文模式：`display`（译文，与改动前逐字节一致）；
+        原文模式：`d.source`（ASR 源文）。源文为空就返回空串 —— **绝不回落译文、
+        绝不发占位符**（气泡里语言突然跳变比空一拍更糟）。
+        """
+        if self.chatbox_text_mode == CHATBOX_TEXT_SOURCE:
+            return (d.source or "").strip()
+        return d.display
+
+    @property
     def virtualmic(self) -> VirtualMic | None:
         return self._virtualmic
 
@@ -1095,7 +1138,17 @@ class Engine:
         if self._overlay is not None:
             self._overlay.update(text, d.source or "")
         if self._merger is not None and self._chatbox_wanted:
-            self._merger.push(d)
+            # 只换「往 chatbox 送什么」这一步：节流 / 去重 / 句末必刷全部复用同一个
+            # Merger（构造一个载荷 TextDelta 给它，Merger 自身一行不改）。
+            payload = self.chatbox_payload(d)
+            if payload:
+                self._merger.push(TextDelta(confirmed=payload, pending="",
+                                            is_final=d.is_final, source=d.source or ""))
+            elif self.chatbox_text_mode == CHATBOX_TEXT_SOURCE:
+                # 原文模式下源文还没到 → 本条不发（不入 pending 队列、不重发旧内容）。
+                # 留痕只走 print（crashlog 的 Tee 会落进日志文件），**不进状态栏**、
+                # 不碰任何用户可见的表面；每条都打，不限频（用户明确要求）。
+                print(f"[chatbox] 原文为空，本条跳过（is_final={d.is_final}）", flush=True)
 
     # 终版短于这个长度不参与 repeat 判定：「嗯。」「好。」这类短应答天然会连撞，
     # 把它们当证据会误杀正常对话（宁可晚一句判出真 repeat，也不可误杀真译文）。
@@ -1227,7 +1280,11 @@ class Engine:
             self._overlay.update(translated, text)
         if self._chatbox is not None and self._chatbox_wanted:
             limit = int((self._cfg.chatbox or {}).get("max_chars", 144))
-            for chunk in split_for_chatbox(translated, limit):
+            # 原文模式：chatbox 收到的是你**敲的那句字**本身（与语音链路口径一致 ——
+            # 气泡里始终是「我说的话」）。翻译仍然照常做（界面气泡 / 手腕屏 / TTS 都用它），
+            # 只是不进 chatbox；所以这一步保持在翻译完成之后，不动共用时序。
+            payload = text if self.chatbox_text_mode == CHATBOX_TEXT_SOURCE else translated
+            for chunk in split_for_chatbox(payload, limit):
                 self._chatbox.send(chunk, True)
 
         # 打字也要出声：文本翻译接口**不回音频**，所以补一步 TTS 再喂虚拟声卡。
