@@ -880,6 +880,9 @@ def on_export_logs(gui) -> None:
     from .crashlog import export_logs
 
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Tk 的文件列表（::tk::IconList）canvas 底色写死在 Tk 里，样式 / option database 都够不着
+    # → 只能等它建好再补色。纯配色，失败静默降级（详见 vlt/ui_tk.py 里那段说明）。
+    _ui_tk.watch_file_dialog(gui._root)
     try:
         dest = filedialog.asksaveasfilename(
             parent=gui._settings_win, title=t("导出日志压缩包"),
