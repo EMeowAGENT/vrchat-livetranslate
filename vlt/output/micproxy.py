@@ -21,8 +21,14 @@
 
 ## 平台
 
-仅 Windows 使用（GUI 只在 Windows 且 `output.audio.proxy.enabled` 时构造它）。
-Linux 的译音输出仍走 `PwCatVirtualMic` + 运行时声明的 PipeWire 节点，本模块不参与。
+本模块是**两端共用的本体**（档位语义、缓冲、采集线程、状态汇报都在这里）：
+
+    * Windows → 本模块直接用（`platform/win.py` 构造，输出走 sounddevice/PortAudio 回调）；
+    * Linux   → `vlt/output/micproxy_linux.py: LinuxMicProxy` **继承本类**，只覆盖
+      `start` / `close` / 输出驱动（`pw-cat` 写管道 + 运行时声明的 PipeWire 节点）。
+
+采集率与输出率一致（默认 48k）：Windows 用设备原生率、Linux 用请求的 `sample_rate`，
+保证原声直通**全带宽**（曾因 Linux 硬编码 16k 导致原声发闷/电话音，见 `_mic_pump`）。
 
 ## 复用而非重造（踩过坑的逻辑只留一份）
 
@@ -34,9 +40,10 @@ Linux 的译音输出仍走 `PwCatVirtualMic` + 运行时声明的 PipeWire 节�
 
 ## ⚠️ 直通缓冲下限（本期既定取舍）
 
-麦克风经 open_mic 实际按**设备原生采样率**采集，块大小约 100ms（原生率≠16k 时
-`win.py` 会把 blocksize 强制成 `native*0.1`）。所以直通环形缓冲的容量**必须 ≥ 一个输入块**
-（否则每个 100ms 块进来就被削掉大半 → 严重断续）。默认 150ms、GUI 范围 60–500ms 即由此而来。
+麦克风按**全带宽**采集：Windows 用设备原生采样率（`win.py` 会把 blocksize 强制成
+`native*0.1`，块大小约 100ms），Linux 用调用方请求的 `sample_rate`（= 48k，见
+`platform/linux.py:open_mic`）。所以直通环形缓冲的容量**必须 ≥ 一个输入块**
+（否则每块进来就被削掉大半 → 严重断续）。默认 150ms、GUI 范围 60–500ms 即由此而来。
 把 blocksize 降到 20ms 级以进一步压低延迟是后续优化，本期不做。
 """
 from __future__ import annotations
@@ -89,23 +96,34 @@ MODE_TRANSLATED = "translated"
 
 
 def resample_to_48k_stereo(pcm: bytes, src_rate: int, src_channels: int = 1) -> bytes:
-    """任意采样率/声道的 s16le PCM → 48kHz 立体声 s16le（numpy 线性插值 + 单声道复制双声道）。
+    """任意采样率/声道的 s16le PCM → 48kHz 立体声 s16le。
 
-    与 `virtualmic.resample_24k_mono_to_48k_stereo` 的区别：那个是写死 24k→48k（2 倍），
-    这里的**源采样率不固定**（麦克风按设备原生率采集，可能是 44.1k/48k/…），所以在原始
-    采样点时间轴上做线性插值到 48k，再复制到双声道。
+    流程：多声道取均值降为单声道 →（降采样时）**先抗混叠低通** → 在原始采样点时间轴上
+    线性插值到 48k → 单声道复制到双声道。
+
+    * 与 `virtualmic.resample_24k_mono_to_48k_stereo` 的区别：那个是写死 24k→48k（2 倍），
+      这里的**源采样率不固定**。
+    * Linux 麦克风代理现在直接在 48k 采集（见 `platform/linux.py:open_mic`），所以本函数
+      在 Linux 上退化为「单声道复制双声道」；Windows 按设备原生率采集，44.1k 走升采样、
+      96k/192k 走**降采样**。
+    * ⚠️ 降采样（src>48k）必须先低通，否则 24kHz 以上的分量会**混叠**折叠进可听频段
+      （线性插值直接取点 = 无滤波 decimation，是典型的「怪声」来源）。
     """
+    from ..audio_dsp import lowpass
     import numpy as np
 
     if len(pcm) % 2 != 0:
         pcm = pcm[: len(pcm) - 1]
-    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
     if src_channels > 1:
         n = len(a) // src_channels * src_channels
         a = a[:n].reshape(-1, src_channels).mean(axis=1)
     if a.size == 0:
         return b""
     if src_rate != 48000:
+        if src_rate > 48000:
+            # 降采样：先在源域低通到 48k 奈奎斯特以下（取 20k 留过渡带），再插值取点。
+            a = lowpass(a, src_rate, cutoff_hz=20000.0)
         n_out = int(len(a) * 48000 / src_rate)
         if n_out < 1:
             return b""
@@ -160,6 +178,11 @@ class _Ring:
             if under:
                 out.extend(b"\x00" * (need - len(out)))
             return bytes(out), under
+
+    def available(self) -> int:
+        """当前缓冲字节数（启动等「攒到第一块」时用，见 `MicProxy._prime_ring`）。"""
+        with self._lock:
+            return self._n
 
     def clear(self) -> None:
         with self._lock:
@@ -277,6 +300,10 @@ class MicProxy:
         self._opened = False
         self._closed = False
         self._underruns = 0
+        #: 是否已收到过第一块麦克风数据。启动阶段环形缓冲还空着时**不计**欠载 ——
+        #: 以前「先开输出、后起采集」会实测量化出启动头 ~200ms 的欠载告警刷屏
+        #: （日志实证：9~10 次/5s 只在启动窗口出现，稳态为 0）。见 `_prime_ring`。
+        self._got_mic_data = False
         self._sink = TranslatedSink(self)
 
     # ------------------------------------------------------------------ 属性
@@ -298,7 +325,14 @@ class MicProxy:
 
     # ------------------------------------------------------------------ 启停
     def start(self) -> bool:
-        """打开虚拟声卡输出流 + 启动麦克风直通线程。失败只降级（返回 False），不抛异常。"""
+        """启动麦克风直通线程 → 等环形缓冲攒到第一块 → 再打开虚拟声卡输出流。
+
+        顺序刻意如此（2026-10）：原来是「先开输出、后起采集」，于是输出流一开就对着
+        **还没数据的**环形缓冲要数据 —— 实测表现为启动头 ~200ms 的欠载爆音 + 告警刷屏
+        （日志实证：`直通缓冲欠载 9~10 次/5s` 只出现在启动/换麦窗口，稳态为 0）。
+        先起采集、等到数据落进环形缓冲再开输出，这段空窗从源头消失。失败只降级
+        （返回 False），不抛异常。
+        """
         if self._opened or self._closed:
             return self._opened
         blocked = _test_process_guard()
@@ -307,7 +341,6 @@ class MicProxy:
                             "[proxy] 检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）",
                             **blocked)
             return False
-        self._stop.clear()
         dev = self._pick_output_device()
         if dev is None:
             return False
@@ -317,14 +350,43 @@ class MicProxy:
             buffer_ms=self._translated_ms, max_buffer_ms=self._max_buffer_ms,
             on_status=self._on_status,
         )
+        self._start_mic_thread()
+        self._prime_ring()
         if not self._open_output(idx, name, fallbacks):
             self._translated = None
+            self._stop_mic_thread()
             return False
+        self._opened = True
+        return True
+
+    def _start_mic_thread(self) -> None:
+        """拉起麦克风直通采集线程（幂等前置：先清停止位）。"""
+        self._stop.clear()
         self._thread = threading.Thread(target=self._mic_thread_run, daemon=True,
                                         name="vlt-micproxy")
         self._thread.start()
-        self._opened = True
-        return True
+
+    def _stop_mic_thread(self) -> None:
+        """停采集线程并 join（`_stop` 只属于采集线程，见 `start()`/`close()`）。"""
+        self._stop.set()
+        th = self._thread
+        if th is not None and th.is_alive():
+            th.join(timeout=2.0)                  # 采集线程内部对 read 有超时，2s 足够退出
+        self._thread = None
+
+    def _prime_ring(self, timeout: float = 2.0) -> None:
+        """等直通环形缓冲攒到 **~半个缓冲** 的第一批数据再开输出。
+
+        短超时兜底：采集线程若已退出（麦打不开/被拔），立刻返回、绝不永久挂住启动。
+        """
+        target = max(1, int(self._bytes_per_ms * self._passthrough_ms * 0.5))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._ring.available() >= target:
+                return
+            if self._thread is None or not self._thread.is_alive():
+                return
+            time.sleep(0.02)
 
     def close(self) -> None:
         """幂等关闭：先停麦克风线程，再关输出流（顺序与采集侧同一条纪律）。"""
@@ -422,7 +484,8 @@ class MicProxy:
             return
         data, under = self._ring.drain(need)
         outdata[:] = data
-        if under:
+        # 收到第一块麦克风数据之前不计欠载：启动/换麦瞬间环形缓冲本来就是空的，那不是故障。
+        if under and self._got_mic_data:
             self._underruns += 1
 
     # ------------------------------------------------------------------ 麦克风直通
@@ -441,8 +504,13 @@ class MicProxy:
                 pass
 
     async def _mic_pump(self) -> None:
+        # ★ 采集率 = 虚拟声卡的输出率（48k），**不要**用 16k：
+        #   直通是把真人原声送去虚拟麦，降到 16k 会丢掉 8kHz 以上（齿音/气息/明亮度），
+        #   再插值升回 48k 也补不回来 → 听感发闷、像电话音（原声下尤其明显）。
+        #   Windows 侧 `open_mic` 本就会改用设备原生率，这里显式传 `_sample_rate`
+        #   让 Linux 侧也走全带宽（Linux 以前硬编码 16k，是本次音质问题的根因）。
         src = platform.capture_backend().open_mic(
-            self._mic_name, rate=16000, channels=None, blocksize=MIC_BLOCKSIZE)
+            self._mic_name, rate=self._sample_rate, channels=None, blocksize=MIC_BLOCKSIZE)
         self._mic_src = src
         self._on_status("info", "[proxy] 麦克风直通已启动（{rate}Hz {channels}ch → 48k 立体声）",
                         rate=src.rate, channels=src.channels)
@@ -455,6 +523,7 @@ class MicProxy:
                     # 始终填充直通环形缓冲（保持新鲜）；译音档时输出回调不取它，
                     # 切回原声档立刻有最近 ~passthrough_ms 的麦克风数据，无需等下一块。
                     self._ring.push(resample_to_48k_stereo(chunk, src.rate, src.channels))
+                    self._got_mic_data = True   # 收到第一块 → 之后才计欠载（见 _out_callback）
                 now = time.monotonic()
                 if now - last_report >= UNDERRUN_REPORT_S:
                     delta = self._underruns - last_under
@@ -534,18 +603,12 @@ class MicProxy:
         if not self._opened:
             return
         # `_stop` 只属于麦克风采集线程（见 start()/close()），这里复用它做一次「停→起」。
-        self._stop.set()
-        th = self._thread
-        if th is not None and th.is_alive():
-            th.join(timeout=2.0)                  # 采集线程内部对 read 有超时，2s 足够退出
-        self._thread = None
+        self._got_mic_data = False                # 新麦的第一块到达前不计欠载（同启动口径）
+        self._stop_mic_thread()
         try:
             self._ring.clear()                    # 丢掉旧麦遗留数据，免得切换瞬间放一小段旧麦
         except Exception:                         # noqa: BLE001 — 清缓冲失败不该挡切换
             pass
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._mic_thread_run, daemon=True,
-                                        name="vlt-micproxy")
-        self._thread.start()
+        self._start_mic_thread()
         self._on_status("info", "[proxy] 直通麦克风已切换：{name}",
                         name=new or "系统默认")

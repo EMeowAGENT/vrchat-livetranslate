@@ -845,6 +845,20 @@ class PwRecordSource(QueueAudioSource):
         argv = ["pw-record"]
         if self._target:                 # 空 = 用 PipeWire 默认源/输出（loopback 永远有 target）
             argv.append(f"--target={self._target}")
+            # ★ 钉死目标（`node.dont-reconnect=true`）：**必须**，否则切系统默认麦时本流会被拽走。
+            #
+            # WirePlumber 的 `linking-utils.lua:checkFollowDefault`：当一条流被链到的目标
+            # **恰好是当时的默认节点**时，它会把该流标记成"跟随默认"（metadata `target.node=-1`，
+            # 模仿 PulseAudio）。之后只要用户切换系统默认麦克风，WirePlumber 就把这条流改接到
+            # 新默认源——实测（2026-10-08）：`pw-record --target=<某源>` 的 `target.object`
+            # 明明写着该源，但只要默认源一变（换成另一支麦 / 降噪源），它立刻跟着变。后果：
+            #   ① 路由图（qpwgraph/helvum）里「那条采集线断了」；
+            #   ② 代理/引擎**悄悄录错设备**。
+            # `checkFollowDefault` 第 182 行 `reconnect = not parseBool(node.dont-reconnect)`：
+            # 置 true 后直接跳过"标记跟随默认"，`prepare-link.lua` 也据此"不搬走"。实测加上后
+            # 默认源来回切，本流始终钉在原目标。空 target（用 PipeWire 默认）时不加，
+            # 保留"跟随默认"语义。
+            argv += ["-P", "node.dont-reconnect=true"]
         argv += [
             "--format=s16",
             f"--rate={self.rate}",
@@ -932,9 +946,14 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None
     都拿不到就不带 `--target`（PipeWire 默认源）。这样「自动检测」与手选走**同一条通路**。
 
     ## 采样率 / 声道
-    直接在 **16kHz 单声道**采集：PipeWire 图内重采样是系统级的，`--channels=1` 会把全部声道
-    降混进这一路。所以引擎里的 `to_16k_mono` 是恒等变换。`channels` 参数在此**忽略**
-    （保留签名只为与 Windows 对齐）。
+    **按调用方给的 `rate` 采集**（默认 16000）。PipeWire 图内重采样是系统级的：
+
+      * 语音识别（ASR）传 16000 → 引擎里的 `to_16k_mono` 是恒等变换；
+      * 麦克风代理的原声直通传 48000（= 虚拟声卡输出率）→ **全带宽**，不再被降到 16kHz
+        再插值升回（否则人声 8kHz 以上全丢，听感发闷/电话音；见 `vlt/output/micproxy.py`）。
+
+    `--channels=1`：由 PipeWire 服务端把源的**全部声道**降混进这一路，所以 `channels`
+    参数在此**忽略**（保留签名只为与 Windows 对齐）。
     """
     import asyncio
 
@@ -953,22 +972,34 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None
         else:
             print("[mic] 自动检测：查不到系统默认输入源 → 用 PipeWire 默认输入", flush=True)
 
+    rate_use = int(rate or 16000)
     src = LinuxMicSource(asyncio.get_running_loop(), target=target,
-                         rate=16000, channels=1)
+                         rate=rate_use, channels=1)
     src.start()
     return src
 
 
 def _mic_target_node(device_name: str | None) -> str:
-    """设备描述（设备表里的 `name`）→ PipeWire `node.name`；查不到返回 ""。"""
+    """设备描述 / 稳定 `node.name` → PipeWire `node.name`；查不到返回 ""。
+
+    匹配顺序：描述**全名精确** → `node.name`**精确**。后者是兜底：WiVRn 之类的源
+    可能在重连后改 `node.description`（如丢掉 `(microphone)` 后缀），若配置存的是描述，
+    逐字匹配就会落空、静默回退默认麦（实测出现的 `设备表里查不到 'WiVRn(microphone)'`）。
+    允许直接按 `node.name`（`wivrn.source`）匹配后，这种漂移不再丢设备。
+    """
     if not device_name:
         return ""
     try:
         # 局部导入避免与 devices.py↔platform 的循环导入（与 win.open_mic 同一条纪律）。
         from ..devices import enumerate_mic_devices
-        for info in enumerate_mic_devices():
+        infos = enumerate_mic_devices()
+        for info in infos:                    # 1) 描述精确
             if info.name == device_name:
                 return str(getattr(info, "node_name", "") or "")
+        for info in infos:                    # 2) node.name 精确（稳定标识兜底）
+            node = str(getattr(info, "node_name", "") or "")
+            if node and node == device_name:
+                return node
     except Exception:                         # noqa: BLE001 — 查不到不该让整条腿挂掉
         pass
     return ""
