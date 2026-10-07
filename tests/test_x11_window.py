@@ -3,6 +3,7 @@
 
 跑法（CI 同款；沙盒/CI 直接跑，**不用**加 xvfb-run —— 本用例自己管理 X 服务）：
     .venv/bin/python tests/test_x11_window.py
+    VLT_XVFB_SCREEN=3200x1800x24 .venv/bin/python tests/test_x11_window.py   # 大缓冲（多屏/远坐标落位）
 
 层次（与 tests/test_wayland_window.py 同构）：
 
@@ -63,15 +64,20 @@ def _have(cmd: str) -> bool:
 
 
 class _Xvfb:
-    """自拉一个私有 Xvfb（从 :90 起挑空闲号）；-ac 关鉴权，与用户会话完全隔离。"""
+    """自拉一个私有 Xvfb（从 :90 起挑空闲号）；-ac 关鉴权，与用户会话完全隔离。
+
+    屏幕尺寸默认 1280x720x24；`VLT_XVFB_SCREEN` 可覆盖（如 `3200x1800x24`）——
+    想验多屏/远坐标落位（配置里 pos 动辄 2883 这类）时，小屏会被夹取拽回来，测不出真实位置。
+    """
 
     def __init__(self) -> None:
         self.name = ""
         self.proc = None
         self._log = None
         self.tmp = Path(tempfile.mkdtemp(prefix="vlt-x11-test-"))
+        screen = os.environ.get("VLT_XVFB_SCREEN", "1280x720x24")
         for cand in range(90, 100):
-            p = subprocess.Popen(["Xvfb", f":{cand}", "-screen", "0", "1280x720x24",
+            p = subprocess.Popen(["Xvfb", f":{cand}", "-screen", "0", screen,
                                   "-ac", "-nolisten", "tcp"],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(0.4)
