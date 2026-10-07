@@ -106,7 +106,12 @@ jobs:
           if (-not (Test-Path $img)) { Write-Error "没找到 Linux 附件 $img（appimage job 的产物没取回来？）"; exit 1 }
           $i = Get-Item $img
           Write-Host ("产物：{0}  {1:N1} MB" -f $i.Name, ($i.Length / 1MB))
-          if ($i.Length -lt 40MB) { Write-Error "AppImage 体积异常（<40MB），大概率没打全"; exit 1 }
+          # ⚠️ 下限 30MB（原为 40MB）：2026-10 Linux 侧彻底去掉 PortAudio/sounddevice
+          #    （麦克风走原生 pw-record），AppImage 从约 40.2 MiB 降到约 39.5 MiB，
+          #    40MB 这条线会把正常产物判成「没打全」（v0.10.0 第一次打就是这么红的）。
+          #    真正的完整性由 appimage job 的 scripts/verify_appimage.py（模块对账 +
+          #    平台纯度 + 离线渲染）负责；这里只是一道「别把半截文件发出去」的体积哨兵。
+          if ($i.Length -lt 30MB) { Write-Error "AppImage 体积异常（<30MB），大概率没打全"; exit 1 }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
