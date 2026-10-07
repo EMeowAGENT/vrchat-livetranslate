@@ -696,13 +696,6 @@ def relaunch_appimage(gui, appimage: Path) -> None:
     挂载点 —— 与 Windows 侧漏清 `_MEI*` 是同一类「更新完没再打开」。
     cwd 落在 AppImage 自己所在目录：绝不能是旧挂载点里的路径（那会随进程一起消失）。
     """
-    # 防呆：本函数只服务 Linux AppImage（调用点已由 update_mode()=="appimage" 把关）。
-    # `start_new_session=True` 是 POSIX-only，误在 Windows 调到会抛一个语义不清的 ValueError，
-    # 这里换成一句说得清的话 —— 与 launch_updater_bat() 的 Windows 分支一一对应。
-    from vlt import platform as _platform          # 局部导入：本模块不依赖平台层，只为这道守卫
-    if _platform.IS_WINDOWS:
-        raise RuntimeError(
-            "relaunch_appimage 只用于 Linux AppImage；Windows 的自动更新走 launch_updater_bat()")
     _m(gui).subprocess.Popen([str(appimage)], env=_m(gui).updater_env(), start_new_session=True,
                          cwd=str(Path(appimage).parent))
 
