@@ -45,7 +45,12 @@ jobs:
   appimage:
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ 必须 fetch-depth: 0：构建脚本要 `git describe --tags` 做版本溯源
+      #    （见 vlt/version.py / scripts/gen_buildinfo.py）。默认浅克隆取不到 tag，
+      #    AppImage 会永远显示 `+unknown` —— 这正是 release 版与测试版的区分依据。
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -61,7 +66,9 @@ jobs:
           # 宿主库：构建脚本会断言 ldconfig 找得到它们（AppImage 把它们全交还宿主），
           # 且下面的冻结产物运行/验收也会真的用到：
           #   X11 栈 libxss1/libxrender1/libxau6/libxdmcp6/libxft2
-          #   音频   libportaudio2/libjack-jackd2-0/libpipewire-0.3-0
+          #   音频   libpipewire-0.3-0（⚠️ 不需要 libportaudio2/libjack：2026-10 起
+          #          Linux 全程走 pw-* 子进程，PyInstaller 的 EXCLUDES 里也排掉了 sounddevice ——
+          #          见 requirements-linux.txt 与 build_appimage.sh 文件头）
           #   OpenXR/EGL：libegl1/libwayland-client0
           #
           # ⚠️ 不要写 `xorgproto`：Ubuntu 24.04(noble) 起这个包名已不存在（apt 报
@@ -71,7 +78,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             xvfb fonts-noto-cjk \
             libxss1 libxrender1 libxau6 libxdmcp6 libxft2 libxss-dev \
-            libportaudio2 libjack-jackd2-0 libpipewire-0.3-0 \
+            libpipewire-0.3-0 \
             libegl1 libwayland-client0 \
             gcc make patchelf libxft-dev libfreetype6-dev libfontconfig1-dev \
             libx11-dev libxext-dev
@@ -120,6 +127,9 @@ jobs:
           xvfb-run -a .venv/bin/python scripts/verify_appimage.py \
             dist/VRChatLiveTranslate-x86_64.AppImage
 
+      # ⚠️ `upload-artifact` 的 major 必须与 release.yml 里 `download-artifact` 的 major 配对
+      #    （现在两边都是 v4）：跨 major 取不到产物，而取回那一步只在打 tag 时才会跑到，
+      #    平时 CI 不暴露 —— 想升级就**两处一起**升，别只动这里。
       - name: 上传产物（方便人工复验；release.yml 会把它取回去当附件发）
         uses: actions/upload-artifact@v4
         with:
