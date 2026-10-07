@@ -62,6 +62,12 @@ for t in tests/test_*.py; do
 done
 ```
 
+> 也可以直接用仓库的运行器 `scripts/run_tests.py`（Windows / Linux 通用）：
+> `.venv/bin/python scripts/run_tests.py`（`--only <关键词>` 过滤、`--coverage` 出覆盖率）。
+> 它在 **Linux 上会像 CI 一样自动给每个用例挂 `xvfb-run -a`**（每用例一个干净虚拟 X），
+> Windows / macOS 自带桌面会话则不挂；找不到 `xvfb-run` 时会打印提示而不是静默裸跑。
+> 想强制裸跑加 `--no-xvfb`。
+
 几条**必须知道**的规矩：
 
 - **测试必须离线**。除下面那个例外，任何用例都不许联网、要麦克风、要 VRChat 或 SteamVR。

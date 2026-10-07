@@ -12,9 +12,15 @@ CI 里靠一段 `for` 循环凑合。这段循环以前只存在于 one-off 的�
     .venv/Scripts/python.exe scripts/run_tests.py --only 'test_room_*'   # 也支持通配
     .venv/Scripts/python.exe scripts/run_tests.py --coverage     # 顺带累积覆盖率摘要
     .venv/Scripts/python.exe scripts/run_tests.py --with-engine  # 连需真 key 的也跑
+    .venv/Scripts/python.exe scripts/run_tests.py --no-xvfb      # 明确裸跑（不挂 xvfb）
 
 约定（与 CI 保持一致）：
   * 默认**跳过** `tests/test_engine.py`（要真实 API key 打真会话），并打印原因，**不静默**；
+  * **Linux 上逐用例自动挂 `xvfb-run -a`**（每个用例一个干净、无窗口管理器的虚拟 X），
+    与 CI 的 `linux-tests` 完全同口径 —— 否则平铺 WM（Hyprland / niri / sway）会把窗口
+    重排成满屏，`test_desktop_overlay*` / `test_i18n` 这类实测几何的用例会**假红**；
+    Windows / macOS 自带桌面会话，不套（同 CI 的 Windows job）。找不到 `xvfb-run` 时会打印
+    提示（不静默裸跑），可用 `--no-xvfb` 明确接受裸跑；
   * 任一用例退出码非 0 → 整体退出码非 0；
   * 覆盖率**不设阈值、不阻断**：只多打印一张 `--show-missing` 摘要；测试结果才是门禁。
 
@@ -26,6 +32,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +43,32 @@ TESTS_DIR = ROOT / "tests"
 #: 需要真实 API key / 真会话的用例：默认跳过（CI 同样跳过，理由一致）
 ENGINE_TEST = "test_engine.py"
 ENGINE_SKIP_REASON = "需要真实 API key（打真会话，属本机实测项）"
+
+#: Linux 上给**每个**用例套的虚拟 X 包装（与 CI 逐用例口径一致，见 `xvfb_decision`）。
+XVFB_RUN = "xvfb-run"
+
+
+def xvfb_decision(disabled: bool) -> bool:
+    """是否给用例挂 `xvfb-run -a`。返回决定，并在需要时打印一行说明。
+
+    平台差异（对齐 CI 的两个 job）：
+      * **Linux** —— GitHub runner 无显示器、且本机常见平铺窗口管理器（Hyprland / niri /
+        sway）会把窗口重排成满屏，于是 `test_desktop_overlay*` / `test_i18n` 这类**实测几何**
+        的用例会假红（本机实测：不挂 xvfb 时报 `(1960, 40) != (40, 40)`，挂上就绿）。
+        CI 的 `linux-tests` 就是 `xvfb-run -a` **逐用例**跑 —— 这里照做。
+      * **Windows / macOS** —— 自带真实桌面会话（CI 的 Windows job 也不挂），不套。
+      * Linux 上**找不到** `xvfb-run`：不硬红，但明确打印提示（别让裸跑变成静默），
+        确要接受裸跑就加 `--no-xvfb`。
+    """
+    if disabled:
+        return False
+    if not sys.platform.startswith("linux"):
+        return False
+    if shutil.which(XVFB_RUN) is None:
+        print("⚠️ 没找到 xvfb-run：界面（Tk）用例可能因窗口管理器重排而假红。"
+              "装 `xorg-server-xvfb` 后重跑；确要裸跑请加 --no-xvfb。\n")
+        return False
+    return True
 
 
 def discover() -> list[Path]:
@@ -49,17 +82,23 @@ def select(tests: list[Path], only: str | None) -> list[Path]:
     return [t for t in tests if only in t.name or fnmatch.fnmatch(t.name, only)]
 
 
-def build_cmd(test: Path, coverage: bool) -> list[str]:
-    """允许覆盖解释器的测试命令。
+def build_cmd(test: Path, coverage: bool, xvfb: bool) -> list[str]:
+    """构造单个用例的命令行。
+
+    `xvfb` 为真时在最前面挂 `xvfb-run -a`，**每个用例一个干净、无窗口管理器的虚拟 X** ——
+    与 CI 的 `linux-tests`（`xvfb-run -a python -m coverage run …`）逐用例口径完全一致；
+    覆盖率模式下顺序也相同。Windows / macOS 不套（自带桌面会话）。
 
     覆盖率走 `coverage run -a`（append）而不是 `--parallel-mode` + combine：
     本运行器**严格逐个**起子进程（从不开并行 —— 见技能里「全量测试一次只能跑一份」
     的踩坑），单个 append 目标就够，省掉一批 .coverage.* 与 combine 的簿记。
     """
     if coverage:
-        return [sys.executable, "-m", "coverage", "run", "-a",
+        base = [sys.executable, "-m", "coverage", "run", "-a",
                 "--source=vlt", str(test)]
-    return [sys.executable, str(test)]
+    else:
+        base = [sys.executable, str(test)]
+    return [XVFB_RUN, "-a", *base] if xvfb else base
 
 
 def erase_coverage_data() -> None:
@@ -96,7 +135,11 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"连 {ENGINE_TEST} 一起跑（需要真实 API key）")
     ap.add_argument("--coverage", action="store_true",
                     help="累积覆盖率并打印摘要（不设阈值、不阻断）")
+    ap.add_argument("--no-xvfb", action="store_true",
+                    help="不要自动挂 xvfb-run（默认 Linux 上逐用例挂，与 CI 一致）")
     args = ap.parse_args(argv)
+
+    use_xvfb = xvfb_decision(args.no_xvfb)
 
     tests = select(discover(), args.only)
     if not tests:
@@ -117,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"解释器：{sys.executable}")
     print(f"用例目录：{TESTS_DIR}")
     print(f"共 {len(tests)} 个文件" + (f"（--only={args.only!r}）" if args.only else ""))
+    if sys.platform.startswith("linux"):
+        print("界面隔离：" + ("xvfb-run -a（逐用例一个干净虚拟 X，与 CI 一致）"
+                              if use_xvfb else "裸跑（未用 xvfb）"))
     print("-" * 62)
 
     n_pass = n_fail = n_skip = 0
@@ -126,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             n_skip += 1
             print(f"SKIP {test.name} —— {ENGINE_SKIP_REASON}")
             continue
-        proc = subprocess.run(build_cmd(test, args.coverage), cwd=ROOT)
+        proc = subprocess.run(build_cmd(test, args.coverage, use_xvfb), cwd=ROOT)
         if proc.returncode == 0:
             n_pass += 1
             print(f"PASS {test.name}")
