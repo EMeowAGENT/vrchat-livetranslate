@@ -178,7 +178,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 
 | Area | Contents |
 |---|---|
-| Top row | `Start translation` / `Stop translation`, direction radio (`I speak` / `Others speak` / `Both at once`), language-pair dropdown (source → target), `☕ Sponsor` and `⚙ Settings` on the right |
+| Top row | `Start translation` ⇄ `Stop translation` (**one and the same button**: blue "Start translation" while idle, turns red "Stop translation" while translating, and clicking it toggles), direction radio (`I speak` / `Others speak` / `Both at once`), language-pair dropdown (source → target), `☕ Sponsor` and `⚙ Settings` on the right |
 | Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `desktop subtitle` / `audio output`; the button to the right of `chatbox` toggles **whether the bubble shows the source text or the translation**; with "Voice Output" ticked a `🎙 Original` / `🗣 Translated` button also appears on the right (it decides what the other person hears — see the "Mic Proxy" section; greyed out when no virtual sound card is installed); on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**). **Wrist-display fine-tuning / desktop-subtitle adjustment live in `⚙ Settings`** (`Settings → Wrist Overlay` / `Settings → Desktop Subtitles`) |
 | Chat area | Blue bubbles on the right = what I said, gray bubbles on the left = what others said; two lines per bubble — **original in small text on top, translation in large text below**; scrollable history (cap 500 entries) |
 | Status bar | Left: colored dot + latest status message; right: stats (`Running` / `N translated` / `first delta Xms`); the two never overlap |
@@ -367,6 +367,11 @@ from then on you switch from the main window:
   switch to the Translated position after you hit "Start"; **stopping translation automatically falls
   back to Original** (the last translated sentence is never left in the virtual mic). Greyed out when
   no virtual sound card is installed / it can't be opened.
+- **Translation starts in the Translated position by default**: with "Voice Output" ticked and the
+  proxy available, hitting "Start translation" switches to `🗣 Translated` **automatically** (you no
+  longer have to press the toggle yourself); one press brings `🎙 Original` back. When "Voice Output"
+  is unticked, or the direction has no "I speak" leg, **no** switch happens — the Translated position
+  would be silence there, which is worse than Original.
 - **Passthrough from launch**: the moment the app starts, the microphone is already feeding the virtual
   sound card (no need to start translation first), so you can talk in VRChat at any time.
 - **The "Voice Output" checkbox is still the master switch for the translation leg**: when it's
