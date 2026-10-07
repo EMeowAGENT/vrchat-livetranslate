@@ -30,8 +30,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -121,28 +123,58 @@ def _read_baked() -> object:
     return value if isinstance(value, str) else None
 
 
+#: 环境变量覆盖（CI / 测试用），避免在测试里起 git 子进程：
+#:   * `VLT_VERSION_NO_GIT=1`             → 完全不起 git（拿不到就按 +unknown），权威；
+#:   * `VLT_VERSION_DESCRIBE=<describe>`  → 直接当 describe 用，也不起 git。
+#: 有覆盖时仍然优先于烘焙文件与 git（测试要确定、要快，不该依赖子进程）。
+_ENV_NO_GIT = "VLT_VERSION_NO_GIT"
+_ENV_DESCRIBE = "VLT_VERSION_DESCRIBE"
+
+
+def _env_describe() -> object:
+    """环境变量覆盖。返回 describe 串 / `None`（明确无元数据）/ `_ABSENT`（无覆盖）。"""
+    if os.environ.get(_ENV_NO_GIT):
+        return os.environ.get(_ENV_DESCRIBE) or None
+    if _ENV_DESCRIBE in os.environ:
+        return os.environ.get(_ENV_DESCRIBE) or None
+    return _ABSENT
+
+
 def _git_describe() -> str | None:
-    """问 git（源码运行）。没装 git / 不是仓库 / 浅克隆取不到 tag → None。"""
+    """问 git（源码运行）。没装 git / 不是仓库 / 浅克隆取不到 tag → None。
+
+    ⚠️ **不用管道**：`capture_output=True` 在 Windows 上会因「git 的子进程继承了 stdout
+    管道句柄」而在 `timeout` 杀进程后**卡在 communicate() 永不返回**（本仓库 CI 实测踩到：
+    Windows job 从早期就异常慢、最终在某个 GUI 用例里彻底卡死）。这里把 stdout 落**临时
+    文件**（不是管道），超时杀进程后不会卡；stderr 直接丢弃、stdin 关掉。
+    """
     try:
-        proc = subprocess.run(
-            ["git", "describe", "--tags", "--match", "v*", "--long", "--dirty"],
-            cwd=str(BUNDLE_DIR), capture_output=True, text=True, timeout=5,
-        )
+        with tempfile.TemporaryFile() as out:
+            proc = subprocess.run(
+                ["git", "describe", "--tags", "--match", "v*", "--long", "--dirty"],
+                cwd=str(BUNDLE_DIR), stdin=subprocess.DEVNULL,
+                stdout=out, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            if proc.returncode != 0:
+                return None
+            out.seek(0)
+            return out.read().decode("utf-8", "replace").strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
 
 
 @lru_cache(maxsize=1)
 def build_meta() -> BuildMeta:
-    """本次运行的构建身份（进程内只算一次：git 子进程只起一次）。
+    """本次运行的构建身份（进程内只算一次）。
 
-    优先用构建期烘焙的 `buildinfo.json`（冻结产物，权威）；文件不在才回退去问 git（源码运行）。
+    优先级：环境变量覆盖（CI/测试）→ 构建期烘焙的 `buildinfo.json`（冻结产物，权威）→
+    问 git（源码运行）。测试期由 CI 设 `VLT_VERSION_NO_GIT`，**绝不起 git 子进程**。
     """
-    baked = _read_baked()
-    describe = _git_describe() if baked is _ABSENT else baked
+    describe = _env_describe()
+    if describe is _ABSENT:
+        describe = _read_baked()
+    if describe is _ABSENT:
+        describe = _git_describe()
     return parse_describe(describe)
 
 

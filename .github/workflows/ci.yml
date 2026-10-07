@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# 同一分支 / PR 的旧运行让位给新运行：避免「上一次卡死还没结束、新的又排队」一直占着
+# （本仓库真踩过：一个 run 卡到默认 6 小时超时）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # ⚠️ 必须开 UTF-8：Windows runner 的 stdout 默认是 cp1252，脚本里一句带 emoji/中文的 print
 # 就会 UnicodeEncodeError 把整步打挂（实测：check_no_secrets.py 的「✅」直接崩了 CI）。
 # Python 3.7+ 的 UTF-8 模式让 stdout/stderr 与 open() 默认都走 UTF-8，一次覆盖所有步骤。
@@ -22,6 +28,8 @@ env:
 jobs:
   tests:
     runs-on: windows-latest
+    # 兜底：卡死时 30 分钟内红掉，而不是耗到 GitHub 默认的 6 小时（本仓库真踩过）
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -61,12 +69,19 @@ jobs:
       #   以前 CI 从没在 Windows 上碰过它 —— 这里钉住：在 Windows 能挑用例、跳过
       #   test_engine、正确回退出码，且**不**去挂 xvfb（Windows 自带桌面会话）。
       - name: 冒烟：仓库测试运行器（Windows）
+        env:
+          # 测试期不起 git 子进程（Windows 上 git+管道+timeout 会卡死，见 vlt/version.py）
+          VLT_VERSION_NO_GIT: "1"
         run: python scripts/run_tests.py --only platform
 
       # 覆盖率与测试**同一次跑**里累积（`coverage run -a`）：只测一遍，不重复跑。
       # 覆盖率数据先 erase 干净，避免混入缓存/上一次的旧数据。
       - name: 跑全部离线测试（累积覆盖率）
         shell: bash
+        env:
+          # 测试期不起 git 子进程：Windows 上 `git describe` + 管道 + timeout 会卡死
+          # （实测：整个 job 从早期就异常慢、最终卡在某个 GUI 用例），见 vlt/version.py。
+          VLT_VERSION_NO_GIT: "1"
         run: |
           set -o pipefail
           python -m coverage erase
@@ -153,6 +168,7 @@ jobs:
   #      所以跑测试**绝不会**去碰宿主的音频图或 XR 运行时。
   linux-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -210,6 +226,8 @@ jobs:
       # 覆盖率与测试同一次跑里累积（`coverage run -a`），只测一遍。
       - name: 跑离线测试（累积覆盖率）
         shell: bash
+        env:
+          VLT_VERSION_NO_GIT: "1"     # 与 Windows job 一致：测试期不起 git（见 vlt/version.py）
         run: |
           set -o pipefail
           python -m coverage erase

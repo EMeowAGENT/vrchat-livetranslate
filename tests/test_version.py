@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -89,6 +90,9 @@ def test_baked_buildinfo_is_read() -> None:
     """
     saved_dir = V.BUNDLE_DIR
     tmp = Path(tempfile.mkdtemp(prefix="vlt-buildinfo-"))
+    # CI 会设 VLT_VERSION_NO_GIT / VLT_VERSION_DESCRIBE —— 本测试要验「烘焙文件」路径，
+    # 必须先把环境覆盖摘掉，否则会被 env 抢先生效（见 build_meta 的优先级）。
+    saved_env = {k: os.environ.pop(k, None) for k in (V._ENV_DESCRIBE, V._ENV_NO_GIT)}
     try:
         # 测试构建：有提交差
         (tmp / V.BUILDINFO_NAME).write_text(
@@ -120,7 +124,48 @@ def test_baked_buildinfo_is_read() -> None:
     finally:
         V.BUNDLE_DIR = saved_dir
         V.build_meta.cache_clear()
+        for k, v in saved_env.items():
+            if v is not None:
+                os.environ[k] = v
     print("  烘焙 buildinfo.json（测试/正式/unknown）读取正确 OK")
+
+
+def test_env_override_skips_git() -> None:
+    """环境变量覆盖（CI/测试）：`VLT_VERSION_DESCRIBE` / `VLT_VERSION_NO_GIT` 都不起 git。
+
+    这是 Windows CI 卡死的修复点：测试期绝不 spawn `git describe`。把 git 探针换成
+    「一被调用就炸」，若实现偷偷回退这里立刻红。
+    """
+    saved_dir = V.BUNDLE_DIR
+    tmp = Path(tempfile.mkdtemp(prefix="vlt-noenv-"))     # 空目录：没有 buildinfo.json
+    saved_git = V._git_describe
+    saved_env = {k: os.environ.get(k) for k in (V._ENV_DESCRIBE, V._ENV_NO_GIT)}
+    V._git_describe = lambda: (_ for _ in ()).throw(
+        AssertionError("env 覆盖时不应调用 git"))
+    try:
+        V.BUNDLE_DIR = tmp
+        os.environ.pop(V._ENV_NO_GIT, None)
+
+        # ① VLT_VERSION_DESCRIBE 直接当 describe
+        os.environ[V._ENV_DESCRIBE] = "v0.10.0-3-gdeadbee"
+        V.build_meta.cache_clear()
+        assert V.display_version() == "0.10.0+3.gdeadbee", V.display_version()
+
+        # ② VLT_VERSION_NO_GIT=1 且无 describe → unknown（权威、不问 git）
+        os.environ.pop(V._ENV_DESCRIBE, None)
+        os.environ[V._ENV_NO_GIT] = "1"
+        V.build_meta.cache_clear()
+        assert V.display_version() == "0.10.0+unknown", V.display_version()
+    finally:
+        V._git_describe = saved_git
+        V.BUNDLE_DIR = saved_dir
+        V.build_meta.cache_clear()
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("  env 覆盖（DESCRIBE / NO_GIT）都不起 git OK")
 
 
 if __name__ == "__main__":
@@ -131,4 +176,5 @@ if __name__ == "__main__":
     test_base_is_independent_of_tag()
     test_dataclass_defaults()
     test_baked_buildinfo_is_read()
+    test_env_override_skips_git()
     print("ALL PASSED")
