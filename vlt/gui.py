@@ -227,6 +227,30 @@ class TranslationGUI:
     def _on_voice_preview_done(self, kind, voice, err) -> None: gui_voice.on_voice_preview_done(self._voice_ctx, kind, voice, err, set_status=self._set_status)
     def _refresh_voice_mode_btn(self) -> None:
         self._voice_ctx.proxy = self._proxy; gui_voice.refresh_voice_mode_btn(self._voice_ctx, self._engines)
+    # ── 气泡显示原文 / 译文（只影响 chatbox）──
+    def _chatbox_text_mode(self) -> str:
+        from .engine import chatbox_text_mode
+        return chatbox_text_mode(self._cfg)
+    def _on_chatbox_toggle(self) -> None:
+        """勾/取消 chatbox：落盘 + 刷新切换按钮的可用态。"""
+        self._save_ui_state(); self._refresh_chatbox_text_btn()
+    def _refresh_chatbox_text_btn(self) -> None:
+        """刷新按钮文案（显示**当前**模式）与可用态（未勾 chatbox → 置灰）。"""
+        btn = getattr(self, "_chatbox_text_btn", None)
+        if btn is None: return
+        from .engine import CHATBOX_TEXT_SOURCE
+        src = self._chatbox_text_mode() == CHATBOX_TEXT_SOURCE
+        btn.configure(text=(t("📝 气泡: 原文") if src else t("🌐 气泡: 译文")))
+        btn.configure(state=(tk.NORMAL if self._chatbox_var.get() else tk.DISABLED))
+    def _on_chatbox_text_toggle(self) -> None:
+        """点一下切到另一种。**改内存 cfg**（引擎每条现读 → 同一次会话内立即生效），
+        再落盘（下次启动仍是它）—— 与切界面语言的即时生效口径一致。"""
+        from .engine import CHATBOX_TEXT_SOURCE, CHATBOX_TEXT_TRANSLATED
+        to_source = self._chatbox_text_mode() != CHATBOX_TEXT_SOURCE
+        self._cfg.ui = self._cfg.ui or {}
+        self._cfg.ui["chatbox_text"] = CHATBOX_TEXT_SOURCE if to_source else CHATBOX_TEXT_TRANSLATED
+        self._save_ui_state(); self._refresh_chatbox_text_btn()
+        self._set_status("info", t("气泡改为显示原文") if to_source else t("气泡改为显示译文"))
     # ── 需要特殊处理的设置/更新/音色方法 ──
     def _settings_page(self, nb, title): return gui_settings.settings_page(self._settings_ctx, self, title)
     def _sync_page_scrollbar(self, canvas, inner, sb) -> None: gui_settings.sync_page_scrollbar(canvas, inner, sb)
@@ -380,7 +404,8 @@ class TranslationGUI:
         def _fn(text):
             if not re.search(r"^ui:", text, re.M): text = text.rstrip("\n") + "\n\n# 界面上次的选择\nui:\n"
             for kp, val in [("direction", self._direction_var.get()), ("chatbox", _fmt_scalar(bool(self._chatbox_var.get()))),
-                            ("overlay", _fmt_scalar(bool(self._overlay_var.get()))), ("desktop_overlay", _fmt_scalar(bool(self._desktop_var.get())))]:
+                            ("overlay", _fmt_scalar(bool(self._overlay_var.get()))), ("desktop_overlay", _fmt_scalar(bool(self._desktop_var.get()))),
+                            ("chatbox_text", _fmt_scalar(self._chatbox_text_mode()))]:
                 text = _yaml_set_in_text(text, ["ui", kp], val)
             return text
         _yaml_write(DEFAULT_CONFIG, _fn, err="保存界面选择")

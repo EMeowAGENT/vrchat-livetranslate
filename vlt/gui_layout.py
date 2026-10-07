@@ -230,7 +230,18 @@ def build_output_row(gui) -> None:
     gui._vmic_var = tk.BooleanVar(value=bool(_audio_cfg.get("enabled", False)))
     ik = _indicator_kw()
     tk.Checkbutton(out_frame, text="chatbox", variable=gui._chatbox_var,
-                   command=gui._save_ui_state, **ik).pack(side=tk.LEFT, padx=(6, 0))
+                   command=gui._on_chatbox_toggle, **ik).pack(side=tk.LEFT, padx=(6, 0))
+    # 气泡显示**原文 / 译文**（互斥二选一，只影响 chatbox 气泡）。chatbox 没勾时置灰 ——
+    # 与下面「🎙 原声」按钮同一套双保险：控件默认态是 NORMAL，不显式刷一次就会看着
+    # 能点、点了没用（见 voice_mode_btn 那段注释）。宽度按两种文案里更宽的那个申请，
+    # 否则切到「原文」时中/日/俄文案会被裁（test_i18n 的固定宽度守卫会抓）。
+    gui._chatbox_text_btn = ttk.Button(
+        out_frame, text="",
+        width=max(_char_width_for(t("🌐 气泡: 译文"), ui_tk.FONT_UI, 6),
+                  _char_width_for(t("📝 气泡: 原文"), ui_tk.FONT_UI, 6)),
+        command=gui._on_chatbox_text_toggle)
+    gui._chatbox_text_btn.pack(side=tk.LEFT, padx=(6, 0))
+    gui._refresh_chatbox_text_btn()
     tk.Checkbutton(out_frame, text=t("手腕屏"), variable=gui._overlay_var,
                    command=gui._on_overlay_toggle, **ik).pack(side=tk.LEFT, padx=(10, 0))
     tk.Checkbutton(out_frame, text=t("译音输出"), variable=gui._vmic_var,

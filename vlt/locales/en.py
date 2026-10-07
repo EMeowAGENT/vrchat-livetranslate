@@ -30,6 +30,10 @@ STRINGS: dict[str, str] = {
     "输出:": "Output:",
     "手腕屏": "Wrist Overlay",
     "译音输出": "Voice Output",
+    "🌐 气泡: 译文": "🌐 Bubble: Translated",
+    "📝 气泡: 原文": "📝 Bubble: Source",
+    "气泡改为显示译文": "Bubble now shows the translation",
+    "气泡改为显示原文": "Bubble now shows the source text",
     "就绪": "Ready",
     "状态：{msg}": "Status: {msg}",
 
