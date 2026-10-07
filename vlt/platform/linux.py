@@ -932,9 +932,14 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None
     都拿不到就不带 `--target`（PipeWire 默认源）。这样「自动检测」与手选走**同一条通路**。
 
     ## 采样率 / 声道
-    直接在 **16kHz 单声道**采集：PipeWire 图内重采样是系统级的，`--channels=1` 会把全部声道
-    降混进这一路。所以引擎里的 `to_16k_mono` 是恒等变换。`channels` 参数在此**忽略**
-    （保留签名只为与 Windows 对齐）。
+    **按调用方给的 `rate` 采集**（默认 16000）。PipeWire 图内重采样是系统级的：
+
+      * 语音识别（ASR）传 16000 → 引擎里的 `to_16k_mono` 是恒等变换；
+      * 麦克风代理的原声直通传 48000（= 虚拟声卡输出率）→ **全带宽**，不再被降到 16kHz
+        再插值升回（否则人声 8kHz 以上全丢，听感发闷/电话音；见 `vlt/output/micproxy.py`）。
+
+    `--channels=1`：由 PipeWire 服务端把源的**全部声道**降混进这一路，所以 `channels`
+    参数在此**忽略**（保留签名只为与 Windows 对齐）。
     """
     import asyncio
 
@@ -953,8 +958,9 @@ def open_mic(device_name: str | None, *, rate: int = 16000, channels: int | None
         else:
             print("[mic] 自动检测：查不到系统默认输入源 → 用 PipeWire 默认输入", flush=True)
 
+    rate_use = int(rate or 16000)
     src = LinuxMicSource(asyncio.get_running_loop(), target=target,
-                         rate=16000, channels=1)
+                         rate=rate_use, channels=1)
     src.start()
     return src
 

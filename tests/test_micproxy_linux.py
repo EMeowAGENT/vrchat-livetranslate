@@ -90,6 +90,11 @@ def test_mix_passthrough_pads_and_counts_underrun() -> None:
 
     out = p._mix_block(CHUNK)
     assert len(out) == CHUNK and out == b"\x00" * CHUNK, "空缓冲应补满静音"
+    assert p._underruns == 0, "收到第一块麦克风数据之前不该计欠载"
+
+    p._got_mic_data = True                     # 模拟已收到第一块麦克风数据
+    out = p._mix_block(CHUNK)
+    assert out == b"\x00" * CHUNK, "空缓冲仍应补满静音"
     assert p._underruns == 1, f"空缓冲应计一次欠载，实际 {p._underruns}"
 
     p._ring.push(b"\x11" * CHUNK)
