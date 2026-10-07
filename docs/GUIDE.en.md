@@ -179,7 +179,7 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 | Area | Contents |
 |---|---|
 | Top row | `Start translation` / `Stop translation`, direction radio (`I speak` / `Others speak` / `Both at once`), language-pair dropdown (source → target), `☕ Sponsor` and `⚙ Settings` on the right |
-| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `desktop subtitle` / `audio output`; on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**). **Wrist-display fine-tuning / desktop-subtitle adjustment live in `⚙ Settings`** (`Settings → Wrist Overlay` / `Settings → Desktop Subtitles`) |
+| Second row | `Output:` checkboxes for `chatbox` / `wrist display` / `desktop subtitle` / `audio output`; the button to the right of `chatbox` toggles **whether the bubble shows the source text or the translation**; with "Voice Output" ticked a `🎙 Original` / `🗣 Translated` button also appears on the right (it decides what the other person hears — see the "Mic Proxy" section; greyed out when no virtual sound card is installed); on the far right the API key status (plain text `API key configured` when set, **otherwise a clickable "⚠ No API key · sign up for Qwen Cloud ▸"**). **Wrist-display fine-tuning / desktop-subtitle adjustment live in `⚙ Settings`** (`Settings → Wrist Overlay` / `Settings → Desktop Subtitles`) |
 | Chat area | Blue bubbles on the right = what I said, gray bubbles on the left = what others said; two lines per bubble — **original in small text on top, translation in large text below**; scrollable history (cap 500 entries) |
 | Status bar | Left: colored dot + latest status message; right: stats (`Running` / `N translated` / `first delta Xms`); the two never overlap |
 | Bottom bar | **Typing input**: `Type:` box + `Send`, **Enter sends** (`Esc` clears). Enabled only when the direction includes "I speak", greyed out otherwise |
@@ -342,7 +342,64 @@ output:
   audio:
     enabled: false            # master switch for voice output: ANDed with directions.<X>.output_audio
     device_name: ""           # manually picked virtual sound card name (when non-empty it wins over the fallback chain)
+
+ui:                           # last choices made in the UI (whatever you change there is written back here; normally no need to edit by hand)
+  direction: mine             # mine=what I say | theirs=what others say | dual=both at once
+  chatbox: true               # output checkbox: chatbox bubble
+  chatbox_text: translated    # what the bubble shows: translated=the translation (default) | source=the source text (ASR result)
+                              # UI entry: the "🌐 Bubble: Translated / 📝 Bubble: Source" button right of chatbox on the second row
+  overlay: true               # output checkbox: Wrist Overlay
+  desktop_overlay: true       # output checkbox: Desktop Subtitles
 ```
+
+### Mic Proxy: one-click Original / Translated (on by default)
+
+Previously, to let the other person hear the translation you had to switch your microphone to the
+virtual sound card inside VRChat yourself, and switch it back when you didn't want it any more.
+Now the app holds that virtual sound card for you: inside VRChat you **only pick the one the app
+uses once** (on Windows, the one you installed — e.g. `CABLE Input` / `VoiceMeeter Input`), and
+from then on you switch from the main window:
+
+- **The button on the second row of the main window** (right of `Voice Output`): `🎙 Original` / `🗣 Translated` —
+  one click decides "what goes into the virtual sound card": press once and the other person hears
+  your real voice, press again and they hear the translation.
+- **When the button is clickable**: the proxy is available **and** translation is running. You can only
+  switch to the Translated position after you hit "Start"; **stopping translation automatically falls
+  back to Original** (the last translated sentence is never left in the virtual mic). Greyed out when
+  no virtual sound card is installed / it can't be opened.
+- **Passthrough from launch**: the moment the app starts, the microphone is already feeding the virtual
+  sound card (no need to start translation first), so you can talk in VRChat at any time.
+- **The "Voice Output" checkbox is still the master switch for the translation leg**: when it's
+  unchecked the translation never reaches the mic, and clicking "Translated" then warns you that
+  "the Translated position will be silent".
+- **Turning "Mic Proxy" off** = back to the old behavior: the virtual sound card follows translation
+  start/stop, and there's no one-click switching in the main window.
+
+The settings live in `⚙ Settings → Audio → Mic Proxy` and apply instantly — no restart needed:
+
+| Item | Range | Default | Notes |
+|---|---|---|---|
+| Enable | checkbox | on | turning it off goes back to the old behavior |
+| Passthrough buffer (ms) | 60–500 | 150 | latency / dropout resistance for the Original position. ⚠️ Don't go below 60 — one microphone input block is about 100 ms, and a buffer cap smaller than one block shaves off most of every block, causing severe dropouts |
+| Translated buffer (ms) | 50–2000 | 300 | jitter buffer for the Translated position (that's `output.audio.buffer_ms`) |
+
+The matching `config.yaml`:
+
+```yaml
+output:
+  audio:
+    buffer_ms: 300               # Translated buffer (ms)
+    proxy:
+      enabled: true              # master switch for Mic Proxy
+      passthrough_buffer_ms: 150 # Passthrough buffer (ms), minimum 60
+```
+
+What you see if the virtual sound card can't be installed / opened: that button is **greyed out and
+unclickable**, and one line each is left in the status bar and the log
+(the status-bar line has its English string in `vlt/locales/en.py`; the log line is hard-coded Chinese
+and is quoted verbatim)
+(`Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled` / `[proxy] 代理不可用 → 回到旧行为：译音输出由引擎自建（随翻译启停），主界面「原声/译音」切换已禁用`); chatbox / Wrist Overlay / Desktop Subtitles
+**keep working** as usual, unaffected.
 
 ### Wrist-display fine-tune ("⚙ Settings → Wrist Overlay", 14 sliders, live while dragging)
 
