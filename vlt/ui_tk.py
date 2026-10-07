@@ -257,6 +257,28 @@ def apply_theme(root) -> None:
                               ("disabled", "#3a2726")],
                   foreground=[("disabled", "#9c7a78")])
 
+        # 单按钮开关（主窗第一行「开始翻译 ⇄ 停止翻译」）：**同一个控件**在两种状态间换外观。
+        # ⚠️ 两个样式必须逐字同尺寸 —— 字体与内边距都取下面这两份常量。
+        # 曾经的写法是蓝底用 Primary.TButton（粗体 + padding (20,9)）、红底用 Danger.TButton
+        # （常规字体 + padding (14,6)），于是点一下按钮就**变大 / 变小**（用户实测反馈
+        # 「按一下变大、按一下变小」）。改样式名的人请注意：这两个值的唯一真源在这里。
+        _POWER_FONT = FONT_BOLD_MD
+        _POWER_PAD = (20, 9)
+        style.configure("Power.TButton", background=ACCENT, foreground="#ffffff",
+                        font=_POWER_FONT, borderwidth=0, focusthickness=0,
+                        focuscolor=ACCENT, padding=_POWER_PAD)
+        style.map("Power.TButton",
+                  background=[("pressed", ACCENT_ACTIVE), ("active", ACCENT_HOVER),
+                              ("disabled", "#22374f")],
+                  foreground=[("disabled", "#6b87ab")])
+        style.configure("PowerDanger.TButton", background=DANGER, foreground="#ffffff",
+                        font=_POWER_FONT, borderwidth=0, focusthickness=0,
+                        focuscolor=DANGER, padding=_POWER_PAD)
+        style.map("PowerDanger.TButton",
+                  background=[("pressed", DANGER_ACTIVE), ("active", DANGER_HOVER),
+                              ("disabled", "#3a2726")],
+                  foreground=[("disabled", "#9c7a78")])
+
         # API key 输入行：不加这条会沿用 clam 的浅色默认底 —— 深色界面里出现一块白，很扎眼
         # （截图复核时发现的）。字段底/文字/插入符/边框全部对齐 SURFACE/TEXT/BORDER 体系。
         style.configure("Key.TEntry", fieldbackground=SURFACE, background=SURFACE,
