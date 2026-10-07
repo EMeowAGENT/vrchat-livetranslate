@@ -197,26 +197,16 @@ def test_window_scaling_integration() -> None:
         assert g15._root.winfo_reqwidth() > int(g10._root.winfo_reqwidth() * 1.2), \
             (g10._root.winfo_reqwidth(), g15._root.winfo_reqwidth())
 
-        # 主窗几何：与 fit_window_width 同一套公式（基准 940/600 × s），逐项复算比对，
-        # 确保「1.5」这个乘数真的接上了；同时判 1.5 严格大于 1.0。
-        for g, s, exp_base in ((g10, 1.0, (940, 600)), (g15, 1.5, (1410, 900))):
-            need = g._root.winfo_reqwidth() + 8
-            want = max(exp_base[0], need)
-            sw = int(g._root.winfo_screenwidth() or 0)
-            if sw:
-                want = min(want, max(int(760 * s), sw - 16))
-            height = max(exp_base[1], g._root.winfo_reqheight())
-            sh = int(g._root.winfo_screenheight() or 0)
-            if sh:
-                height = min(height, max(int(460 * s), sh - 90))
-            got = _wh(g._root)
-            assert got == (want, height), f"s={s}：几何 {got} != 复算 ({want}, {height})"
-
-        # 设置弹窗有效尺寸（纯口径）
+        # 设置弹窗有效尺寸（纯口径；打桩屏幕够大 → 不被夹）
         assert g10._settings_metrics.width == 760, g10._settings_metrics
         assert (g15._settings_metrics.width, g15._settings_metrics.wrap) == (1140, 990), \
             g15._settings_metrics
 
+        # 主窗几何：**只判单调**（1.5 严格大于 1.0），不做等值复算。
+        # ⚠️ 不能用「按屏幕复算 + 等值比较」：Windows 上 Tk 会把顶层窗口尺寸夹到**真实**
+        #    屏幕/工作区，请求的 1410×900 在小的 CI runner 上会回读成更小的值（实测
+        #    1335×749），而复算用的是这里被打桩的虚拟屏 → 必然对不上。Xvfb 会照单全收，
+        #    所以只有 Windows 暴露过（见 PR #72 的 CI）。
         w10, h10 = _wh(g10._root)
         w15, h15 = _wh(g15._root)
         assert w15 > w10, f"1.5 的窗宽 {w15} 没有大于 1.0 的 {w10}"
@@ -334,9 +324,11 @@ def test_settings_dialog_clamped_to_screen() -> None:
         w, h = (int(v) for v in wh.split("x"))
         assert w <= 1280 - 16, f"设置窗宽 {w} 超过屏幕 1280"
         assert h <= 720 - 90, f"设置窗高 {h} 超过屏幕可用区（min_h 没夹住）"
-        # 1.0 档宽 760、2.0 档需 1520 → 在 1280 屏上必须被夹到 1264
-        assert w == 1280 - 16, f"设置窗宽未被屏幕夹取：{w}"
-        print(f"  ✓ 小屏设置窗兜底：{w}x{h}（≤ 1264x630）OK")
+        # 1.0 档宽 760、2.0 档需 1520 → 在 1280 屏上必须被夹到 1264。
+        # 精确值判在**纯量** `_settings_metrics` 上；窗口回读只判 ≤（Windows 上 Tk 还会把
+        # 顶层窗口夹到真实屏幕/工作区，可能比 1264 更小）。
+        assert gui._settings_metrics.width == 1280 - 16, gui._settings_metrics
+        print(f"  ✓ 小屏设置窗兜底：{w}x{h}（≤ 1264x630，有效宽 {gui._settings_metrics.width}）OK")
     finally:
         if gui is not None:
             try:
