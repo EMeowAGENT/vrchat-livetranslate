@@ -231,12 +231,17 @@ step "2/7 PyInstaller onedir 打包"
 rm -rf "$WORK"
 mkdir -p "$WORK/pyi" "$WORK/work" "$WORK/spec"
 
+# 版本溯源：构建期把 git describe 烘焙成 buildinfo.json（冻结产物里没有 .git，
+# 见 vlt/version.py；拿不到就写 null → 产物显示 +unknown，绝不假装正式版）。
+BUILDINFO="${REPO}/build/buildinfo.json"
+"$VENV_PY" "$REPO/scripts/gen_buildinfo.py" "$BUILDINFO" || die "生成 buildinfo.json 失败"
+
 # 动态导入的模块（静态分析看不到）——磁盘上的 vlt 模块**全部**列在这里；
 # 漏一个 = 用户拿到手 ImportError。第 3 步有一次「磁盘 vs 包内」对账断言兜底。
 HIDDEN=(
     vlt vlt.app vlt.config vlt.config_io vlt.crashlog vlt.credentials vlt.devices
     vlt.engine vlt.gui vlt.i18n vlt.level_probe vlt.paths vlt.textin vlt.tts
-    vlt.update_check vlt.voices
+    vlt.update_check vlt.version vlt.voices
     vlt.selfcheck                      # --verify-* 自检入口（验收脚本用；run_gui.py 按需导入）
     # 界面语言是 importlib 按语言码动态加载的（vlt/i18n.py）—— 不列就会静默回落中文
     vlt.locales vlt.locales.en vlt.locales.ja vlt.locales.ko vlt.locales.ru
@@ -275,6 +280,7 @@ PYI_ARGS=(
     --add-data "${REPO}/assets:assets"
     --add-data "${REPO}/testdata:testdata"
     --add-data "${REPO}/config.example.yaml:."
+    --add-data "${BUILDINFO}:."          # 版本溯源（git describe，见 vlt/version.py）
     --add-binary "${XFT_TK}:."          # 顶掉 PyInstaller 收到的解释器自带那份
 )
 for h in "${HIDDEN[@]}";      do PYI_ARGS+=(--hidden-import "$h"); done
@@ -294,10 +300,10 @@ tail -4 "$PYI_LOG"
 step "3/7 构建后自检（数据 / Tk / 模块对账）"
 _INT="$BUNDLE/_internal"
 
-for f in "assets/app.png" "config.example.yaml" "testdata/zh_test_16k.pcm"; do
+for f in "assets/app.png" "config.example.yaml" "testdata/zh_test_16k.pcm" "buildinfo.json"; do
     [ -e "$_INT/$f" ] || die "包内缺数据文件：$_INT/$f"
 done
-echo "    ✅ 数据文件齐（assets / config.example.yaml / testdata）"
+echo "    ✅ 数据文件齐（assets / config.example.yaml / testdata / buildinfo.json）"
 
 [ -f "$_INT/libtcl9tk9.0.so" ] || die "包里没有 libtcl9tk9.0.so（--add-binary 没落地？）"
 _ldd_has "$_INT/libtcl9tk9.0.so" xft \

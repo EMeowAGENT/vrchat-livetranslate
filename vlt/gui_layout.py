@@ -12,6 +12,7 @@ from . import gui_voice
 from .i18n import t
 from .platform import IS_WINDOWS
 from .paths import BUNDLE_DIR
+from .version import display_version
 from .ui_text import (
     SOURCE_LANGS, TARGET_LANGS,
     _lang_label,
@@ -119,7 +120,8 @@ def build_ui(gui) -> None:
     """构建完整界面。"""
     _enable_windows_dpi_awareness()
     gui._root = tk.Tk()
-    gui._root.title(t("VRChat 实时同传"))
+    # 标题后附版本：正式版 `… v0.10.0`，源码/测试构建 `… v0.10.0+7.gb04129b`（见 vlt/version.py）。
+    gui._root.title(f"{t('VRChat 实时同传')} v{display_version()}")
     gui._dpi_scale = _apply_scale(gui)
     if gui._dpi_scale > 1.0:
         gui._root.geometry(f"{int(940 * gui._dpi_scale)}x{int(600 * gui._dpi_scale)}")

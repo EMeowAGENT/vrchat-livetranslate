@@ -48,7 +48,7 @@ ICON = REPO / "assets" / "app.ico"        # exe 图标（16/24/32/48/64/128/256 
 HIDDEN = [
     "pyaudiowpatch", "openvr", "sounddevice", "miniaudio",
     "pythonosc", "websockets", "yaml", "PIL", "numpy",
-    "vlt", "vlt.paths", "vlt.config", "vlt.credentials", "vlt.crashlog",
+    "vlt", "vlt.paths", "vlt.version", "vlt.config", "vlt.credentials", "vlt.crashlog",
     "vlt.devices", "vlt.engine", "vlt.audio_dsp", "vlt.gui", "vlt.app",
     "vlt.session", "vlt.session.base", "vlt.session.qwen38", "vlt.session.qwen35",
     "vlt.output", "vlt.output.chatbox", "vlt.output.overlay", "vlt.output.virtualmic",
@@ -117,9 +117,19 @@ def ensure_pyinstaller() -> None:
     )
 
 
+def gen_buildinfo() -> Path:
+    """构建期烘焙 git 元数据 → `build/buildinfo.json`（冻结产物里没有 .git，见 vlt/version.py）。"""
+    out = BUILD / "buildinfo.json"
+    res = run([str(PY), str(REPO / "scripts" / "gen_buildinfo.py"), str(out)], text=True)
+    if res.returncode != 0 or not out.exists():
+        raise SystemExit("生成 build/buildinfo.json 失败（版本溯源需要它）")
+    return out
+
+
 def build() -> Path:
     for d in (DIST, BUILD):
         shutil.rmtree(d, ignore_errors=True)
+    buildinfo = gen_buildinfo()
     cmd = [str(PY), "-m", "PyInstaller", "--noconfirm", "--clean",
            "--onefile",            # 单文件
            "--noconsole",          # 无控制台窗口（GUI 程序）
@@ -128,6 +138,7 @@ def build() -> Path:
            "--add-data", f"{REPO / 'config.example.yaml'}{';'}.",   # 首次运行要生成 config.yaml
            "--add-data", f"{REPO / 'testdata'}{';'}testdata",        # --self-test 用
            "--add-data", f"{REPO / 'assets'}{';'}assets",            # 图标 + 赞助弹窗的两张收款码
+           "--add-data", f"{buildinfo}{';'}.",                       # 版本溯源（git describe，见 vlt/version.py）
            ] + (["--icon", str(ICON)] if ICON.exists() else [])
     if not ICON.exists():
         print(f"[!] 没找到图标 {ICON}，本次打包不带自定义图标", flush=True)

@@ -68,6 +68,14 @@ chmod +x VRChatLiveTranslate-x86_64.AppImage
   系统层仍由宿主机提供（见前置条件）：**PipeWire**（`pw-*` 命令行，麦克风也走它）、
   X11 基础库（XWayland）与一套中日韩字体
 - ⚠️ **不再自带字体**：需要宿主机自己有一套中日韩字体（见前置条件第 6 条）
+- ⚠️ **需要 FUSE 才能双击/直接运行**：部分新发行版（如 Ubuntu 24.04+、Fedora 40+）默认不带
+  FUSE2，运行时会报 `dlopen(): error loading libfuse.so.2`。两条路：
+  - 装兼容层：Debian/Ubuntu `sudo apt install libfuse2t64`（24.04 之前是 `libfuse2`）、
+    Arch `sudo pacman -S fuse2`、Fedora `sudo dnf install fuse fuse-libs`
+    （提供 `libfuse.so.2` 的是 `fuse-libs`）；
+  - 或者不装 FUSE，直接让 AppImage 自解包运行：
+    `./VRChatLiveTranslate-x86_64.AppImage --appimage-extract-and-run`
+    （⚠️ 这种跑法下**自更新不可用**，见下文「自动更新」一节）
 - 配置与日志写在 `~/.local/share/vrchat-livetranslate/`（AppImage 本体放哪都行，只读目录也能跑）
 - 仍然要自备一个**阿里云百炼 API key**（见下一节）
 - 运行时需要 **Wayland 或 X11 会话**（手腕屏：Wayland 走 EGL、X11 走 GLX）；

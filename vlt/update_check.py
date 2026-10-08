@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
-from . import __version__
+from .version import display_version
 from .config_io import _fmt_scalar, _write_config_text, _yaml_set_in_text
 from .i18n import t
 from .paths import is_frozen
@@ -148,7 +148,7 @@ def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S,
     req = Request(RELEASES_LATEST_API, headers={
         "Accept": "application/vnd.github+json",
         # GitHub 对无 User-Agent 的请求直接 403
-        "User-Agent": f"vrchat-livetranslate/{__version__}",
+        "User-Agent": f"vrchat-livetranslate/{display_version()}",
     })
     with _mapped_errors():
         with _get_opener().open(req, timeout=timeout) as resp:
@@ -333,7 +333,7 @@ def _expected_sha256(info: ReleaseInfo, timeout: float) -> str:
 
 def _download_expected_sha256(sums_url: str, timeout: float) -> str:
     """拉 SHA256SUMS.txt，取 VRChatLiveTranslate.exe 那一行的 hash（小文件，直接读进内存）。"""
-    req = Request(sums_url, headers={"User-Agent": f"vrchat-livetranslate/{__version__}"})
+    req = Request(sums_url, headers={"User-Agent": f"vrchat-livetranslate/{display_version()}"})
     with _mapped_errors():
         with _get_opener().open(req, timeout=timeout) as resp:
             _check_url(_final_url(resp))        # 落地复检：跳转终点也必须在白名单
@@ -353,7 +353,7 @@ def _download_expected_sha256(sums_url: str, timeout: float) -> str:
 def _stream_to_file(url: str, dest: Path, timeout: float,
                     progress: Callable[[int, int | None], None] | None) -> str:
     """边下边算 sha256，每块调一次 progress(done, total)。返回 hex digest。"""
-    req = Request(url, headers={"User-Agent": f"vrchat-livetranslate/{__version__}"})
+    req = Request(url, headers={"User-Agent": f"vrchat-livetranslate/{display_version()}"})
     h = hashlib.sha256()
     with _mapped_errors():
         with _get_opener().open(req, timeout=timeout) as resp:

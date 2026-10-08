@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# 同一分支 / PR 的旧运行让位给新运行：避免「上一次卡死还没结束、新的又排队」一直占着
+# （本仓库真踩过：一个 run 卡到默认 6 小时超时）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # ⚠️ 必须开 UTF-8：Windows runner 的 stdout 默认是 cp1252，脚本里一句带 emoji/中文的 print
 # 就会 UnicodeEncodeError 把整步打挂（实测：check_no_secrets.py 的「✅」直接崩了 CI）。
 # Python 3.7+ 的 UTF-8 模式让 stdout/stderr 与 open() 默认都走 UTF-8，一次覆盖所有步骤。
@@ -22,6 +28,8 @@ env:
 jobs:
   tests:
     runs-on: windows-latest
+    # 兜底：卡死时 30 分钟内红掉，而不是耗到 GitHub 默认的 6 小时（本仓库真踩过）
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -56,10 +64,24 @@ jobs:
       - name: 凭据扫描（仓库自带的钩子脚本，防 key 进历史）
         run: python scripts/check_no_secrets.py --once
 
+      # ★ 仓库自己的运行器在 Windows 上也要能用：跑最小平台子集做冒烟。
+      #   `scripts/run_tests.py` 平时只在本机用（CI 用的是下面那段内联循环），
+      #   以前 CI 从没在 Windows 上碰过它 —— 这里钉住：在 Windows 能挑用例、跳过
+      #   test_engine、正确回退出码，且**不**去挂 xvfb（Windows 自带桌面会话）。
+      - name: 冒烟：仓库测试运行器（Windows）
+        env:
+          # 测试期不起 git 子进程（Windows 上 git+管道+timeout 会卡死，见 vlt/version.py）
+          VLT_VERSION_NO_GIT: "1"
+        run: python scripts/run_tests.py --only platform
+
       # 覆盖率与测试**同一次跑**里累积（`coverage run -a`）：只测一遍，不重复跑。
       # 覆盖率数据先 erase 干净，避免混入缓存/上一次的旧数据。
       - name: 跑全部离线测试（累积覆盖率）
         shell: bash
+        env:
+          # 测试期不起 git 子进程：Windows 上 `git describe` + 管道 + timeout 会卡死
+          # （实测：整个 job 从早期就异常慢、最终卡在某个 GUI 用例），见 vlt/version.py。
+          VLT_VERSION_NO_GIT: "1"
         run: |
           set -o pipefail
           python -m coverage erase
@@ -146,6 +168,7 @@ jobs:
   #      所以跑测试**绝不会**去碰宿主的音频图或 XR 运行时。
   linux-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -159,13 +182,14 @@ jobs:
           # xvfb        —— 无显示器下给 Tk 一个虚拟 X
           # fonts-noto-cjk —— 离线渲染中日韩贴图要 fontconfig 能找到字体
           # tk          —— tkinter 的运行时（setup-python 的解释器不一定自带 _tkinter）
-          # libportaudio2 —— sounddevice 的运行时
           # libegl1 / libwayland-client0 —— 手腕屏后端 import 期就需要（真建会话会被防呆拦住）
           # xdotool / imagemagick / picom —— X11 原生叠加窗测试（真指针 / 截图 / 合成）
           # fonts-thai-tlwg —— 泰语用例需要「含泰文字形的字体」；CJK 字体（fonts-noto-cjk）
           #                    不含泰文，缺了它 tests/test_thai_font.py 只能整组跳过
+          # ⚠️ 不装 libportaudio2：2026-10 起 Linux 全程走 PipeWire 的 `pw-*` 子进程，
+          #    sounddevice/PortAudio 已是 Windows 独占（见 requirements-linux.txt）。
           sudo apt-get install -y --no-install-recommends \
-            xvfb fonts-noto-cjk fonts-thai-tlwg tk libportaudio2 libegl1 libwayland-client0 \
+            xvfb fonts-noto-cjk fonts-thai-tlwg tk libegl1 libwayland-client0 \
             xdotool imagemagick picom
 
       - name: 安装依赖
@@ -187,6 +211,8 @@ jobs:
       - name: 检查文档链接
         run: python scripts/check_doc_links.py
 
+      # 只判「解释器有没有 tkinter」；具体哪些用例要跳过由下一步的
+      # scripts/list_display_tests.py **自动发现**（不再手抄名单 —— 手抄必漏）。
       - name: 检查 tkinter 可用性
         id: tk
         run: |
@@ -194,12 +220,14 @@ jobs:
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
-            echo "::warning::当前解释器没有 tkinter → 界面相关测试将跳过（非静默，见本步骤）"
+            echo "::warning::当前解释器没有 tkinter → 传递依赖 Tk 的用例将跳过（名单自动发现，非静默）"
           fi
 
       # 覆盖率与测试同一次跑里累积（`coverage run -a`），只测一遍。
       - name: 跑离线测试（累积覆盖率）
         shell: bash
+        env:
+          VLT_VERSION_NO_GIT: "1"     # 与 Windows job 一致：测试期不起 git（见 vlt/version.py）
         run: |
           set -o pipefail
           python -m coverage erase
@@ -207,11 +235,14 @@ jobs:
           # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
           #   test_engine —— 要真 API key 打真会话、还要联网，属本机实测项
           ALWAYS_SKIP="tests/test_engine.py"
-          # 需要真实窗体的（无 xvfb 时跳过；有 xvfb 就跑）
-          GUI_TESTS="tests/test_api_key_gui.py tests/test_config_save.py tests/test_gui_rows.py \
-                     tests/test_i18n.py tests/test_level_probe.py tests/test_overlay_conversation.py \
-                     tests/test_sponsor.py tests/test_textin.py tests/test_update_dialog.py \
-                     tests/test_ui_theme_contrast.py tests/test_vrchat_capture.py"
+          # 需要 Tk 的用例**自动发现**，不再手抄：手抄名单必然漂移（这里曾只列 11 个，
+          # 实际有 32 个）。脚本按 import 图**传递地**找「最终 import tkinter」的用例 ——
+          # 覆盖函数体内的惰性 import（`from vlt.gui import ...`）与 `from vlt import gui_*`
+          # 这类子模块导入，以及 vlt 内部相对 import。xvfb-run 本已给**所有**用例统一提供
+          # DISPLAY；这份名单只在上面「解释器没有 tkinter」时用于跳过，有 tkinter 则全部照跑。
+          # （脚本自带自检：依赖图异常会让它退出非 0，绝不静默变成「名单为空、全部跳过」。）
+          GUI_TESTS="$(python scripts/list_display_tests.py)"
+          echo "::notice::自动发现 $(wc -w <<< "$GUI_TESTS") 个需要 Tk 的用例"
 
           fail=0
           for t in tests/test_*.py; do

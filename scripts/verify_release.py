@@ -28,6 +28,11 @@
   5. exe 里确实含本版新增的字符串（新功能真在产物里，不是只进了仓库）
   6. exe 图标资源 vs assets/app.ico（32/16 档像素比对；取图标句柄带重试，见该段注释）
 
+⚠️ **范围：本脚本只复核 Windows 的 exe**（要用 Win32 能力跑 `--self-test` / 取图标）。
+   Linux 的 AppImage 不在下载复核之列 —— 它在**构建期**就由 `.github/workflows/appimage.yml`
+   调 `scripts/verify_appimage.py` 独立验收（平台纯度 + 包内导入 + 离线渲染 + Tk 字体），
+   那条链路与这里互补，不是遗漏。
+
 ⚠️ 复核以 **GitHub 服务端算的 asset digest** 为准，不看我们自己传的 `SHA256SUMS.txt`：
 前者是对收到的字节算的，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。
 （`SHA256SUMS.txt` 仍会随 Release 一起传，但只为兼容 **v0.2.0 及更早**的客户端 ——
