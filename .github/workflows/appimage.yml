@@ -124,7 +124,8 @@ jobs:
 
       - name: ★ 独立验收（xvfb 下让字体检查真跑）
         run: |
-          xvfb-run -a .venv/bin/python scripts/verify_appimage.py \
+          # 虚拟屏分辨率显式钉死（对齐 scripts/run_tests.py，别依赖发行版默认）
+          xvfb-run -a -s "-screen 0 1920x1080x24" .venv/bin/python scripts/verify_appimage.py \
             dist/VRChatLiveTranslate-x86_64.AppImage
 
       # ⚠️ `upload-artifact` 的 major 必须与 release.yml 里 `download-artifact` 的 major 配对

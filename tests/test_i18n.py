@@ -446,8 +446,8 @@ def test_all_ui_languages_window_guard() -> None:
 
             # ④ 窗口得装得下内容：Tk 在容器不够宽时**从最后打包的控件开始裁**，
             #    俄语第一行要 1251px，写死 940 会把右边两个按钮直接裁掉（实测）。
-            #    例外：屏幕本身比内容还窄（CI 的 1024px 屏）—— 那时窗口已顶到屏宽，
-            #    装不下是物理限制，不是我们的 bug。
+            #    例外：屏幕本身比内容还窄 —— 那时窗口已顶到屏宽，装不下是物理限制，
+            #    不是我们的 bug（run_tests.py 已把 xvfb 虚拟屏钉成 1920x1080）。
             gui._root.update_idletasks()
             need_w, have_w = gui._root.winfo_reqwidth(), gui._root.winfo_width()
             screen_w = int(gui._root.winfo_screenwidth() or 0)
