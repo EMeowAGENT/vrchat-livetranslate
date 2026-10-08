@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""列出「传递依赖 tkinter」的用例 —— 供 CI 在解释器没有 tkinter 时跳过。
+"""列出「传递依赖 tkinter」的用例 —— 供 `scripts/run_tests.py` 在解释器没有 tkinter 时跳过。
 
 ## 为什么要有这个脚本（而不是一张手抄名单）
 
-`.github/workflows/ci.yml` 的 `linux-tests` 里，xvfb-run 已经给**所有**用例统一提供虚拟
-DISPLAY，所以真正需要单独对待的只有一件事：**解释器有没有 tkinter**。没有 tkinter 时，
-凡是（直接或经 `vlt` 模块）会 import tkinter 的用例都会 import 失败，得跳过而不是判红。
+仓库唯一的测试运行器 `scripts/run_tests.py`（CI 两个 job 也用它）里，xvfb-run 已经给
+**所有**用例统一提供虚拟 DISPLAY，所以真正需要单独对待的只有一件事：**解释器有没有
+tkinter**。没有 tkinter 时，凡是（直接或经 `vlt` 模块）会 import tkinter 的用例都会
+import 失败；本机默认跳过它们，CI 则传 `--require-tk` 直接判红（不允许静默少跑一批）。
 
 这份名单以前是**手抄**的，结果必然漂移：写这个脚本时实际有 32 个用例传递依赖 tkinter，
 而手抄名单只列了 11 个 —— 漏掉的那 21 个（如 `test_langs.py` 在函数体内
@@ -28,7 +29,7 @@ tkinter 就会从「跳过」变成「红」。
 
 ## 用法
 
-    python scripts/list_display_tests.py            # 单行空格分隔，CI 直接吃
+    python scripts/list_display_tests.py            # 单行空格分隔，run_tests.py 直接吃
     python scripts/list_display_tests.py --lines    # 每行一个，给人看
 """
 from __future__ import annotations
@@ -150,9 +151,9 @@ def _needs_tk(module: str) -> bool:
 def discover() -> list[str]:
     """返回所有传递依赖 tkinter 的 `tests/test_*.py`（相对仓库根，已排序）。
 
-    路径统一用 **POSIX 分隔符**（`as_posix()`）：输出会被 CI 的 bash 用
-    `[[ " $GUI_TESTS " == *" $t "* ]]` 逐字匹配，而 `$t` 来自 `tests/test_*.py`
-    这种正斜杠写法 —— 若在 Windows 上产出反斜杠，匹配会静默失效。
+    路径统一用 **POSIX 分隔符**（`as_posix()`）：run_tests.py 拿它和
+    `test.relative_to(ROOT).as_posix()` 做**集合成员判断** —— 若在 Windows 上产出
+    反斜杠，集合永远不命中，跳过会静默失效（该跳的没跳、缺 tkinter 时反被判红）。
     """
     found = []
     for test in sorted(Path(ROOT, "tests").glob("test_*.py")):
