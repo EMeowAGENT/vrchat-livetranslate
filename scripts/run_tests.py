@@ -13,6 +13,7 @@
     .venv/Scripts/python.exe scripts/run_tests.py --only 'test_room_*'   # 也支持通配
     .venv/Scripts/python.exe scripts/run_tests.py --coverage     # 顺带累积覆盖率摘要
     .venv/Scripts/python.exe scripts/run_tests.py --require-tk   # 缺 tkinter 直接判红（CI 用）
+    .venv/Scripts/python.exe scripts/run_tests.py --require-xvfb  # Linux 缺 xvfb-run 直接判红（CI 用）
     .venv/Scripts/python.exe scripts/run_tests.py --with-engine  # 连需真 key 的也跑
     .venv/Scripts/python.exe scripts/run_tests.py --no-xvfb      # 明确裸跑（不挂 xvfb）
 
@@ -23,12 +24,14 @@
     `test_i18n` 这类实测几何的用例会**假红**。虚拟屏**显式钉死**成
     `-screen 0 <VLT_XVFB_SCREEN，默认 1920x1080x24>` —— 不再依赖发行版默认
     （Arch 是 640x480、Debian/Ubuntu 是 1280x1024，不钉就各跑各的）；
-    Windows / macOS 自带桌面会话，不套（同 CI 的 Windows job）。找不到 `xvfb-run` 时会
-    打印提示（不静默裸跑），可用 `--no-xvfb` 明确接受裸跑；
+    Windows / macOS 自带桌面会话，不套（同 CI 的 Windows job）。找不到 `xvfb-run` 时本机
+    只打印提示（不静默），可用 `--no-xvfb` 明确接受裸跑；**CI 传 `--require-xvfb`，缺了
+    直接判红**（裸跑下 GUI 用例会自跳过 → 假绿）；
   * **无 tkinter**：本机默认跳过「传递依赖 tkinter」的用例（名单由
     `scripts/list_display_tests.py` 按 import 图**自动发现**，逐条打印理由）；CI 传
     `--require-tk`，此时缺 tkinter **直接判红**，绝不静默少跑一批 GUI 用例；
   * 在 `GITHUB_ACTIONS=true` 下输出 `::group:: / ::error / ::notice` 注解，本地保持纯文本；
+  * 一个用例都没**真正通过**（`PASS=0`，全是跳过）→ 判非 0，拒绝把「一个都没跑」当绿；
   * 任一用例退出码非 0 → 整体退出码非 0；
   * 覆盖率**不设阈值、不阻断**：只多打印一张 `--show-missing` 摘要；测试结果才是门禁。
 
@@ -121,7 +124,7 @@ def tk_gui_tests(exe: str | None = None) -> set[str]:
     return set(proc.stdout.split())
 
 
-def xvfb_decision(disabled: bool) -> bool:
+def xvfb_decision(disabled: bool, require: bool = False) -> bool:
     """是否给用例挂 `xvfb-run -a`。返回决定，并在需要时打印一行说明。
 
     平台差异（对齐 CI 的两个 job）：
@@ -130,14 +133,20 @@ def xvfb_decision(disabled: bool) -> bool:
         的用例会假红（本机实测：不挂 xvfb 时报 `(1960, 40) != (40, 40)`，挂上就绿）。
         CI 的 `linux-tests` 就是 `xvfb-run -a` **逐用例**跑 —— 这里照做。
       * **Windows / macOS** —— 自带真实桌面会话（CI 的 Windows job 也不挂），不套。
-      * Linux 上**找不到** `xvfb-run`：不硬红，但明确打印提示（别让裸跑变成静默），
-        确要接受裸跑就加 `--no-xvfb`。
+      * Linux 上**找不到** `xvfb-run`：本机不硬红，但明确打印提示（别让裸跑变成静默），
+        确要接受裸跑就加 `--no-xvfb`；**CI 传 `--require-xvfb` 时直接抛错判红** ——
+        否则裸跑下 GUI 用例会走 `_try_tk()` / `没有 DISPLAY` **自跳过并返回 0**，整轮假绿。
     """
     if disabled:
         return False
     if not sys.platform.startswith("linux"):
         return False
     if shutil.which(XVFB_RUN) is None:
+        if require:
+            raise RuntimeError(
+                f"Linux 上找不到 {XVFB_RUN}，但传了 --require-xvfb（CI 不允许裸跑：GUI 用例"
+                "会自跳过 → 假绿）—— 装 `xorg-server-xvfb` 后重跑；确要接受裸跑请去掉 "
+                "--require-xvfb 并加 --no-xvfb")
         print("⚠️ 没找到 xvfb-run：界面（Tk）用例可能因窗口管理器重排而假红。"
               "装 `xorg-server-xvfb` 后重跑；确要裸跑请加 --no-xvfb。\n")
         return False
@@ -215,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="不要自动挂 xvfb-run（默认 Linux 上逐用例挂，与 CI 一致）")
     ap.add_argument("--require-tk", action="store_true",
                     help="缺 tkinter 时直接判红（CI 用，避免静默跳过一批 GUI 用例）")
+    ap.add_argument("--require-xvfb", action="store_true",
+                    help="Linux 上缺 xvfb-run 时直接判红（CI 用，避免裸跑下 GUI 用例自跳过）")
     ap.add_argument("--xvfb-screen", metavar="WxHxD",
                     help=f"xvfb 虚拟屏分辨率（默认 {DEFAULT_XVFB_SCREEN}，或 env VLT_XVFB_SCREEN）")
     ap.add_argument("--no-gha", action="store_true",
@@ -245,7 +256,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"⚠️ 解释器没有 tkinter：将跳过 {len(tk_skip)} 个依赖 tkinter 的用例"
               "（逐条打印理由，不静默）\n")
 
-    use_xvfb = xvfb_decision(args.no_xvfb)
+    try:
+        use_xvfb = xvfb_decision(args.no_xvfb, args.require_xvfb)
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        ann.error(str(exc))
+        return 3
 
     tests = select(discover(), args.only)
     if not tests:
@@ -305,6 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"合计：PASS={n_pass} FAIL={n_fail} SKIP={n_skip}")
     if failed:
         print("失败用例：" + ", ".join(failed))
+        return 1
+    if n_pass == 0:
+        msg = (f"没有任何用例真正通过（全是跳过？）：PASS=0 FAIL=0 SKIP={n_skip}"
+               " —— 拒绝把「一个都没跑」当成绿。")
+        print(f"❌ {msg}")
+        ann.error(msg)
         return 1
     return 0
 

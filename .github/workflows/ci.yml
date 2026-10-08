@@ -66,14 +66,15 @@ jobs:
 
       # ★ 仓库自己的运行器，CI 与本机共用同一套口径（逐用例循环、跳过语义、覆盖率、
       #   虚拟屏分辨率）。Windows 自带桌面会话，run_tests.py 按平台判断不挂 xvfb；
-      #   --require-tk 保证缺 tkinter 时判红，而不是静默少跑一批 GUI 用例。
+      #   --require-tk / --require-xvfb 保证缺依赖时判红，绝不静默少跑一批 GUI 用例
+      #   （Windows 无 xvfb，--require-xvfb 在非 Linux 上是空操作 → 两个 job 命令一致）。
       #   覆盖率与测试同一次跑里累积（内部 `coverage run -a` + 末尾非阻断摘要）。
       - name: 跑全部离线测试（run_tests.py，累积覆盖率）
         env:
           # 测试期不起 git 子进程：Windows 上 `git describe` + 管道 + timeout 会卡死
           # （实测：整个 job 从早期就异常慢、最终卡在某个 GUI 用例），见 vlt/version.py。
           VLT_VERSION_NO_GIT: "1"
-        run: python scripts/run_tests.py --coverage --require-tk
+        run: python scripts/run_tests.py --coverage --require-tk --require-xvfb
 
   package:
     # 能过测试还不代表打得出来 —— 打包链路（PyInstaller + 资源 + 图标）单独验一次
@@ -178,12 +179,13 @@ jobs:
       #   循环、跳过语义、覆盖率、虚拟屏分辨率都只在这一处维护）。
       #   逐用例挂 `xvfb-run -a`；虚拟屏分辨率在 run_tests.py 里**显式钉死**，不依赖发行版
       #   默认（否则 Arch 640x480 / Ubuntu 1280x1024 各跑各的，几何用例口径不一致）。
-      #   --require-tk 保证缺 tkinter 时判红，而不是静默少跑一批 GUI 用例。
+      #   --require-tk / --require-xvfb 保证缺 tkinter / 缺 xvfb-run 时判红，而不是裸跑让
+      #   GUI 用例自跳过造成假绿。
       #   覆盖率与测试同一次跑里累积（内部 `coverage run -a` + 末尾非阻断摘要）。
       - name: 跑离线测试（run_tests.py，累积覆盖率）
         env:
           VLT_VERSION_NO_GIT: "1"     # 与 Windows job 一致：测试期不起 git（见 vlt/version.py）
-        run: python scripts/run_tests.py --coverage --require-tk
+        run: python scripts/run_tests.py --coverage --require-tk --require-xvfb
 
   # ------------------------------------------------------------------
   # Linux AppImage：构建 + **独立验收**。

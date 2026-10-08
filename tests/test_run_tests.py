@@ -12,6 +12,8 @@
   * **`--require-tk`**：用「PYTHONPATH 上放一个会抛 ImportError 的假 tkinter」模拟缺
     tkinter —— 带 `--require-tk` 必须判红（rc=3），不带则退化为跳过 + 无匹配用例（rc=1），
     绝不静默成功。
+  * **`--require-xvfb`**：用「PATH 里不含 xvfb-run」模拟缺失 —— 带 flag 判红（rc=3），
+    不带才降级；且 **`PASS=0`（只剩跳过）也要判非 0**。
 
 **不**在本用例里调 `run_tests.main()` 跑全量（那会自递归）。
 """
@@ -192,6 +194,44 @@ def test_require_tk_red_when_missing():
           "无匹配用例时明确报「没有匹配」，不退化成静默成功")
 
 
+def test_require_xvfb_red_when_missing():
+    """缺 xvfb-run 时：带 --require-xvfb 判红；不带才降级。仅 Linux 有此语义。"""
+    if not sys.platform.startswith("linux"):
+        check(True, f"{sys.platform} 上 --require-xvfb 为空操作（跳过该断言）")
+        return
+    # 用一个空的 PATH 目录模拟「找不到 xvfb-run」；python 走绝对路径不受影响。
+    empty = tempfile.mkdtemp(prefix="no-xvfb-")
+    try:
+        env = dict(os.environ)
+        env["PATH"] = empty
+        env.pop("GITHUB_ACTIONS", None)
+        proc = subprocess.run(
+            [sys.executable, str(RUNNER), "--require-xvfb", "--only", "zzz-nonexistent"],
+            cwd=ROOT, env=env, capture_output=True, text=True)
+        check(proc.returncode == 3,
+              f"--require-xvfb 且缺 xvfb-run → 判红（rc={proc.returncode}，期望 3）")
+        check("xvfb" in (proc.stdout + proc.stderr), "判红时说明了是 xvfb 缺失")
+
+        proc2 = subprocess.run(
+            [sys.executable, str(RUNNER), "--only", "zzz-nonexistent"],
+            cwd=ROOT, env=env, capture_output=True, text=True)
+        check(proc2.returncode == 1,
+              f"缺 xvfb-run 且无 --require-xvfb：降级不硬红（rc={proc2.returncode}，期望 1）")
+    finally:
+        shutil.rmtree(empty, ignore_errors=True)
+
+
+def test_no_pass_is_red():
+    """PASS=0（只剩跳过）必须判非 0，绝不静默绿。用默认跳过的 test_engine 制造。"""
+    proc = subprocess.run(
+        [sys.executable, str(RUNNER), "--only", "test_engine.py"],
+        cwd=ROOT, capture_output=True, text=True)
+    check(proc.returncode != 0,
+          f"PASS=0（只剩跳过）→ 判非 0（rc={proc.returncode}）")
+    check("没有任何用例真正通过" in proc.stdout,
+          "并写明「没有任何用例真正通过」")
+
+
 def main() -> int:
     print("== run_tests.py 行为守卫 ==")
     for fn in (
@@ -202,6 +242,8 @@ def main() -> int:
         test_xvfb_decision,
         test_tk_gui_tests,
         test_require_tk_red_when_missing,
+        test_require_xvfb_red_when_missing,
+        test_no_pass_is_red,
     ):
         print(f"-- {fn.__name__}")
         fn()
