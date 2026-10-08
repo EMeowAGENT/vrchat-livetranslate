@@ -72,7 +72,7 @@ def test_build_cmd():
     xv = rt.build_cmd(t, coverage=False, xvfb=True, screen="1920x1080x24")
     check(xv[0] == rt.XVFB_RUN and xv[1] == "-a",
           f"xvfb 模式以 `{rt.XVFB_RUN} -a` 开头：{xv[:2]}")
-    check("-s" in xv and f"-screen 0 1920x1080x24" in xv,
+    check("-s" in xv and "-screen 0 1920x1080x24" in xv,
           "xvfb 模式的虚拟屏被**显式钉死**（-s '-screen 0 <WxHxD>'）")
     # 分辨率必须是**一个** argv（否则 xvfb-run 会把它拆错）
     i = xv.index("-s")

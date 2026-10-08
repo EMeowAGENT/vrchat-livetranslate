@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
             n_fail += 1
             failed.append(test.name)
             print(f"FAIL {test.name}（退出码 {proc.returncode}）")
-            ann.error(f"测试失败（见本组日志）", file=rel)
+            ann.error("测试失败（见本组日志）", file=rel)
 
     if args.coverage:
         coverage_summary()
