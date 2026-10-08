@@ -1037,8 +1037,9 @@ def test_drag_moves_window_and_snaps_to_anchor() -> None:
         fake.geometry("500x300+120+90")
         fake.update()
         ov.tick()
-        # 期望值走生产公式：小屏幕（CI 的 xvfb-run 默认 640x480）下夹取真的会生效，
-        # 不能假设"字幕位移量 == 窗口位移量"（那是大屏下的特例）。
+        # 期望值走生产公式，且**不能**假设"字幕位移量 == 窗口位移量"：贴边/近屏边缘时
+        # `compute_position` 会把落点夹回可用区（通用行为，与屏幕大小无关 ——
+        # run_tests.py 已把 xvfb 虚拟屏显式钉成 1920x1080，别依赖发行版默认）。
         want = compute_position(ov.cfg.anchor, ov.cfg.offset, ov.game_rect, (320, 120),
                                 platform.screen_work_area())
         assert abs(ov.position[0] - want[0]) <= 4 and abs(ov.position[1] - want[1]) <= 4, \

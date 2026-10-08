@@ -64,53 +64,17 @@ jobs:
       - name: 凭据扫描（仓库自带的钩子脚本，防 key 进历史）
         run: python scripts/check_no_secrets.py --once
 
-      # ★ 仓库自己的运行器在 Windows 上也要能用：跑最小平台子集做冒烟。
-      #   `scripts/run_tests.py` 平时只在本机用（CI 用的是下面那段内联循环），
-      #   以前 CI 从没在 Windows 上碰过它 —— 这里钉住：在 Windows 能挑用例、跳过
-      #   test_engine、正确回退出码，且**不**去挂 xvfb（Windows 自带桌面会话）。
-      - name: 冒烟：仓库测试运行器（Windows）
-        env:
-          # 测试期不起 git 子进程（Windows 上 git+管道+timeout 会卡死，见 vlt/version.py）
-          VLT_VERSION_NO_GIT: "1"
-        run: python scripts/run_tests.py --only platform
-
-      # 覆盖率与测试**同一次跑**里累积（`coverage run -a`）：只测一遍，不重复跑。
-      # 覆盖率数据先 erase 干净，避免混入缓存/上一次的旧数据。
-      - name: 跑全部离线测试（累积覆盖率）
-        shell: bash
+      # ★ 仓库自己的运行器，CI 与本机共用同一套口径（逐用例循环、跳过语义、覆盖率、
+      #   虚拟屏分辨率）。Windows 自带桌面会话，run_tests.py 按平台判断不挂 xvfb；
+      #   --require-tk / --require-xvfb 保证缺依赖时判红，绝不静默少跑一批 GUI 用例
+      #   （Windows 无 xvfb，--require-xvfb 在非 Linux 上是空操作 → 两个 job 命令一致）。
+      #   覆盖率与测试同一次跑里累积（内部 `coverage run -a` + 末尾非阻断摘要）。
+      - name: 跑全部离线测试（run_tests.py，累积覆盖率）
         env:
           # 测试期不起 git 子进程：Windows 上 `git describe` + 管道 + timeout 会卡死
           # （实测：整个 job 从早期就异常慢、最终卡在某个 GUI 用例），见 vlt/version.py。
           VLT_VERSION_NO_GIT: "1"
-        run: |
-          set -o pipefail
-          python -m coverage erase
-          # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
-          #   test_engine —— 要真 API key 打真会话，属本机实测项
-          SKIP="tests/test_engine.py"
-          fail=0
-          for t in tests/test_*.py; do
-            if [[ " $SKIP " == *" $t "* ]]; then
-              echo "::notice::$t 已跳过（需要真实 API key / 硬件，见 workflow 注释）"
-              continue
-            fi
-            echo "::group::$t"
-            if python -m coverage run -a --source=vlt "$t"; then
-              echo "PASS $t"
-            else
-              echo "::error file=$t::测试失败（见本组日志）"
-              fail=1
-            fi
-            echo "::endgroup::"
-          done
-          exit $fail
-
-      # 覆盖率**非阻断**：只出摘要（--show-missing），不设阈值。
-      # `if: always()` 让测试失败时也照样打印，方便看哪段没覆盖到。
-      - name: 覆盖率摘要（非阻断）
-        if: always()
-        continue-on-error: true
-        run: python -m coverage report --show-missing
+        run: python scripts/run_tests.py --coverage --require-tk --require-xvfb
 
   package:
     # 能过测试还不代表打得出来 —— 打包链路（PyInstaller + 资源 + 图标）单独验一次
@@ -211,65 +175,17 @@ jobs:
       - name: 检查文档链接
         run: python scripts/check_doc_links.py
 
-      # 只判「解释器有没有 tkinter」；具体哪些用例要跳过由下一步的
-      # scripts/list_display_tests.py **自动发现**（不再手抄名单 —— 手抄必漏）。
-      - name: 检查 tkinter 可用性
-        id: tk
-        run: |
-          if python -c "import tkinter" 2>/dev/null; then
-            echo "ok=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=0" >> "$GITHUB_OUTPUT"
-            echo "::warning::当前解释器没有 tkinter → 传递依赖 Tk 的用例将跳过（名单自动发现，非静默）"
-          fi
-
-      # 覆盖率与测试同一次跑里累积（`coverage run -a`），只测一遍。
-      - name: 跑离线测试（累积覆盖率）
-        shell: bash
+      # ★ 与 Windows job 同一条命令：仓库自己的运行器（CI 与本机共用一套口径 —— 逐用例
+      #   循环、跳过语义、覆盖率、虚拟屏分辨率都只在这一处维护）。
+      #   逐用例挂 `xvfb-run -a`；虚拟屏分辨率在 run_tests.py 里**显式钉死**，不依赖发行版
+      #   默认（否则 Arch 640x480 / Ubuntu 1280x1024 各跑各的，几何用例口径不一致）。
+      #   --require-tk / --require-xvfb 保证缺 tkinter / 缺 xvfb-run 时判红，而不是裸跑让
+      #   GUI 用例自跳过造成假绿。
+      #   覆盖率与测试同一次跑里累积（内部 `coverage run -a` + 末尾非阻断摘要）。
+      - name: 跑离线测试（run_tests.py，累积覆盖率）
         env:
           VLT_VERSION_NO_GIT: "1"     # 与 Windows job 一致：测试期不起 git（见 vlt/version.py）
-        run: |
-          set -o pipefail
-          python -m coverage erase
-
-          # 不进 CI 的（都写清理由，别让「跳过」变成静默）：
-          #   test_engine —— 要真 API key 打真会话、还要联网，属本机实测项
-          ALWAYS_SKIP="tests/test_engine.py"
-          # 需要 Tk 的用例**自动发现**，不再手抄：手抄名单必然漂移（这里曾只列 11 个，
-          # 实际有 32 个）。脚本按 import 图**传递地**找「最终 import tkinter」的用例 ——
-          # 覆盖函数体内的惰性 import（`from vlt.gui import ...`）与 `from vlt import gui_*`
-          # 这类子模块导入，以及 vlt 内部相对 import。xvfb-run 本已给**所有**用例统一提供
-          # DISPLAY；这份名单只在上面「解释器没有 tkinter」时用于跳过，有 tkinter 则全部照跑。
-          # （脚本自带自检：依赖图异常会让它退出非 0，绝不静默变成「名单为空、全部跳过」。）
-          GUI_TESTS="$(python scripts/list_display_tests.py)"
-          echo "::notice::自动发现 $(wc -w <<< "$GUI_TESTS") 个需要 Tk 的用例"
-
-          fail=0
-          for t in tests/test_*.py; do
-            if [[ " $ALWAYS_SKIP " == *" $t "* ]]; then
-              echo "::notice::$t 已跳过（需要真实 API key / 网络）"
-              continue
-            fi
-            if [[ "${{ steps.tk.outputs.ok }}" != "1" && " $GUI_TESTS " == *" $t "* ]]; then
-              echo "::notice::$t 已跳过（当前解释器无 tkinter）"
-              continue
-            fi
-            echo "::group::$t"
-            if xvfb-run -a python -m coverage run -a --source=vlt "$t"; then
-              echo "PASS $t"
-            else
-              echo "::error file=$t::测试失败（见本组日志）"
-              fail=1
-            fi
-            echo "::endgroup::"
-          done
-          exit $fail
-
-      # 覆盖率**非阻断**（同 Windows job）：只出摘要，不设阈值。
-      - name: 覆盖率摘要（非阻断）
-        if: always()
-        continue-on-error: true
-        run: python -m coverage report --show-missing
+        run: python scripts/run_tests.py --coverage --require-tk --require-xvfb
 
   # ------------------------------------------------------------------
   # Linux AppImage：构建 + **独立验收**。
