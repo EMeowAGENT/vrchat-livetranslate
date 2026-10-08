@@ -47,26 +47,24 @@ README 里还有一份[许愿列表](README.md)：那些是维护者想做、但
 :: Windows —— 单个
 .venv\Scripts\python.exe tests\test_virtualmic.py
 
-:: Windows —— 全部（与 CI 同款；写进 .bat 文件时把 %%t 改回 %t）
-for %%t in (tests\test_*.py) do @.venv\Scripts\python.exe %%t
+:: Windows —— 全部（★ 与 CI 同一条命令：仓库运行器）
+.venv\Scripts\python.exe scripts\run_tests.py
 ```
 
 ```bash
 # Linux —— 单个（★ 必须挂 xvfb-run，理由见下面第 3 条）
 xvfb-run -a ./.venv/bin/python tests/test_virtualmic.py
 
-# Linux —— 全部（与 CI 同口径）
-for t in tests/test_*.py; do
-  [ "$t" = tests/test_engine.py ] && continue          # 见下面第 2 条
-  xvfb-run -a ./.venv/bin/python "$t" || echo "FAIL $t"
-done
+# Linux —— 全部（★ 与 CI 同一条命令；run_tests.py 会自动逐用例挂 xvfb-run）
+./.venv/bin/python scripts/run_tests.py
 ```
 
-> 也可以直接用仓库的运行器 `scripts/run_tests.py`（Windows / Linux 通用）：
-> `.venv/bin/python scripts/run_tests.py`（`--only <关键词>` 过滤、`--coverage` 出覆盖率）。
-> 它在 **Linux 上会像 CI 一样自动给每个用例挂 `xvfb-run -a`**（每用例一个干净虚拟 X），
-> Windows / macOS 自带桌面会话则不挂；找不到 `xvfb-run` 时会打印提示而不是静默裸跑。
-> 想强制裸跑加 `--no-xvfb`。
+> `scripts/run_tests.py` 是**本机与 CI 共用的唯一运行器**（CI 的两个 job 就是直接调它）：
+> 逐文件跑 `tests/test_*.py`、默认跳过 `test_engine.py`（见下面第 2 条）、`--only <关键词>`
+> 过滤、`--coverage` 出覆盖率摘要。它在 **Linux 上给每个用例自动挂 `xvfb-run -a`**（每用例
+> 一个干净虚拟 X，虚拟屏显式钉成 `1920x1080`），Windows / macOS 自带桌面会话则不挂。
+> 找不到 `xvfb-run` 时本机只打印提示（可 `--no-xvfb` 明确裸跑）；**CI 传
+> `--require-tk --require-xvfb`，缺依赖直接判红**，不会静默少跑一批 GUI 用例。
 
 几条**必须知道**的规矩：
 
@@ -75,12 +73,13 @@ done
 - **唯一例外是 `tests/test_engine.py`**：它要打一次**真实**会话，需要本机已配好 API key，
   CI 里**显式跳过**（workflow 里有 `::notice::` 写明原因）。它是本机实测项，别为了「变绿」
   删掉或改松。
-- **Linux 上必须挂 `xvfb-run -a` 跑**（CI 就是这么跑的，见 `ci.yml` 的 `linux-tests`）：
+- **Linux 上必须挂 `xvfb-run -a` 跑**（`run_tests.py` 会自动做；CI 的 `linux-tests` 同口径）：
   好几个用例会**建真窗口**再回读几何，平铺窗口管理器（Hyprland / niri / sway…）会把窗口
   重排成满屏，于是它们全部**假红**（实测：不挂 xvfb 时 `test_desktop_overlay*.py`、
   `test_i18n.py` 报的是几何/窗口宽度不符，挂上就全绿）。`xvfb-run -a` 给每个用例一个
   无窗口管理器的虚拟 X，与 CI 完全一致。缺 `xvfb-run` 就装 `xorg-server-xvfb`。
-- **CI 跑在英文系统 + 1024px 虚拟屏上**。凡是本机是中文 Windows、断言了中文界面文案，或者
+- **CI 跑在英文系统上，虚拟屏钉成 1920x1080**（`run_tests.py` 里显式 `-screen 0 1920x1080x24`，
+  不再依赖发行版默认）。凡是本机是中文 Windows、断言了中文界面文案，或者
   假设窗口很宽 —— 本地绿了 CI 照样红（历史上真踩过：本机中文系统全绿、GitHub CI 一片红）。
   涉及界面语言的用例要在**构造窗口之前**把语言钉死。
 - **全量测试一次只跑一份**。用例会共用 `out/` 沙箱和仓库根的 `config.yaml`；并发跑、或上一轮
@@ -215,7 +214,7 @@ don't read Chinese, this is the short version:
    (`./.venv/Scripts/python.exe` on Windows), never a bare `python`.
 2. **Test** — there is no pytest. Run each `tests/test_*.py` file directly with that interpreter;
    every test must run offline. The only exception is `tests/test_engine.py` (it needs a real API key
-   and is skipped in CI). CI runs on an English-locale system with a 1024px screen, so don't rely on
+   and is skipped in CI). CI runs on an English-locale system with a 1920x1080 virtual screen, so don't rely on
    a Chinese UI or a wide window in your assertions.
 3. **Commits** — Conventional Commit prefix + a Chinese description, e.g.
    `feat(scope): …`, `fix(scope): …`.
