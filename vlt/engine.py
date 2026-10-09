@@ -1301,6 +1301,7 @@ class Engine:
                 api_key=str(self._cfg.session_base.get("api_key") or ""),
                 language=d.target_lang,
                 timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
+                reuse_conn=bool(tts_cfg.get("reuse_conn", True)),
                 # 多模态地址同样按线路派生；整段/流式两条路共用这份 kw，故都带上 endpoint。
                 endpoint=self._tts_endpoint,
             )

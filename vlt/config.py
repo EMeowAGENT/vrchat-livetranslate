@@ -429,6 +429,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 流式合成（SSE）：首段音频 0.36~0.42s 就能起播（整段合成要等 1.6~1.9s 才开口）
                 "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
+                "reuse_conn": bool((raw_textin.get("tts") or {}).get("reuse_conn", True)),
             },
         },
     )

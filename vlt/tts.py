@@ -20,9 +20,15 @@
 """
 from __future__ import annotations
 
+import atexit
 import base64
+import http.client
 import json
+import ssl
+import threading
+import time
 from typing import Iterator
+from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -46,14 +52,188 @@ LANG_NAMES = {
 }
 
 _opener = None
+_DEFAULT_OPENER = None        # 模块自建的那个 opener（被替换过就不走连接池，见 _pool_allowed）
 
 
 def _get_opener():
     """直连 opener（禁用系统代理）——与 textin 同一取舍：国内端点走代理是纯负担。"""
-    global _opener
+    global _opener, _DEFAULT_OPENER
     if _opener is None:
         _opener = build_opener(ProxyHandler({}))
+        _DEFAULT_OPENER = _opener
     return _opener
+
+
+# ---------------------------------------------------------------- 连接复用
+# 为什么要（2026-10-07 实测）：每段 TTS 都要重付一次 DNS+TCP+TLS ≈ **520ms**，占「第一句开口」
+# 的一大半；而同一句 20~30 字的流式合成整段也才 1.6~1.7s，这笔开销不可忽略。
+# 复用同一条连接后这段只剩发送/首字节 —— 连续多段实测后段省 **94~186ms/段**。
+# ⚠️ 不变式：本模块刻意**直连、不走代理**（见 `_get_opener`），池化连接同样直连；
+#    `reuse_conn=False` 时行为与以前**完全一致**（不碰下面任何东西，仍走 urllib）。
+_POOL: dict[tuple[str, str, int], tuple[object, float]] = {}
+_POOL_LOCK = threading.Lock()
+_POOL_IDLE_MAX_S = 20.0        # 空闲超过这么久就丢掉（服务端多半已关，留着反而多一次失败重连）
+
+
+def _pool_key(url: str) -> tuple[tuple[str, str, int], str]:
+    """把 URL 拆成 (池键=(scheme,host,port), 请求路径)。纯函数，离线可测。"""
+    u = urlsplit(url)
+    scheme = (u.scheme or "https").lower()
+    host = u.hostname or ""
+    port = u.port or (443 if scheme == "https" else 80)
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    return (scheme, host, port), path
+
+
+def _close_quiet(conn: object) -> None:
+    try:
+        conn.close()                                       # type: ignore[attr-defined]
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _open_conn(url: str, timeout: float):
+    """取一条连接：优先复用池里那条还新鲜的，否则新建。返回 (conn, path, key)。"""
+    key, path = _pool_key(url)
+    with _POOL_LOCK:
+        held = _POOL.pop(key, None)
+    if held is not None:
+        conn, used_at = held
+        if time.monotonic() - used_at <= _POOL_IDLE_MAX_S:
+            return conn, path, key
+        _close_quiet(conn)
+    scheme, host, port = key
+    if scheme == "https":
+        conn = http.client.HTTPSConnection(host, port, timeout=timeout,
+                                           context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    return conn, path, key
+
+
+def _release_conn(key: tuple[str, str, int], conn: object, *, reusable: bool) -> None:
+    """把连接放回池（只留一条/主机）；不可复用就关掉。"""
+    if not reusable:
+        _close_quiet(conn)
+        return
+    with _POOL_LOCK:
+        old = _POOL.pop(key, None)
+        _POOL[key] = (conn, time.monotonic())
+    if old is not None:
+        _close_quiet(old[0])
+
+
+def _post_pooled(req, timeout: float):
+    """用池化连接发一个 urllib Request（GET/POST 都行），返回 (resp, conn, key)。
+
+    连接层异常（被服务端悄悄掐掉最常见）→ 丢连接、**重连一次**并留痕；
+    ≥400 是服务端的明确答复、**不当成连接问题**：转成 urllib 的 `HTTPError` 抛出去 ——
+    调用方本来就是 `except HTTPError` + `exc.read()` 取详情，这里必须保持同一口径。
+    """
+    url = req.full_url
+    method = req.get_method()
+    body = req.data
+    headers = {k: v for k, v in req.headers.items()
+               if k.lower() not in ("host", "content-length", "connection")}
+    last: Exception | None = None
+    for attempt in (1, 2):
+        conn, path, key = _open_conn(url, timeout)
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                _release_conn(key, conn, reusable=not resp.will_close)
+                raise HTTPError(url, resp.status, resp.reason, resp.headers, resp)
+            return resp, conn, key
+        except HTTPError:
+            raise
+        except (http.client.HTTPException, OSError) as exc:
+            last = exc
+            _release_conn(key, conn, reusable=False)
+            if attempt == 1:
+                _note(f"复用连接失效（{type(exc).__name__}: {exc}）→ 重连一次")
+                continue
+            raise
+    raise last if last else TtsError("连接失败")
+
+
+class _Response:
+    """`with _open_response(...) as r` 的包装：用完把连接放回池。
+
+    ⚠️ 刻意**不用 generator**（`@contextlib.contextmanager`）：实测过 generator 版本会把
+    进程收尾的时序搅乱 —— 在跑 Tk 的用例（`tests/test_textin.py`）里表现为退出码非 0，
+    而所有断言其实全过（`Tcl_AsyncDelete: async handler deleted by the wrong thread`）。
+    写成普通对象后该用例恢复全绿（同机 6/6）。
+    """
+
+    __slots__ = ("_resp", "_conn", "_key", "_pooled")
+
+    def __init__(self, resp, conn=None, key=None) -> None:   # noqa: ANN001
+        self._resp = resp
+        self._conn = conn
+        self._key = key
+        self._pooled = key is not None
+
+    def __enter__(self):                                     # noqa: ANN204
+        return self._resp
+
+    def __exit__(self, *exc) -> bool:                        # noqa: ANN002
+        if self._pooled:
+            reusable = not getattr(self._resp, "will_close", True)
+            _release_conn(self._key, self._conn, reusable=reusable)
+        else:
+            try:                                             # 与原来的 `with opener.open()` 一致
+                self._resp.close()
+            except Exception:                                # noqa: BLE001
+                pass
+        return False
+
+
+def _open_response(req, timeout: float, *, reuse_conn: bool):
+    """取响应：优先**池化复用**（连续多段省一次 DNS+TCP+TLS ≈ 520ms）；连接层出问题回退直连。
+
+    回退与重连都留痕（本仓库约定：禁静默降级）。`reuse_conn=False` 时与以前**完全一致**。
+    """
+    if reuse_conn and _pool_allowed():
+        try:
+            resp, conn, key = _post_pooled(req, timeout)
+            return _Response(resp, conn, key)
+        except HTTPError:
+            raise
+        except Exception as exc:                              # noqa: BLE001
+            _note(f"连接复用不可用（{type(exc).__name__}: {exc}）→ 本次回退直连")
+    return _Response(_get_opener().open(req, timeout=timeout))
+
+
+def _pool_allowed() -> bool:
+    """是否允许走连接池。
+
+    规则：**取 opener 的路径被替换过就不池化**。两种替换方式都要挡住：
+      * `module._opener = fake`（直接塞 opener）；
+      * `module._get_opener = lambda: fake`（换掉取 opener 的函数）。
+    替换者（用例里的假 opener、或别的接管 HTTP 层的代码）期望自己看到每一个请求；
+    池化会绕过它 —— 实测后果是打了假 opener 的用例直接打到真端点上去（401）。
+    """
+    return (_get_opener is _DEFAULT_GET_OPENER
+            and (_opener is None or _opener is _DEFAULT_OPENER))
+
+
+def _close_pooled() -> None:
+    """进程退出时把池里的连接关掉。
+
+    不关的后果实测过：连接会一直留到解释器收尾阶段，把收尾顺序搅乱 ——
+    在跑 Tk 的用例里表现为 `Tcl_AsyncDelete: async handler deleted by the wrong thread`
+    （退出码非 0，而所有断言其实全过）。退出前主动关掉，顺序就确定了。
+    """
+    with _POOL_LOCK:
+        held = list(_POOL.values())
+        _POOL.clear()
+    for conn, _ in held:
+        _close_quiet(conn)
+
+
+atexit.register(_close_pooled)
+_DEFAULT_GET_OPENER = _get_opener      # 供上面的守卫比对（模块导入时就固定下来）
 
 
 class TtsError(RuntimeError):
@@ -102,16 +282,16 @@ def _decode_to_24k_mono(raw: bytes) -> bytes:
         raise TtsError(f"音频解码失败：{type(exc).__name__}: {exc}") from exc
 
 
-def _fetch(url: str, timeout: float) -> bytes:
+def _fetch(url: str, timeout: float, *, reuse_conn: bool = True) -> bytes:
     req = Request(url, headers={"Accept": "*/*"})
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             return r.read()
     except (HTTPError, URLError) as exc:
         raise TtsError(f"下载音频失败：{exc}") from exc
 
 
-def _extract_audio(obj: dict, timeout: float) -> bytes:
+def _extract_audio(obj: dict, timeout: float, *, reuse_conn: bool = True) -> bytes:
     """从响应体里取音频原始字节：优先 base64 的 `data`，退回 `url` 下载。"""
     audio = (obj.get("output") or {}).get("audio") or {}
     if audio.get("data"):
@@ -120,7 +300,7 @@ def _extract_audio(obj: dict, timeout: float) -> bytes:
         except Exception as exc:  # noqa: BLE001
             raise TtsError(f"base64 音频解析失败：{exc}") from exc
     if audio.get("url"):
-        return _fetch(str(audio["url"]), timeout)      # URL 有有效期，能不用就不用
+        return _fetch(str(audio["url"]), timeout, reuse_conn=reuse_conn)   # URL 有有效期，能不用就不用
     return b""
 
 
@@ -142,6 +322,7 @@ def _chunk_to_pcm(chunk: bytes) -> bytes:
 def synthesize(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_VOICE,
     model: str = DEFAULT_MODEL,
     api_key: str = "",
@@ -173,7 +354,7 @@ def synthesize(
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json"}, method="POST")
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             body = r.read().decode("utf-8", "replace")
     except HTTPError as exc:
         detail = ""
@@ -192,7 +373,7 @@ def synthesize(
     except Exception as exc:  # noqa: BLE001
         raise TtsError(f"响应解析失败：{exc}") from exc
     _raise_if_error(resp)
-    raw = _extract_audio(resp, timeout)
+    raw = _extract_audio(resp, timeout, reuse_conn=reuse_conn)
     if not raw:
         raise TtsError("服务端没返回音频")
     return _decode_to_24k_mono(raw)
@@ -201,6 +382,7 @@ def synthesize(
 def synthesize_stream(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_VOICE,
     model: str = DEFAULT_MODEL,
     api_key: str = "",
@@ -246,7 +428,7 @@ def synthesize_stream(
     got = 0
     acc = bytearray()          # 已发出的音频（用来识别末尾那片「整段汇总」）
     try:
-        with _get_opener().open(req, timeout=timeout) as resp:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as resp:
             ctype = str(resp.headers.get("Content-Type", "") or "")
             if "event-stream" not in ctype:            # 服务端降级成了整段响应
                 _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 退回整段合成")
@@ -255,7 +437,7 @@ def synthesize_stream(
                 except Exception as exc:  # noqa: BLE001
                     raise TtsError(f"响应解析失败：{exc}") from exc
                 _raise_if_error(obj)
-                raw = _extract_audio(obj, timeout)
+                raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
                 if raw:
                     # ⚠️ 顺序不能反：**先解码成功、再算「已送出」**。曾经先 `got += 1` 再 yield，
                     # 解码一失败就报「已保留 1 个分片（少半句、不整句丢）」—— 可实际上一个字
@@ -277,7 +459,7 @@ def synthesize_stream(
                     except Exception:                       # noqa: BLE001
                         continue                            # 非 JSON 的分片直接跳过
                     _raise_if_error(obj)
-                    raw = _extract_audio(obj, timeout)
+                    raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
                     if not raw:
                         continue
                     pcm = _chunk_to_pcm(raw)
@@ -334,6 +516,7 @@ def synthesize_stream(
 def synthesize_omni(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_OMNI_VOICE,
     model: str = DEFAULT_OMNI_MODEL,
     api_key: str = "",
@@ -376,7 +559,7 @@ def synthesize_omni(
                            "Accept": "text/event-stream"}, method="POST")
     b64: list[str] = []
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             for raw_line in r:                        # 逐行读 SSE
                 line = raw_line.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
