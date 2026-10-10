@@ -207,20 +207,39 @@ def set_window_icon(gui) -> None:
 
 
 def _apply_dark_titlebar(gui, win=None) -> None:
-    """Windows 深色标题栏。"""
+    """Windows 深色标题栏。
+
+    ⚠️ **只设一次不可靠**：窗口还没被真正映射时，DWM 会忽略这次设置 ——
+    实测同一份代码，**进程里第一个被打开的弹窗**标题栏仍是浅色（用一个 PrintWindow 抓帧比对
+    标题栏平均亮度：浅 243 / 深 32），而同一个窗口之后再设一次就变深。
+    所以这里设完再在映射后补一次（60ms 足够让 Tk 把窗口映射出来）。
+    """
     if not IS_WINDOWS:
         return
+    w = win if win is not None else gui._root
+
+    def _set() -> None:
+        try:
+            import ctypes
+            if not w.winfo_exists():
+                return
+            hwnd = ctypes.windll.user32.GetParent(w.winfo_id())
+            value = ctypes.c_int(1)
+            for attr in (20, 19):
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                    break
+        except Exception:                                  # noqa: BLE001
+            pass
+
     try:
-        import ctypes
-        w = win if win is not None else gui._root
         w.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(w.winfo_id())
-        value = ctypes.c_int(1)
-        for attr in (20, 19):
-            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
-                break
-    except Exception:
+    except Exception:                                      # noqa: BLE001
+        pass
+    _set()
+    try:
+        w.after(60, _set)                                  # 映射后补一次（见上）
+    except Exception:                                      # noqa: BLE001
         pass
 
 
