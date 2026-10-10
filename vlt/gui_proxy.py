@@ -123,7 +123,21 @@ class ProxyMethods:
         print(f"[proxy] 麦克风代理已启动（VRChat 的麦克风请**永久**指向虚拟声卡）："
               f"直通缓冲 {pt}ms / 译音缓冲 {a.get('buffer_ms')}ms / 当前档位 {proxy.mode}",
               flush=True)
+        # 首次真正跑起来：说明一次它占用了虚拟声卡的输出流（只提示一次，见 gui_proxy_hint）
+        self._maybe_show_proxy_hint(on_shown=self._mark_proxy_hint_shown)
         return True
+
+    def _mark_proxy_hint_shown(self) -> None:
+        """把「首次启用说明已弹过」落盘 —— 以后不再打扰（headless 走不到这里，见 gui_proxy_hint）。
+
+        ⚠️ 落盘与配置路径都走 ``_m(self)``：那套打桩（`gui_mod._yaml_write` / `gui_mod.DEFAULT_CONFIG`）
+        在动了这个类的模块命名空间上才生效，本仓库的用例正是这么钉的。
+        """
+        _m(self)._yaml_write(
+            _m(self).DEFAULT_CONFIG, lambda t: _yaml_set_in_text(
+                t, ["output", "audio", "proxy", "hint_shown"], _fmt_scalar(True)),
+            err="保存代理首次启用提示标记")
+        self._sync_proxy_cfg_mem(proxy={"hint_shown": True})
 
 
     def _proxy_degraded(self, status_text: str, log_line: str) -> None:

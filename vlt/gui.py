@@ -82,6 +82,7 @@ class TranslationGUI(ProxyMethods):
         self._update_pending_exit = False; self._update_pending_info: update_check.ReleaseInfo | None = None
         self._reload_started = False; self._closing = False
         self._updated_hint_win: tk.Toplevel | None = None; self._updated_hint_job: str | None = None
+        self._proxy_hint_win: tk.Toplevel | None = None   # 首次启用麦克风代理的说明弹窗（见 gui_proxy_hint）
         self._settings_win: tk.Toplevel | None = None; self._settings_nb: ttk.Notebook | None = None
         self._settings_pages: list = []; self._settings_size = (SETTINGS_WIDTH, SETTINGS_MIN_H); self._settings_ctx = None
         self._device_scan_pending = False
@@ -409,6 +410,7 @@ class TranslationGUI(ProxyMethods):
     def _on_close(self):
         # 先关代理再走引擎收尾：on_close 末尾会 destroy root + crashlog.close()，
         # 放在后面的话「代理已关闭」这行留痕就落不进日志了。
+        self._close_proxy_hint()
         self._close_proxy()
         self._sync_engine_ctx(); gui_engine.on_close(self._engine_ctx)
     def _sync_engine_ctx(self):

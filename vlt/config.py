@@ -390,6 +390,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 "passthrough_buffer_ms": _int_clamped(
                     raw_proxy.get("passthrough_buffer_ms", 150), 150,
                     key="output.audio.proxy.passthrough_buffer_ms", lo=60, hi=500),
+                # 「首次启用说明已弹过」标记：程序自己维护（见 gui_proxy_hint），用户不用管。
+                # 放在配置里而不是内存/状态文件：用户换机拷配置时不该再被弹一次。
+                "hint_shown": bool(raw_proxy.get("hint_shown", False)),
             },
         },
         "capture": {
