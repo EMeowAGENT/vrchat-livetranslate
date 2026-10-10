@@ -44,6 +44,7 @@ import ctypes
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,7 @@ WORK = Path(tempfile.mkdtemp(prefix="verify_release_"))
 
 ok: list[str] = []
 bad: list[str] = []
+skipped: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -82,15 +84,38 @@ def sha256(p: Path) -> str:
 
 print(f"== 复核 {TAG} ==")
 print(f"下载目录：{WORK}")
-r = subprocess.run(["gh", "release", "download", TAG, "--dir", str(WORK)],
-                   capture_output=True, text=True, encoding="utf-8", errors="replace")
-if r.returncode != 0:
+# ⚠️ 必须显式 `--repo` + `-p`。`gh release download` 不带 `--repo` 时会按**当前目录的 git
+#    远端**推断仓库 —— 在 fork / 别的 checkout 里跑，就会下到**同名 tag 的另一个仓库**的资产
+#    （上游的 release 还带 AppImage）；随后拿本仓库的 `.digest` 去对账，sha 必然不符，
+#    看着像「发布出去的不是我们构建的那份」，实际只是下错了源。
+#    实测踩到：复核因此自己把自己判红，白查一轮。
+_dl = None
+for _try in range(1, 4):
+    r = subprocess.run(["gh", "release", "download", TAG, "--repo", REPO_SLUG,
+                        "-p", "VRChatLiveTranslate.exe", "--dir", str(WORK), "--clobber"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode == 0 and list(WORK.glob("*.exe")):
+        _dl = r
+        break
+    print(f"  下载第 {_try} 次没成功（{(r.stderr or '').strip()[:80]}），重试…")
+    time.sleep(4)
+if _dl is None:
     print("gh release download 失败：", r.stderr)
     raise SystemExit(2)
 
 exes = list(WORK.glob("*.exe"))
-check("附件齐了（exe）", bool(exes),
+check("附件齐了（exe，且只有本仓库的那一个）", len(exes) == 1,
       f"{[p.name + ' ' + f'{p.stat().st_size:,}B' for p in exes]}")
+
+# 尺寸也和服务端对一次账：下载被截断 / 半途重试时 sha 会莫名其妙不符，
+# 先比尺寸能一眼区分「下载坏了」和「产物真的不是构建的那份」。
+_want_size = subprocess.run(
+    ["gh", "api", f"repos/{REPO_SLUG}/releases/tags/{TAG}",
+     "--jq", '.assets[] | select(.name=="VRChatLiveTranslate.exe") | .size'],
+    capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
+check("附件尺寸 == 服务端 size（排除下载被截断）",
+      bool(_want_size) and exes and exes[0].stat().st_size == int(_want_size),
+      f"服务端 {_want_size or '?'}B / 本地 {exes[0].stat().st_size if exes else 0:,}B")
 
 exe = exes[0]
 mine = sha256(exe)
@@ -147,11 +172,21 @@ check("启动日志版本行 = 本次 tag 且标明打包 exe",
 #    源码字符串一个字都搜不到（实测连 v0.0.1 就有的「西班牙语」「赞助」也是 0 命中，
 #    拿它当判据会得出「功能没打包进去」的假结论）。必须先解包再搜。
 unpacked = WORK / f"{exe.name}_extracted"
-xtractor = next((p for p in [
-    Path(os.environ.get("LOCALAPPDATA", "")) / "Temp/qrvenv/Scripts/pyinstxtractor-ng.exe",
-] if p.exists()), None)
+# 发现顺序：PATH → 本仓库 venv → 旧的一次性环境（历史路径，留着兜底）。
+# 以前只写死最后一条，工具一旦不装在那个临时环境里，就永远「跳过=未验证」。
+_cands = [
+    shutil.which("pyinstxtractor-ng"),
+    shutil.which("pyinstxtractor-ng.exe"),
+    str(ROOT / ".venv" / "Scripts" / "pyinstxtractor-ng.exe"),
+    str(Path(os.environ.get("LOCALAPPDATA", "")) / "Temp/qrvenv/Scripts/pyinstxtractor-ng.exe"),
+]
+xtractor = next((Path(p) for p in _cands if p and Path(p).exists()), None)
 if xtractor is None:
-    check("exe 内含新增的「俄语」选项", False, "找不到 pyinstxtractor-ng，无法解包核对（跳过=未验证）")
+    # 缺工具 = **未验证**，不是发布缺陷 —— 别记成 ❌（那会让整轮复核看着像产物坏了）。
+    print("  ⚠️ 跳过「exe 内含新增符号」核对：找不到 pyinstxtractor-ng")
+    print("     装它：python -m pip install pyinstxtractor-ng")
+    for _nd in NEEDLES:
+        skipped.append(f"exe 内含「{_nd}」（缺 pyinstxtractor-ng，本轮未验证）")
 else:
     # ⚠️ 这个工具**没有** -o 选项（只有 filename / -d / -i），传 -o 会被它忽略参数直接失败；
     #    而且它按 **cwd** 落产物（`<exe名>_extracted/`），必须用 cwd= 指定目录，
@@ -196,6 +231,31 @@ class BITMAPINFOHEADER(ctypes.Structure):
                 ("biClrImportant", wintypes.DWORD)]
 
 
+# ⚠️ 句柄类参数**必须**声明原型：Windows 64 位下 HICON / HDC / HBITMAP / HGDIOBJ 是指针，
+#    不声明时 ctypes 按 32 位 C int 传 → `ctypes.ArgumentError: argument 4: OverflowError:
+#    int too long to convert`（实测就在 DrawIconEx 上炸；HICON 的实际值形如 18446744071929928539）。
+#    同类坑：GetCurrentThread() 的伪句柄 -2 也会因此被截断，只是那次表现为「静默无效」。
+user32.GetDC.restype = wintypes.HDC
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.DrawIconEx.restype = wintypes.BOOL
+user32.DrawIconEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.HICON,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.HICON,
+                              wintypes.UINT]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.GetDIBits.restype = ctypes.c_int
+gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                            ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+
+
 def hicon_to_rgba(hicon, size: int) -> Image.Image:
     hdc_screen = user32.GetDC(0)
     hdc = gdi32.CreateCompatibleDC(hdc_screen)
@@ -206,7 +266,7 @@ def hicon_to_rgba(hicon, size: int) -> Image.Image:
     bi.biSize, bi.biWidth, bi.biHeight = ctypes.sizeof(bi), size, -size
     bi.biPlanes, bi.biBitCount, bi.biCompression = 1, 32, 0
     buf = ctypes.create_string_buffer(size * size * 4)
-    gdi32.GetDIBits(hdc, bmp, 0, size, buf, ctypes.byref(bi), 0)
+    gdi32.GetDIBits(hdc, bmp, 0, size, ctypes.byref(buf), ctypes.byref(bi), 0)
     gdi32.SelectObject(hdc, old)
     gdi32.DeleteObject(bmp)
     gdi32.DeleteDC(hdc)
@@ -263,7 +323,10 @@ else:
           f"重试 {icon_tries} 次仍取不到图标（got={icon_got}；exe={exe_native}）")
 
 print("\n" + "=" * 64)
-print(f"通过 {len(ok)} 项，失败 {len(bad)} 项")
+print(f"通过 {len(ok)} 项，失败 {len(bad)} 项"
+      + (f"，跳过 {len(skipped)} 项（未验证，不算失败）" if skipped else ""))
+for _sk in skipped:
+    print(f"  ⚠️ 跳过：{_sk}")
 for b in bad:
     print("  ❌", b)
 print("下载目录保留在：", WORK)
