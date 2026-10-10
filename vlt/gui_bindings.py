@@ -1,5 +1,5 @@
 """GUI 薄殼的既有委派表。"""
-from . import gui_settings, gui_update, gui_layout
+from . import gui_settings, gui_update, gui_layout, gui_proxy_hint
 _DELEGATE_MAP = {
     "_build_settings_dialog": gui_settings.build_settings_dialog,
     "_sync_settings_pages": gui_settings.sync_settings_pages,
@@ -33,6 +33,8 @@ _DELEGATE_MAP = {
     "_on_update_check_result": gui_update.on_update_check_result,
     "_show_update_dialog": gui_update.show_update_dialog,
     "_close_update_dialog": gui_update.close_update_dialog,
+    "_maybe_show_proxy_hint": gui_proxy_hint.maybe_show,
+    "_close_proxy_hint": gui_proxy_hint.close,
     "_open_release_page": gui_update.open_release_page,
     "_on_update_ignore": gui_update.on_update_ignore,
     "_on_update_later": gui_update.on_update_later,
