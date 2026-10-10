@@ -377,6 +377,11 @@ from then on you switch from the main window:
 - **The "Voice Output" checkbox is still the master switch for the translation leg**: when it's
   unchecked the translation never reaches the mic, and clicking "Translated" then warns you that
   "the Translated position will be silent".
+- **A one-time notice the first time it really starts**: the app shows a one-off notice the first
+  time the proxy actually runs — it **keeps the virtual sound card's output stream open**; if your
+  default playback device is that same card you will hear yourself (an echo), and if you don't need it,
+  untick it in `Settings → Mic Proxy` (the card is released immediately). Once shown it is recorded in
+  the config and never shown again.
 - **Turning "Mic Proxy" off** = back to the old behavior: the virtual sound card follows translation
   start/stop, and there's no one-click switching in the main window.
 
@@ -397,6 +402,7 @@ output:
     proxy:
       enabled: true              # master switch for Mic Proxy
       passthrough_buffer_ms: 150 # Passthrough buffer (ms), minimum 60
+      hint_shown: false          # whether the first-enable notice was shown (kept by the app)
 ```
 
 What you see if the virtual sound card can't be installed / opened: that button is **greyed out and
