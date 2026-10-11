@@ -1,42 +1,23 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.10.0 "MicProxy,toggle_voice_mode,chatbox_text,passthrough_buffer_ms,意大利语"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.0 "D3D11Texture,win_d3d11,LevelMatcher,follow_mic,format_db"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.10.0）**：本版四处改动各取一个**新增符号名**做 needle
+⚠️ **功能型发布（v0.11.0）**：本版两处主要改动各取**新增符号名**做 needle
 （符号名比文案可靠：文案会被改，符号进 pyc 必留）——
-  ① 麦克风代理（原声 / 译音一键切）：`MicProxy`（新模块 `vlt/output/micproxy.py`，
-     接线在 `gui_engine.py` / `gui_voice.py` / `vlt/platform/{win,linux}.py`）；
-  ② 主界面那颗「原声 / 译音」按钮：`toggle_voice_mode`（`vlt/gui_voice.py` + `gui_layout.py`）；
-  ③ chatbox 气泡可切原文 / 译文：`chatbox_text`（配置键 + `vlt/engine.py` 里的分支）；
-  ④ 两个缓冲可调：`passthrough_buffer_ms`（`vlt/config.py` + `vlt/gui_settings.py`）；
-  ⑤ 界面对话语言清单新增意大利语：`意大利语`（`vlt/ui_text.py` + 四套词表）。
-这五个符号在 **v0.9.0 的代码里都不存在**（上面已逐一用 `git grep <符号> v0.9.0 -- vlt/` 核对），
+  ① 手腕屏上传路换 API（持久 D3D11 贴图 + `SetOverlayTexture`）：`D3D11Texture` / `win_d3d11`
+     （新模块 `vlt/output/win_d3d11.py`，被 `vlt/output/openvr_overlay.py` 使用）；
+  ② 译音音量匹配（跟随麦克风）：`LevelMatcher`（新模块 `vlt/output/level_match.py`）、
+     `follow_mic`（模式值，进配置与分支）、`format_db`（新的 dB 格式化函数）。
+这五个符号在 **v0.10.0 的代码里都不存在**（已用 `git grep <符号> v0.10.0 -- vlt/` 逐一核对），
 所以命中即证明新代码真进了产物。
 
-⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（桌面字幕 tick、设置页滑块落盘、
-交换链 sRGB 格式、Linux 麦克风采集），这类改动没有新增字符串可搜 ——
+⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（chatbox 即时生效、单按钮开关尺寸、
+麦克风下拉、`<Destroy>` 过滤、TTS 连接复用、Linux 采集钉死目标），这类改动没有新增字符串可搜 ——
 它们的证据是真机行为与本次改动清单，不是 needle。
 
-复核项：
-  1. 附件下载（只认 exe）
-  2. sha256 实测 vs **GitHub 服务端算的 asset digest**（独立于我们 CI 的那一份）
-  3. 真跑一次 `--self-test`（退出码 + GUI_SELFTEST_OK）
-  4. 启动日志里的版本行 = 本次 tag（且标明「打包 exe」）
-  5. exe 里确实含本版新增的字符串（新功能真在产物里，不是只进了仓库）
-  6. exe 图标资源 vs assets/app.ico（32/16 档像素比对；取图标句柄带重试，见该段注释）
-
-⚠️ **范围：本脚本只复核 Windows 的 exe**（要用 Win32 能力跑 `--self-test` / 取图标）。
-   Linux 的 AppImage 不在下载复核之列 —— 它在**构建期**就由 `.github/workflows/appimage.yml`
-   调 `scripts/verify_appimage.py` 独立验收（平台纯度 + 包内导入 + 离线渲染 + Tk 字体），
-   那条链路与这里互补，不是遗漏。
-
-⚠️ 复核以 **GitHub 服务端算的 asset digest** 为准，不看我们自己传的 `SHA256SUMS.txt`：
-前者是对收到的字节算的，才是能证明「发布出去的确实是我们构建的那个」的独立凭据。
-（`SHA256SUMS.txt` 仍会随 Release 一起传，但只为兼容 **v0.2.0 及更早**的客户端 ——
-它们的更新检查把「exe + SHA256SUMS.txt 两个附件」写死了，缺一个就静默查不到更新。）
 """
 from __future__ import annotations
 

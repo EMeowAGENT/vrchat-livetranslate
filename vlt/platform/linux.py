@@ -611,7 +611,7 @@ def _test_process_guard(action: str = "真的声明虚拟声卡") -> str | None:
     （`E.pick_output_device` / `E.VirtualMic`），于是 Linux 分支绕过打桩、
     真的拉起了 `pw-loopback`，动到了用户的音频图。
     正确修法是测试两侧都桩（见 `tests/test_virtualmic.py` 的 `_stub_audio_out`），
-    这里只是**最后一道保险**：万一又漏了，宁可这条腿不启用，也不能动用户的音频。
+    这里只是**最后一道保险**：万一又漏了，宁可该功能不启用，也不能动用户的音频。
 
     正常使用（`python -m vlt.gui` / `-m vlt.app`）永远不会命中这个判断。
 
@@ -654,7 +654,7 @@ class VirtualMicCable:
             return True
         blocked = _test_process_guard()
         if blocked:
-            log.warning("[vmic] %s（这条腿不启用；测试必须两侧都打桩）", blocked)
+            log.warning("[vmic] %s（该功能不启用；测试必须两侧都打桩）", blocked)
             return False
         try:
             self._proc = subprocess.Popen(

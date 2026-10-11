@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 from vlt import version as V  # noqa: E402
 from vlt.version import BuildMeta, parse_describe  # noqa: E402
 
-BASE = "0.10.0"
+BASE = "0.10.0"          # 纯夹具基准（parse 用例的输入）；与真实 __version__ 无关
 
 
 def test_official_shapes() -> None:
@@ -99,14 +99,15 @@ def test_baked_buildinfo_is_read() -> None:
             json.dumps({"describe": "v0.10.0-5-gabc1234"}), encoding="utf-8")
         V.BUNDLE_DIR = tmp
         V.build_meta.cache_clear()
-        assert V.display_version() == "0.10.0+5.gabc1234", V.display_version()
+        # 期望串从 __version__ 派生（原写死版本号 → 每次发版必红；本文件 71 行的契约也是「底用 __version__」）
+        assert V.display_version() == f"{V.__version__}+5.gabc1234", V.display_version()
         assert not V.is_official()
 
         # 正式构建：正好在 tag → 干净版本号
         (tmp / V.BUILDINFO_NAME).write_text(
             json.dumps({"describe": "v0.10.0-0-gabc1234"}), encoding="utf-8")
         V.build_meta.cache_clear()
-        assert V.display_version() == "0.10.0", V.display_version()
+        assert V.display_version() == V.__version__, V.display_version()
         assert V.is_official()
 
         # 烘焙为 null（构建时拿不到 git）→ unknown，且**权威、不回退去问 git**：
@@ -118,7 +119,7 @@ def test_baked_buildinfo_is_read() -> None:
         V._git_describe = lambda: (_ for _ in ()).throw(
             AssertionError("describe=null 时不应回退去问 git"))
         try:
-            assert V.display_version() == "0.10.0+unknown", V.display_version()
+            assert V.display_version() == f"{V.__version__}+unknown", V.display_version()
         finally:
             V._git_describe = saved_git
     finally:
@@ -149,13 +150,13 @@ def test_env_override_skips_git() -> None:
         # ① VLT_VERSION_DESCRIBE 直接当 describe
         os.environ[V._ENV_DESCRIBE] = "v0.10.0-3-gdeadbee"
         V.build_meta.cache_clear()
-        assert V.display_version() == "0.10.0+3.gdeadbee", V.display_version()
+        assert V.display_version() == f"{V.__version__}+3.gdeadbee", V.display_version()
 
         # ② VLT_VERSION_NO_GIT=1 且无 describe → unknown（权威、不问 git）
         os.environ.pop(V._ENV_DESCRIBE, None)
         os.environ[V._ENV_NO_GIT] = "1"
         V.build_meta.cache_clear()
-        assert V.display_version() == "0.10.0+unknown", V.display_version()
+        assert V.display_version() == f"{V.__version__}+unknown", V.display_version()
     finally:
         V._git_describe = saved_git
         V.BUNDLE_DIR = saved_dir

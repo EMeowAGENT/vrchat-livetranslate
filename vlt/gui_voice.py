@@ -225,7 +225,7 @@ def glossary_hint_text(ctx: VoiceCtx, scope: str) -> str:
         return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
                  "作用于两个方向 —— 两个方向都要同一个译名时才放这里")
     return t("每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；"
-             "只对「{dir}」这条腿生效，同名词条会覆盖全局",
+             "只对「{dir}」这条通路生效，同名词条会覆盖全局",
              dir=glossary_scope_label(ctx, scope))
 
 

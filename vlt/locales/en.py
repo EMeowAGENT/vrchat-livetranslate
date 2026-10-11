@@ -203,7 +203,7 @@ STRINGS: dict[str, str] = {
     "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；作用于两个方向 —— 两个方向都要同一个译名时才放这里":
         "One per line as source=target (club names, player names, jargon); applies to BOTH "
         "directions — only put entries here when both directions want the same name",
-    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条腿生效，同名词条会覆盖全局":
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条通路生效，同名词条会覆盖全局":
         "One per line as source=target (club names, player names, jargon); only affects the "
         "\"{dir}\" leg, and entries here override the global table",
     "保存词库": "Save Glossary",
@@ -446,8 +446,8 @@ STRINGS: dict[str, str] = {
     # ---- 麦克风代理（原声/译音一键切换）----
     # 运行期状态（经 `gui._on_proxy_status`：日志打中文原文、状态栏查这里的词条）。
     # key = 代理发出的中文模板（与 vlt/output/micproxy*.py 逐字一致，含 {占位符}）。
-    "检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）":
-        "Test process detected ({name}) → refusing to {action} (this leg stays off)",
+    "检测到测试进程（{name}）→ 拒绝{action}（该功能不启用）":
+        "Test process detected ({name}) → refusing to {action} (this path stays off)",
     "未找到输出设备 {dev}，回退到回退链":
         "Output device {dev} not found — falling back to the fallback chain",
     "枚举输出设备失败：{err}（其余功能不受影响）":

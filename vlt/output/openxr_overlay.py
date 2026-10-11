@@ -1346,7 +1346,7 @@ class OpenXrOverlay:
             return False
         blocked = _test_process_guard()
         if blocked:
-            log.warning("[overlay:xr] %s（这条腿不启用；测试不该碰用户的运行时）", blocked)
+            log.warning("[overlay:xr] %s（该功能不启用；测试不该碰用户的运行时）", blocked)
             return False
         # ★ 整条 XR/GL 生命线必须在**同一个线程**里：`eglMakeCurrent` 把 context 绑在
         #   调用它的线程上，换个线程再 glTexImage2D / xrWaitFrame 就是错的 —— 实测表现

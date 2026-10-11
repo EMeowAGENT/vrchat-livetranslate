@@ -376,7 +376,7 @@ class MicProxy:
         blocked = _test_process_guard()
         if blocked:
             self._on_status("warn",
-                            "[proxy] 检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）",
+                            "[proxy] 检测到测试进程（{name}）→ 拒绝{action}（该功能不启用）",
                             **blocked)
             return False
         dev = self._pick_output_device()
