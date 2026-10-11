@@ -547,6 +547,12 @@ class Engine:
         # True = _virtualmic 是引擎自建的（停翻译时要 close）；False = 外部注入的共享 sink
         # （归代理管，引擎不碰它的生命周期）。
         self._owns_virtualmic = False
+        # 译音输出腿（_virtualmic / _audio_sink / _owns_virtualmic）的互斥锁。运行期重接线
+        # （rebind_audio_sink，界面线程调）与音频泵 / 事件循环线程读 `_virtualmic` 的
+        # `_emit_translated` / `_end_sentence` 必须互斥，否则会 push 到刚被 close 的旧
+        # VirtualMic、或在 `_virtualmic` 被短暂置 None 时抛 AttributeError。用 **RLock**：
+        # rebind 持锁时还要调 `_setup_virtualmic`（它自己也进这把锁）。
+        self._sink_lock = threading.RLock()
         # 流式合成**串行**锁：同一时刻只让一路往虚拟声卡写分片（并发写会让分片交错，
         # 听感是「整段反复重念」—— 连打两条也会）。懒建：首次用时在事件循环线程里创建。
         self._speak_lock_obj: asyncio.Lock | None = None
@@ -688,19 +694,158 @@ class Engine:
         """
         audio_cfg = (self._cfg.output or {}).get("audio") or {}
         cfg = LevelConfig.from_dict(audio_cfg.get("level") or {})
-        sink = self._audio_sink
 
+        # 麦克风参考必须是**活引用**：每次都读当前 `self._audio_sink`。以前这里捕获构造时的
+        # `sink` 局部变量（冻结闭包）—— 中途把输出腿重接线到代理的 TranslatedSink 后，
+        # `mic_db()` 仍读老对象，`follow_mic` 于是静默降级成固定增益（issue #90）。换 sink 由
+        # `rebind_audio_sink` 负责，本闭包只管「读现在这个」；`_audio_sink` 为 None 时
+        # `getattr(None, ...)` 返回 None，与旧的 `mic_db=None` 行为等价（follow_mic 如实回落）。
         def _mic_db() -> float | None:
-            return getattr(sink, "mic_reference_db", None)
+            return getattr(self._audio_sink, "mic_reference_db", None)
 
-        return LevelMatcher(cfg, mic_db=(_mic_db if sink is not None else None))
+        return LevelMatcher(cfg, mic_db=_mic_db)
 
     def _emit_translated(self, stereo_48k: bytes) -> None:
-        """译音 PCM 的**唯一出口**：音量匹配在这里施加（无匹配器 → 原样）。"""
-        if self._virtualmic is None:
-            return
-        self._virtualmic.push(self._level.apply(stereo_48k) if self._level is not None
-                              else stereo_48k)
+        """译音 PCM 的**唯一出口**：音量匹配在这里施加（无匹配器 → 原样）。
+
+        读 `_virtualmic` 与 push 全程持 `_sink_lock`：`rebind_audio_sink` 会在别的线程
+        （界面）把输出腿整条换掉，不互斥就可能 push 到刚被 close 的旧 VirtualMic，或在
+        `_virtualmic` 被短暂置 None 时抛 AttributeError。`_level.apply` 也在锁内，保持
+        「输出腿为空就不施加增益」的既有语义（锁序恒为 _sink_lock → LevelMatcher._lock）。
+
+        ⚠️ 锁是**无条件**的，与 `_end_sentence` 对称 —— 这里以前用 `getattr(self, "_sink_lock",
+        None)` + `nullcontext()` 兜底，唯一目的是迁就 `tests/test_proxy_wiring.py` 的 `_Holder`
+        （借真方法、不造 Engine）。代价是：属性将来缺失 / 改名 → **锁静默失效**而不是报错。
+        现在替身自己带一把 `_sink_lock`，生产侧不留这个后门。
+        """
+        with self._sink_lock:
+            vm = self._virtualmic
+            if vm is None:
+                return
+            vm.push(self._level.apply(stereo_48k) if self._level is not None
+                    else stereo_48k)
+
+    def _end_sentence(self) -> None:
+        """给当前输出腿打句尾标记（与 rebind 互斥；输出腿为空则跳过，绝不抛）。"""
+        with self._sink_lock:
+            vm = self._virtualmic
+            if vm is not None:
+                vm.end_sentence()
+
+    def _audio_out_wanted(self) -> bool:
+        """本引擎这条腿**该不该有**译音输出腿 —— 与 `_build_and_run` 建腿是**同一个门**。
+
+        判据两条都要成立：`output.audio.enabled`（界面「译音输出」勾选框；`audio_out`
+        覆盖优先，CLI 用）与本方向的 `Direction.output_audio`（只有「我说的话」那条腿
+        才为真，见 `gui_engine.start`）。
+
+        为什么 `rebind_audio_sink` 必须复用它：重接线是运行期从界面线程打进来的，绕过
+        这个门就会给**本来不该有输出腿**的引擎（`theirs`，或没勾「译音输出」的 `mine`）
+        凭空建一条；更糟的是关代理时 `rebind(None)` 会真去 open 引擎自建虚拟声卡并占住
+        端点，之后用户再开代理可能因设备被自己占着而失败（review #2）。
+        """
+        audio_cfg = (self._cfg.output or {}).get("audio") or {}
+        enabled = (self._audio_out_override if self._audio_out_override is not None
+                   else audio_cfg.get("enabled", False))
+        d = self._cfg.directions.get(self._direction)
+        return bool(enabled) and d is not None and bool(d.output_audio)
+
+    def rebind_audio_sink(self, sink: "object | None") -> bool:
+        """运行期把「译音输出腿」整条换掉（翻译进行中开 / 关麦克风代理时用），不必重开翻译。
+
+        为什么不能只把参考接线改活（issue #90 里写明）：只改参考会让「引擎自建的 VirtualMic」
+        与「新起的代理」**同时占同一条虚拟声卡端点**（两个 owner，代理的 translated 腿没人喂）。
+        真正的修法是把在跑引擎的输出腿整条换掉：
+
+        * **切到代理 sink**（`sink` 非 None，开代理）：先关掉引擎**自建**的 VirtualMic
+          （`_owns_virtualmic` 为真才 close；注入的 sink 归代理管，**绝不** close）→
+          `_audio_sink = sink` → `_setup_virtualmic()` 走注入分支（`_owns_virtualmic=False`）。
+        * **切回 None**（关代理）：断开注入的 sink（不 close 它）→ `_audio_sink = None` →
+          `_setup_virtualmic()` 重新**自建** VirtualMic（`_owns_virtualmic=True`）。
+        * 麦克风电平参考（`follow_mic`）是**活引用**（见 `_build_level_matcher`），换 sink 后
+          `LevelMatcher.mic_db()` 立刻读到新 sink 的 `mic_reference_db`；这里同步刷新
+          `_level_has_mic_ref` 并清 `_level_fallback_logged`（换接线后允许再留一次痕）。
+        * **本方向压根不需要译音输出腿**（没勾「译音输出」/ 方向不含「我说」，判据见
+          `_audio_out_wanted`）→ 只记下接线，**绝不**建腿或 open 任何设备。
+
+        **不变量**：切换后同一端点只有一个 owner（自建与注入不同时活着）；`_owns_virtualmic`
+        与实际 close 的对象一致；引擎停止时永远不 close 注入的 sink（见 `_cleanup`）；
+        不该有输出腿的引擎重接线后 `_virtualmic` 仍为 None。
+
+        线程安全：整个切换在 `_sink_lock` 临界区里完成，与音频泵 / 事件循环线程读 `_virtualmic`
+        的 `_emit_translated` / `_end_sentence` 互斥。
+
+        **返回值语义**（签名恒为 bool，别改）：
+
+        * ``True`` = 接线**可用** —— 含四种情况：已实时切换 / 本就指向同一 sink（无需切换）/
+          引擎未运行只记下接线 / 本方向不需要输出腿（跳过）。
+        * ``False`` = 切换后译音输出腿**不可用**（自建 VirtualMic 打不开）→ 本轮译音不出声。
+
+        每种情况都逐分支留痕（跳过一行 / 成功一行 / 失败 WARN，禁静默降级）。
+        """
+        with self._sink_lock:
+            # 无变化：已经指向同一 sink（含都为 None）→ 跳过，不做无谓的 close/reopen。
+            if sink is self._audio_sink:
+                print("[engine] 译音输出接线未变化（sink="
+                      f"{'代理' if sink is not None else 'None'}）→ 跳过重接线", flush=True)
+                return True
+
+            # 本方向不需要译音输出腿 → 只记接线，**绝不**建腿或 open 设备（review #2）。
+            # 与 `_build_and_run` 建腿同一个门（`_audio_out_wanted`）：绕过它就会给 `theirs`
+            # 或没勾「译音输出」的 `mine` 凭空多出一条腿，关代理时还会真去占住虚拟声卡端点。
+            if not self._audio_out_wanted():
+                self._audio_sink = sink
+                self._level_has_mic_ref = (sink is not None
+                                           and hasattr(sink, "mic_reference_db"))
+                self._level_fallback_logged = False
+                print("[engine] 本方向不需要译音输出（未勾「译音输出」或方向不含「我说」）→ "
+                      "跳过重接线：只记下接线，不建输出腿、不开任何设备", flush=True)
+                return True
+
+            # 没在跑、也没有在用的输出腿：只把接线记下来，下次「开始翻译」自会照它建。
+            # **绝不**在这里凭空 open 设备（那会在没翻译时就占住虚拟声卡）。
+            if self._virtualmic is None and not self.running:
+                self._audio_sink = sink
+                self._level_has_mic_ref = (sink is not None
+                                           and hasattr(sink, "mic_reference_db"))
+                self._level_fallback_logged = False
+                print("[engine] 引擎未运行 → 记下新的译音输出接线，下次「开始翻译」生效"
+                      "（跳过实时重接线）", flush=True)
+                return True
+
+            # 有活的输出腿（或引擎在跑）→ 做实时切换。
+            old = self._virtualmic
+            old_owned = self._owns_virtualmic
+            # 1) 断开当前输出腿：只 close 引擎**自建**的（注入的 sink 归代理管，绝不 close）。
+            self._virtualmic = None
+            self._owns_virtualmic = False
+            if old is not None and old_owned:
+                try:
+                    old.close()
+                except Exception as exc:                        # noqa: BLE001
+                    print(f"[virtualmic] ⚠️ 重接线时关闭自建虚拟声卡出错（继续换腿）："
+                          f"{type(exc).__name__}: {exc}", flush=True)
+            # 2) 换 sink 引用（活参考随后就读它）。
+            self._audio_sink = sink
+            # 3) 重建输出腿：注入 sink → 直接用它；None → 引擎自建 VirtualMic。
+            audio_cfg = (self._cfg.output or {}).get("audio") or {}
+            self._setup_virtualmic(audio_cfg)
+            # 4) 参考接线跟着换（活引用已读 _audio_sink；这里同步留痕开关）。
+            self._level_has_mic_ref = (sink is not None
+                                       and hasattr(sink, "mic_reference_db"))
+            self._level_fallback_logged = False
+            # 5) 逐分支留痕。
+            if self._virtualmic is None:
+                print("[engine] ⚠️ 重接线后译音输出不可用（自建虚拟声卡打不开？）→ "
+                      "本轮译音不出声；检查「译音输出」设备后重新点「开始翻译」", flush=True)
+                return False
+            owner = ("引擎自建 VirtualMic" if self._owns_virtualmic
+                     else "注入 sink（麦克风代理的 TranslatedSink）")
+            ref = "已接" if self._level_has_mic_ref else "未接"
+            print(f"[engine] 译音输出已重接线 → {owner}；麦克风电平参考{ref}"
+                  f"（follow_mic {'可用' if self._level_has_mic_ref else '回落固定增益'}）",
+                  flush=True)
+            return True
 
     def _note_level_sentence_end(self) -> None:
         """一句译音说完：重算音量匹配增益，并按「变化 ≥ 0.5 dB」去重留痕。"""
@@ -952,10 +1097,13 @@ class Engine:
         except Exception:
             pass
         try:
-            if self._virtualmic is not None and self._owns_virtualmic:
-                self._virtualmic.close()
-            self._virtualmic = None
-            self._owns_virtualmic = False
+            # 与 rebind 互斥：收尾时另一线程可能正在把输出腿整条换掉（开 / 关代理）。
+            # 不变量照旧 —— 只有**自建**的（_owns_virtualmic）才 close，注入的 sink 归代理管。
+            with self._sink_lock:
+                if self._virtualmic is not None and self._owns_virtualmic:
+                    self._virtualmic.close()
+                self._virtualmic = None
+                self._owns_virtualmic = False
         except Exception:
             pass
         try:
@@ -1042,9 +1190,9 @@ class Engine:
                       f"{type(exc).__name__}: {exc}", flush=True)
 
         audio_cfg = (self._cfg.output or {}).get("audio") or {}
-        audio_enabled = self._audio_out_override if self._audio_out_override is not None else audio_cfg.get("enabled", False)
-        d = self._cfg.directions.get(self._direction)
-        if audio_enabled and d is not None and d.output_audio:
+        # 建腿的门**只有一处口径**：`_audio_out_wanted()`（`rebind_audio_sink` 复用它，
+        # 否则运行期重接线会给不该有输出腿的方向凭空建一条）。
+        if self._audio_out_wanted():
             self._setup_virtualmic(audio_cfg)
 
         merger_cfg = self._cfg.merger or {}
@@ -1079,25 +1227,30 @@ class Engine:
         若外部注入了 `audio_sink`（麦克风代理的 TranslatedSink）→ 直接用它，
         **不自建 VirtualMic、不 pick 设备**：译音灌进代理那条常驻输出流，
         由代理的档位开关决定此刻放原声还是译音。
+
+        全程持 `_sink_lock`（RLock）：本函数会写 `_virtualmic` / `_owns_virtualmic`，
+        必须与音频泵 / 事件循环线程读 `_virtualmic` 的 `_emit_translated` / `_end_sentence`
+        互斥；`rebind_audio_sink` 也持这把锁调进来（可重入，故安全）。
         """
-        if self._audio_sink is not None:
-            self._virtualmic = self._audio_sink
-            self._owns_virtualmic = False
-            return
-        vm = self._make_audio_out(audio_cfg)
-        if vm is None:
-            return
-        self._virtualmic = vm
-        self._owns_virtualmic = True
-        if not vm.open():
-            self._virtualmic = None
-            self._owns_virtualmic = False
-            print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{vm.device_name}",
-                  flush=True)
-        # 打开成功不用再打印：open() 自己会报（Windows 经 on_status → 日志 + 状态栏）。
-        # 这里以前多打了一行，还误用了不存在的属性 `sample_rate`（真实叫 `_sample_rate`），
-        # 结果设备打开成功后那行日志直接抛 AttributeError，把整条翻译腿打死了 ——
-        # 用户机器上有 VoiceMeeter 才会走到这条分支，我本机没虚拟声卡，本地测试全绿。
+        with self._sink_lock:
+            if self._audio_sink is not None:
+                self._virtualmic = self._audio_sink
+                self._owns_virtualmic = False
+                return
+            vm = self._make_audio_out(audio_cfg)
+            if vm is None:
+                return
+            self._virtualmic = vm
+            self._owns_virtualmic = True
+            if not vm.open():
+                self._virtualmic = None
+                self._owns_virtualmic = False
+                print(f"[virtualmic] 打开失败 → 译音输出已禁用（其余功能不受影响）：{vm.device_name}",
+                      flush=True)
+            # 打开成功不用再打印：open() 自己会报（Windows 经 on_status → 日志 + 状态栏）。
+            # 这里以前多打了一行，还误用了不存在的属性 `sample_rate`（真实叫 `_sample_rate`），
+            # 结果设备打开成功后那行日志直接抛 AttributeError，把整条翻译腿打死了 ——
+            # 用户机器上有 VoiceMeeter 才会走到这条分支，我本机没虚拟声卡，本地测试全绿。
 
     def _make_audio_out(self, audio_cfg: dict):
         """造出译音输出对象（**不打开**）。返回 None = 这条腿不可用。
@@ -1344,7 +1497,7 @@ class Engine:
         now = time.monotonic()
         if self._pending_seal or (self._last_audio_ts
                                   and now - self._last_audio_ts >= SENTENCE_GAP_S):
-            self._virtualmic.end_sentence()
+            self._end_sentence()
             # 上一句到此为止 → 用它的实测重算增益；紧接着 push 的那块就是「新句第一块」，
             # 会吃到 20ms 线性斜坡（见 level_match.LevelMatcher.apply）。
             self._note_level_sentence_end()
@@ -1439,7 +1592,7 @@ class Engine:
                 else:
                     pcm24 = await asyncio.to_thread(synthesize, translated, **kw)
                     self._emit_translated(resample_24k_mono_to_48k_stereo(pcm24))
-                    self._virtualmic.end_sentence()
+                    self._end_sentence()
                     self._note_level_sentence_end()
                     spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
@@ -1491,7 +1644,7 @@ class Engine:
         except TtsStreamTruncated:
             truncated = True
         finally:
-            self._virtualmic.end_sentence()
+            self._end_sentence()
             # 放在 finally 里：断流 / 抛异常时也必须重算并清空本句累积，
             # 否则这半句的电平会漏进下一句，把增益算歪。
             self._note_level_sentence_end()
