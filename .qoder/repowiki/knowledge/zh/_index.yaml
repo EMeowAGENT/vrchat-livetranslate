@@ -3,7 +3,7 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-10-06T06:56:13Z"
+exported_at: "2026-10-11T05:55:27Z"
 modules:
     "":
         dir_name: VRChat 实时同传项目根
@@ -13,63 +13,63 @@ modules:
             - .gitignore
             - .gitattributes
             - requirements.txt
+            - requirements-dev.txt
+            - requirements-linux.txt
+            - requirements-windows.txt
+            - ruff.toml
             - config.example.yaml
-            - run_gui.py
-            - run_chatbox.bat
-            - run_overlay.bat
-            - run_selfcheck.bat
-            - build_exe.bat
-            - install_secret_guard.bat
-            - setup.bat
-            - LICENSE
-            - run_gui.bat
+            - docs/
         source_files: []
         children:
-            - docs
+            - github_ci
             - scripts
+            - server
             - tests
             - vlt_app
         depends_on: []
         related_to: []
-    docs:
-        dir_name: 项目文档与多语言指南
-        title: 项目文档与多语言指南
+    github_ci:
+        dir_name: GitHub Actions CI_CD 与 Issue 模板
+        title: GitHub Actions CI/CD 与 Issue 模板
         scope:
-            - docs/
+            - .github/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: scripts
+        related_to: []
     scripts:
-        dir_name: 构建、发布与诊断辅助脚本集
-        title: 构建、发布与诊断辅助脚本集
+        dir_name: scripts
+        title: scripts
         scope:
             - scripts/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: docs
-            - path: vlt_app
+        related_to: []
+    server:
+        dir_name: VRChat 同传房间 WebSocket 中继服务
+        title: VRChat 同传房间 WebSocket 中继服务
+        scope:
+            - server/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
     tests:
-        dir_name: VRChat Live Translate 测试套件
-        title: VRChat Live Translate 测试套件
+        dir_name: tests
+        title: tests
         scope:
             - tests/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: vlt_app
+        related_to: []
     vlt_app:
-        dir_name: VRChat 实时同传核心引擎与 GUI
-        title: VRChat 实时同传核心引擎与 GUI
+        dir_name: vlt_app
+        title: vlt_app
         scope:
             - vlt/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: scripts
-            - path: tests
+        related_to: []

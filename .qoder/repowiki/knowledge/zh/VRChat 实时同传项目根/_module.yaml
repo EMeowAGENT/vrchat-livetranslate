@@ -6,16 +6,12 @@ scope:
     - .gitignore
     - .gitattributes
     - requirements.txt
+    - requirements-dev.txt
+    - requirements-linux.txt
+    - requirements-windows.txt
+    - ruff.toml
     - config.example.yaml
-    - run_gui.py
-    - run_chatbox.bat
-    - run_overlay.bat
-    - run_selfcheck.bat
-    - build_exe.bat
-    - install_secret_guard.bat
-    - setup.bat
-    - LICENSE
-    - run_gui.bat
+    - docs/
 source_files: []
 depends_on: []
 related_to: []

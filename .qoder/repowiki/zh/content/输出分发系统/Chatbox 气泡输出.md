@@ -3,11 +3,21 @@
 <cite>
 **本文引用的文件**   
 - [vlt/output/chatbox.py](file://vlt/output/chatbox.py)
+- [vlt/engine.py](file://vlt/engine.py)
+- [vlt/gui_engine.py](file://vlt/gui_engine.py)
+- [tests/test_chatbox_direction.py](file://tests/test_chatbox_direction.py)
 - [scripts/osc_listen.py](file://scripts/osc_listen.py)
 - [config.example.yaml](file://config.example.yaml)
 - [README.md](file://README.md)
 - [docs/P1-实测结果.md](file://docs/P1-实测结果.md)
 </cite>
+
+## 更新摘要
+**变更内容**   
+- 新增运行时实时启用/禁用 chatbox 气泡功能
+- 添加 `set_chatbox_enabled()` 方法支持动态开关
+- 实现线程安全的状态管理和优雅的状态切换
+- 增强错误处理和用户反馈机制
 
 ## 目录
 1. [引言](#引言)
@@ -22,43 +32,52 @@
 10. [附录：配置项速查](#附录配置项速查)
 
 ## 引言
-本文件聚焦 VRChat 实时同传项目中“我说 → chatbox 气泡”这条链路，系统性说明以下要点：
+本文件聚焦 VRChat 实时同传项目中"我说 → chatbox 气泡"这条链路，系统性说明以下要点：
 - VRChat OSC 协议通信机制，尤其是 `/chatbox/input` 端点的消息格式、参数类型与传输协议。
 - TokenBucket 限流算法的实现原理：窗口控制 + 最小间隔 + 漏桶语义。
 - 文本处理流程：字符限制（144）、行数限制（9）、空白折叠。
 - 增量文本与最终版本的处理策略：待发送队列管理与优先级控制。
+- **新增**：运行时实时启用/禁用 chatbox 气泡功能，支持动态开关而无需重启会话。
 - 配置选项：主机地址、端口、通知声音开关等。
 - 使用方式、错误处理与性能优化建议。
 
-该能力在 README 中被明确列为默认开启的“我说 → chatbox 气泡”路径，首条增量立即上屏，之后按节奏刷新快照，句末必发最终版。
+该能力在 README 中被明确列为默认开启的"我说 → chatbox 气泡"路径，首条增量立即上屏，之后按节奏刷新快照，句末必发最终版。
 
 **章节来源**
 - [README.md:28-36](file://README.md#L28-L36)
 
 ## 项目结构
-与 chatbox 气泡输出直接相关的代码位于 `vlt/output/chatbox.py`；OSC 报文验证脚本位于 `scripts/osc_listen.py`；相关配置集中在 `config.example.yaml` 的 `chatbox:` 段。
+与 chatbox 气泡输出直接相关的代码位于 `vlt/output/chatbox.py`；引擎集成逻辑位于 `vlt/engine.py`；GUI 交互逻辑位于 `vlt/gui_engine.py`；OSC 报文验证脚本位于 `scripts/osc_listen.py`；相关配置集中在 `config.example.yaml` 的 `chatbox:` 段。
 
 ```mermaid
 graph TB
 A["应用主流程<br/>音频/文本 → 会话 → 节流"] --> B["Chatbox 输出模块<br/>vlt/output/chatbox.py"]
 B --> C["OSC 客户端<br/>UDP 127.0.0.1:9000"]
 C --> D["VRChat OSC 接收器<br/>/chatbox/input"]
-E["OSC 监听脚本<br/>scripts/osc_listen.py"] --> C
+E["引擎集成层<br/>vlt/engine.py"] --> F["GUI 交互层<br/>vlt/gui_engine.py"]
+F --> G["运行时开关控制<br/>set_chatbox_enabled()"]
+H["OSC 监听脚本<br/>scripts/osc_listen.py"] --> C
 ```
 
 **图表来源**
 - [vlt/output/chatbox.py:1-137](file://vlt/output/chatbox.py#L1-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
+- [vlt/gui_engine.py:50-70](file://vlt/gui_engine.py#L50-L70)
 - [scripts/osc_listen.py:1-82](file://scripts/osc_listen.py#L1-L82)
 - [config.example.yaml:139-148](file://config.example.yaml#L139-L148)
 
 **章节来源**
 - [vlt/output/chatbox.py:1-137](file://vlt/output/chatbox.py#L1-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
+- [vlt/gui_engine.py:50-70](file://vlt/gui_engine.py#L50-L70)
 - [scripts/osc_listen.py:1-82](file://scripts/osc_listen.py#L1-L82)
 - [config.example.yaml:139-148](file://config.example.yaml#L139-L148)
 
 ## 核心组件
 - `TokenBucket`：实现窗口容量 + 最小间隔的限流器。
 - `Chatbox`：封装 OSC 报文构造、文本清洗、限流判断、发送与最终版补发队列。
+- `Engine.set_chatbox_enabled()`：**新增**运行时开关控制方法，支持动态启用/禁用气泡功能。
+- `gui_engine.push_chatbox_toggle()`：**新增** GUI 交互接口，处理用户界面操作。
 - `osc_listen.py`：本地 UDP 监听器，用于离线验证 OSC 报文格式是否为 `,sTT`。
 
 关键职责划分：
@@ -66,9 +85,12 @@ E["OSC 监听脚本<br/>scripts/osc_listen.py"] --> C
 - `Chatbox.sanitize()` 负责空白折叠与长度截断。
 - `Chatbox.send()` 统一入口，区分增量与最终版的丢弃/入队策略。
 - `Chatbox.flush_pending()` 由上层泵循环调用，优先保证最终版送达。
+- **新增** `Engine.set_chatbox_enabled()` 提供线程安全的运行时开关控制。
 
 **章节来源**
 - [vlt/output/chatbox.py:20-137](file://vlt/output/chatbox.py#L20-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
+- [vlt/gui_engine.py:50-70](file://vlt/gui_engine.py#L50-L70)
 - [scripts/osc_listen.py:17-44](file://scripts/osc_listen.py#L17-L44)
 
 ## 架构总览
@@ -77,11 +99,19 @@ E["OSC 监听脚本<br/>scripts/osc_listen.py"] --> C
 ```mermaid
 sequenceDiagram
 participant App as "应用主流程"
+participant Engine as "Engine 引擎"
 participant CB as "Chatbox"
 participant TB as "TokenBucket"
 participant UDP as "UDP Socket"
 participant VR as "VRChat OSC"
-App->>CB : send(text, is_final)
+participant GUI as "GUI 界面"
+Note over GUI,App : 运行时开关控制
+GUI->>Engine : set_chatbox_enabled(enabled)
+Engine->>Engine : _apply_chatbox_enabled()
+Engine->>Engine : 创建/销毁 Chatbox 实例
+Engine-->>GUI : 返回操作结果
+App->>Engine : send(text, is_final)
+Engine->>CB : send(text, is_final)
 CB->>CB : sanitize(text)
 CB->>TB : allow()
 alt 允许发送
@@ -102,11 +132,12 @@ Note over App,CB : flush_pending() 周期性重试最终版
 
 **图表来源**
 - [vlt/output/chatbox.py:20-137](file://vlt/output/chatbox.py#L20-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 
 ## 详细组件分析
 
 ### TokenBucket 限流算法
-TokenBucket 在本项目中以“窗口 + 最小间隔”的方式实现：
+TokenBucket 在本项目中以"窗口 + 最小间隔"的方式实现：
 - 窗口控制：维护一个时间戳双端队列 `_stamps`，每次检查时清理掉超过 `window_s` 秒的记录。
 - 容量限制：若当前窗口内记录数达到 `capacity`，则拒绝本次发送。
 - 最小间隔：若距离上一次发送不足 `min_gap_s`，也拒绝，避免连发。
@@ -174,14 +205,53 @@ class Chatbox {
 -_dispatch(text, is_final) bool
 +close() void
 }
+class Engine {
++set_chatbox_enabled(enabled) bool
++_apply_chatbox_enabled(enabled) void
++_make_chatbox() Chatbox
+}
 Chatbox --> TokenBucket : "使用"
+Engine --> Chatbox : "管理生命周期"
 ```
 
 **图表来源**
 - [vlt/output/chatbox.py:20-137](file://vlt/output/chatbox.py#L20-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 
 **章节来源**
 - [vlt/output/chatbox.py:44-137](file://vlt/output/chatbox.py#L44-L137)
+
+### 运行时实时开关控制
+**新增功能**：Engine 类提供了 `set_chatbox_enabled()` 方法，支持在翻译会话运行期间动态启用或禁用 chatbox 气泡功能。
+
+核心特性：
+- **线程安全**：通过 `asyncio.run_coroutine_threadsafe()` 将 GUI 线程的操作调度到引擎的事件循环线程执行。
+- **优雅状态管理**：启用时创建新的 Chatbox 实例，禁用时关闭现有实例并处理积压消息。
+- **方向限制**：只对"我说的话"方向有效，其他方向会返回 False。
+- **用户反馈**：提供详细的日志记录和状态提示。
+
+```mermaid
+flowchart TD
+User["用户操作<br/>GUI 界面"] --> Toggle["set_chatbox_enabled(enabled)"]
+Toggle --> DirectionCheck{"方向为 'mine' ?"}
+DirectionCheck --> |否| Reject["返回 False<br/>不支持"]
+DirectionCheck --> |是| LoopCheck{"事件循环运行中?"}
+LoopCheck --> |是| Schedule["run_coroutine_threadsafe<br/>_apply_chatbox_enabled()"]
+LoopCheck --> |否| DirectModify["直接修改 _sinks"]
+Schedule --> Apply["_apply_chatbox_enabled()"]
+DirectModify --> Done["完成"]
+Apply --> Enabled{"enabled ?"}
+Enabled --> |是| Create["创建 Chatbox 实例<br/>添加到 sinks"]
+Enabled --> |否| Destroy["关闭 Chatbox 实例<br/>清空 pending 消息"]
+Create --> Done
+Destroy --> Done
+```
+
+**图表来源**
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
+
+**章节来源**
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 
 ### VRChat OSC 协议通信机制
 - 目标地址：`/chatbox/input`。
@@ -194,7 +264,7 @@ Chatbox --> TokenBucket : "使用"
 - 重要约束：
   - 布尔参数必须走 OSC 类型标签 `T`/`F`，不能以 int32 payload 形式发送，否则 VRChat 会弹出输入框。
   - 单条消息上限为 144 字符，最多 9 行。
-  - 限流为“漏桶 5 条 / 5 秒”，超发静默丢弃，无回告。
+  - 限流为"漏桶 5 条 / 5 秒"，超发静默丢弃，无回告。
 
 这些约束在代码注释与监听脚本中均有体现，并通过离线断言与真实抓包双重确认。
 
@@ -228,7 +298,7 @@ Keep --> Out
 ### 增量文本与最终版本处理策略
 - 增量文本：若被限流拒绝，直接丢弃并计数 `sent_dropped`。
 - 最终版本：若被限流拒绝，不丢弃，而是加入 `_pending` 队列，由上层泵循环调用 `flush_pending()` 重试发送。
-- 优先级控制：`flush_pending(newest_first=True)` 支持“最新优先”，用于收尾阶段避免旧句子挤掉用户刚说完的句子。
+- 优先级控制：`flush_pending(newest_first=True)` 支持"最新优先"，用于收尾阶段避免旧句子挤掉用户刚说完的句子。
 
 ```mermaid
 flowchart TD
@@ -249,17 +319,27 @@ Flush --> Dispatch
 - [vlt/output/chatbox.py:81-110](file://vlt/output/chatbox.py#L81-L110)
 
 ### 实际使用示例（步骤式）
-以下为使用 `Chatbox` 类发送消息的步骤说明（不包含具体代码内容）：
+以下为使用 `Chatbox` 类和运行时开关功能的步骤说明（不包含具体代码内容）：
+
+#### 基础使用方法
 1. 实例化 `Chatbox`，传入主机地址、端口、字符上限、行数上限、通知音开关等。
 2. 对增量文本调用 `send(text, is_final=False)`。
 3. 对最终版本调用 `send(text, is_final=True)`。
 4. 在上层泵循环中定期调用 `flush_pending(newest_first=True)`，确保最终版在限流窗口释放后补发。
 5. 程序退出前调用 `close()` 关闭底层 socket。
 
+#### 运行时开关控制
+1. 在 Engine 实例上调用 `set_chatbox_enabled(True)` 启用气泡功能。
+2. 在需要时调用 `set_chatbox_enabled(False)` 禁用气泡功能。
+3. GUI 界面通过 `push_chatbox_toggle()` 自动处理用户操作。
+4. 注意：只有"我说的话"方向才支持气泡功能。
+
 可参考测试与文档中的端到端流程，结合 `--dry-run` 模式进行离线验证。
 
 **章节来源**
 - [vlt/output/chatbox.py:44-137](file://vlt/output/chatbox.py#L44-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
+- [vlt/gui_engine.py:50-70](file://vlt/gui_engine.py#L50-L70)
 - [docs/P1-实测结果.md:74-87](file://docs/P1-实测结果.md#L74-L87)
 
 ## 依赖关系分析
@@ -267,6 +347,7 @@ Flush --> Dispatch
 - `socket`：用于 UDP 发送。
 - `collections.deque`：用于 `TokenBucket` 的时间戳队列。
 - `time.monotonic()`：用于稳定时间源。
+- `asyncio`：**新增**用于线程间通信和协程调度。
 
 ```mermaid
 graph LR
@@ -274,10 +355,13 @@ Chatbox["Chatbox"] --> PythonOSC["python-osc.OscMessageBuilder"]
 Chatbox --> Socket["socket"]
 Chatbox --> Deque["collections.deque"]
 Chatbox --> Time["time.monotonic"]
+Engine["Engine"] --> AsyncIO["asyncio"]
+Engine --> Chatbox
 ```
 
 **图表来源**
 - [vlt/output/chatbox.py:11-15](file://vlt/output/chatbox.py#L11-L15)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 
 **章节来源**
 - [vlt/output/chatbox.py:11-15](file://vlt/output/chatbox.py#L11-L15)
@@ -287,14 +371,17 @@ Chatbox --> Time["time.monotonic"]
 - 丢包语义：增量可丢弃，最终版不可丢弃，采用队列重试。
 - 网络开销：每条 OSC 报文包含字符串与两个布尔值，体积较小。
 - 监控指标：`sent_ok`、`sent_dropped`、`bucket.dropped`、`pending_count`。
+- **新增**：运行时开关控制的性能开销极低，仅涉及对象创建/销毁和状态切换。
 
 优化建议：
 - 合理设置 `interval_s`、`bucket_capacity`、`bucket_window_s`、`min_gap_s`，使增量刷新节奏与模型输出匹配。
 - 在收尾阶段使用 `newest_first=True` 提升用户体验。
 - 使用 `--dry-run` 模式进行离线验证，减少不必要的网络请求。
+- 合理使用运行时开关功能，避免频繁创建/销毁 Chatbox 实例。
 
 **章节来源**
 - [vlt/output/chatbox.py:20-137](file://vlt/output/chatbox.py#L20-L137)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 - [docs/P1-实测结果.md:44-64](file://docs/P1-实测结果.md#L44-L64)
 
 ## 故障排查指南
@@ -302,25 +389,32 @@ Chatbox --> Time["time.monotonic"]
 - 气泡不显示：
   - 检查 VRChat 是否运行且 OSC 已开启。
   - 使用 `scripts/osc_listen.py` 监听 127.0.0.1:9000，确认是否收到 `,sTT` 报文。
+  - 确认 chatbox 功能已通过 `set_chatbox_enabled(True)` 启用。
 - 报文字符串异常或弹出输入框：
   - 确认布尔参数走类型标签 `T`/`F`，而非 int32 payload。
 - 最终版未送达：
   - 检查 `_pending` 队列是否为空，确认 `flush_pending()` 被周期性调用。
 - 限流频繁丢弃：
   - 调整 `bucket_capacity`、`bucket_window_s`、`min_gap_s`，或降低增量刷新频率。
+- **新增** 运行时开关无效：
+  - 确认当前方向为"我说的话"（`direction == "mine"`）。
+  - 检查 GUI 线程是否正确调用 `set_chatbox_enabled()`。
+  - 查看日志确认 `_apply_chatbox_enabled()` 是否被执行。
 
 **章节来源**
 - [scripts/osc_listen.py:47-77](file://scripts/osc_listen.py#L47-L77)
 - [docs/P1-实测结果.md:54-72](file://docs/P1-实测结果.md#L54-L72)
+- [vlt/engine.py:701-739](file://vlt/engine.py#L701-L739)
 
 ## 结论
-Chatbox 气泡输出模块以简洁可靠的 OSC 报文格式与稳健的限流策略，实现了 VRChat 实时同传的“我说 → 气泡”链路。其核心优势包括：
+Chatbox 气泡输出模块以简洁可靠的 OSC 报文格式与稳健的限流策略，实现了 VRChat 实时同传的"我说 → 气泡"链路。其核心优势包括：
 - 严格遵循 VRChat OSC 协议约束（`,sTT`、布尔类型标签）。
 - 明确的文本清洗规则（144 字符、9 行、空白折叠）。
 - 完善的限流与最终版保障机制（窗口容量 + 最小间隔 + 待发送队列）。
+- **新增**：运行时实时开关控制，支持动态启用/禁用而不影响翻译会话。
 - 易于扩展的配置项与清晰的错误处理。
 
-在实际使用中，建议结合 `--dry-run` 与 `osc_listen.py` 进行离线验证，并根据场景调优限流参数，以获得更流畅的气泡体验。
+在实际使用中，建议结合 `--dry-run` 与 `osc_listen.py` 进行离线验证，并根据场景调优限流参数，以获得更流畅的气泡体验。新增的运行时开关功能为用户提供了更大的灵活性，可以在翻译过程中随时控制气泡显示。
 
 ## 附录：配置项速查
 - `chatbox.host`：OSC 目标主机地址，默认 `127.0.0.1`。

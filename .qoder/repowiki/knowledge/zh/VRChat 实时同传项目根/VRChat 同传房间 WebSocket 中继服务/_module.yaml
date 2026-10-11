@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: server
+title: VRChat 同传房间 WebSocket 中继服务
+scope:
+    - server/
+source_files: []
+depends_on: []
+related_to: []

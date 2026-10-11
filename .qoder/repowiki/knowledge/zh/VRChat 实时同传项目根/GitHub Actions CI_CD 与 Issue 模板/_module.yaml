@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: github_ci
+title: GitHub Actions CI/CD 与 Issue 模板
+scope:
+    - .github/
+source_files: []
+depends_on: []
+related_to: []

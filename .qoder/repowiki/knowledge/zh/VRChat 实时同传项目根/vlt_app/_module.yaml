@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: vlt_app
+title: vlt_app
+scope:
+    - vlt/
+source_files: []
+depends_on: []
+related_to: []
