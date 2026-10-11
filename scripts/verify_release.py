@@ -1,18 +1,21 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.0 "D3D11Texture,win_d3d11,LevelMatcher,follow_mic,format_db"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.1 "rebind_audio_sink,_proxy_adopt_translation,_audio_out_wanted,re-wire the engine"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **功能型发布（v0.11.0）**：本版两处主要改动各取**新增符号名**做 needle
-（符号名比文案可靠：文案会被改，符号进 pyc 必留）——
-  ① 手腕屏上传路换 API（持久 D3D11 贴图 + `SetOverlayTexture`）：`D3D11Texture` / `win_d3d11`
-     （新模块 `vlt/output/win_d3d11.py`，被 `vlt/output/openvr_overlay.py` 使用）；
-  ② 译音音量匹配（跟随麦克风）：`LevelMatcher`（新模块 `vlt/output/level_match.py`）、
-     `follow_mic`（模式值，进配置与分支）、`format_db`（新的 dB 格式化函数）。
-这五个符号在 **v0.10.0 的代码里都不存在**（已用 `git grep <符号> v0.10.0 -- vlt/` 逐一核对），
-所以命中即证明新代码真进了产物。
+⚠️ **修复型发布（v0.11.1）**：本版两处修复各取**新增符号名**做 needle，再补一条**只在 v0.11.1 词表里**的英文串：
+  ① 中途开 / 关麦克风代理的运行期重接线（#90）：`rebind_audio_sink`（新 API）、`_proxy_adopt_translation`
+     与 `_audio_out_wanted`（新分支/门）—— 三个符号在 v0.11.0 的代码里都不存在；
+  ② Windows 正式包漏收界面词表（#96）：`re-wire the engine` 出自本版**新增**的英文词条
+     （`vlt/locales/en.py`）。⚠️ 这条 needle 的**真正价值不是「新符号」而是「词表进包」**：
+     v0.11.0 的正式包里 `vlt.locales.*` 一个都没有，所以任何人回看复核结果时都会以为这条是陈旧 needle ——
+     不是。它命中即证明词表模块真的被打进了产物（这是本版修复的目标本身）。
+前三个符号已用 `git grep <符号> v0.11.0 -- vlt/` 逐一核对（都不存在）；英文串同样只在 v0.11.1 的词表里。
+
+⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（重接线后的档位接管、失败文案换专门 key、
+产物对账/禁列双向断言等），这类改动没有新增可搜字符串 —— 它们的证据是本轮复核与故障注入，不是 needle。
 
 ⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（chatbox 即时生效、单按钮开关尺寸、
 麦克风下拉、`<Destroy>` 过滤、TTS 连接复用、Linux 采集钉死目标），这类改动没有新增字符串可搜 ——

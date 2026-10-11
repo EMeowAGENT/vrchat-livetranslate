@@ -612,7 +612,7 @@ vlt/
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
                           + run_tests.py（テスト実行器）+ verify/（実機検収スクリプト。実デスクトップ/実ハードが必要、CI では走らない）
-tests/                    90 ファイル・675 のテスト関数（オフラインで実行可、CI はファイル単位で
+tests/                    92 ファイル・695 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -678,7 +678,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.0 "D3D11Texture,win_d3d11,LevelMatcher,follow_mic,format_db"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.11.1 "rebind_audio_sink,_proxy_adopt_translation,_audio_out_wanted,re-wire the engine"
   ```
 
 ---

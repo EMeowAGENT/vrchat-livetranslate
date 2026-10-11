@@ -148,30 +148,16 @@ jobs:
           body: |
             ### 这版有什么
 
-            **新增功能**
-
-            - 译音音量匹配：新增 `output.audio.level`（`off` / `fixed` / `follow_mic` 三档，默认关闭；界面在「设置 → 音频 → 译音音量」）— #87 @nixi-agent
-            - chatbox 气泡在翻译进行中切换「原文 / 译文」即时生效，无需停止翻译 — #85 @EMeowAGENT
-            - 「开始 / 停止」合并为单按钮开关（蓝 ⇄ 红），开始翻译默认使用译音档 — #74 @nixi-agent
-            - 麦克风代理首次启用时给出说明（占用虚拟声卡输出流、回声来源）— #83 @nixi-agent
-            - 界面缩放 `ui.scale`：设置弹窗跟随缩放；Linux 侧接入 DPI 缩放 — #72 @EMeowAGENT
-            - 开发 / 测试构建显示版本号（距上个 tag 的提交数 + 短哈希）— #77 @EMeowAGENT
-
             **修复**
 
-            - 手腕屏约每 2 分 20 秒僵住一次（最坏 2.5 分钟）：上传路径改用持久 D3D11 贴图 + `SetOverlayTexture`，`SetOverlayRaw` 降级为兜底 — #92 @nixi-agent
-            - 音量读数被任意子控件销毁误取消（`<Destroy>` 未按 `e.widget` 过滤：窗口仍在，读数不再刷新）— #91 @EMeowAGENT（守卫用例 #95 @nixi-agent）
-            - 「麦克风」下拉固定显示「自动检测」— #75 @EMeowAGENT
-            - 单按钮开关切换档位时尺寸变化 — #76 @nixi-agent
-            - 房间与凭据的安全边界收窄，并修正跨平台 GUI 相关缺陷 — #84 @Evanlau1798
-            - Linux：原声直通恢复全带宽采集、录音源显式锁定（切换默认麦克风不再断线）— #73 @EMeowAGENT
-            - TTS 合成复用同一条 HTTPS 连接（连续多段省一次 DNS + TCP + TLS）— #81 @Sand-85
+            - Windows 正式包漏收界面词表（`vlt.locales.*`）：非中文系统在「设置 → 界面语言」选英 / 日 / 韩 / 俄后界面仍显示中文（词表按语言码动态加载，构建时未收进产物）— #96 @nixi-agent
+            - 翻译进行中开 / 关「麦克风代理」不重新接线：在跑引擎的「跟随麦克风」音量匹配本轮失效，且中途开的代理仍以为翻译没在跑 → 这一轮听不到译音 — #97 @nixi-agent
 
             **其它**
 
-            - `verify_release.py`：修正仓库判定、图标句柄截断、解包器写死 — #80 @Sand-85
-            - 测试门禁收敛到唯一 runner、虚拟屏分辨率显式指定、防假绿加固 — #79 @EMeowAGENT
-            - 房间相关用例改用共享运行器（宽超时 + 超时重试一次）— #86 @EMeowAGENT
+            - Windows 产物补「磁盘 vs 包内」模块对账，禁列比对改双向（防「新模块忘登记 / 漏收模块」静默假绿）— #96 @nixi-agent
+            - 新增安全策略 `SECURITY.md`、编码代理使用说明文档 — @nixi-agent
+
           files: |
             dist/VRChatLiveTranslate.exe
             dist/SHA256SUMS.txt
