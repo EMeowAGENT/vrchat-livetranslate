@@ -639,7 +639,7 @@ vlt/
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
                           + run_tests.py (test runner) + verify/ (on-device acceptance scripts, need a real desktop/hardware — not run in CI)
-tests/                    92 files, 695 test functions (all run offline; CI runs them file by
+tests/                    95 files, 718 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -704,7 +704,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.1 "rebind_audio_sink,_proxy_adopt_translation,_audio_out_wanted,re-wire the engine"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.11.2 "_maybe_apply_anchor,CTX_FLUSH,_write_proxy_leaves,_yaml_set_or_create_checked"
   ```
 
 ---

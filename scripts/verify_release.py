@@ -1,18 +1,20 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.1 "rebind_audio_sink,_proxy_adopt_translation,_audio_out_wanted,re-wire the engine"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.2 "_maybe_apply_anchor,CTX_FLUSH,_write_proxy_leaves,_yaml_set_or_create_checked"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **修复型发布（v0.11.1）**：本版两处修复各取**新增符号名**做 needle，再补一条**只在 v0.11.1 词表里**的英文串：
-  ① 中途开 / 关麦克风代理的运行期重接线（#90）：`rebind_audio_sink`（新 API）、`_proxy_adopt_translation`
-     与 `_audio_out_wanted`（新分支/门）—— 三个符号在 v0.11.0 的代码里都不存在；
-  ② Windows 正式包漏收界面词表（#96）：`re-wire the engine` 出自本版**新增**的英文词条
-     （`vlt/locales/en.py`）。⚠️ 这条 needle 的**真正价值不是「新符号」而是「词表进包」**：
-     v0.11.0 的正式包里 `vlt.locales.*` 一个都没有，所以任何人回看复核结果时都会以为这条是陈旧 needle ——
-     不是。它命中即证明词表模块真的被打进了产物（这是本版修复的目标本身）。
-前三个符号已用 `git grep <符号> v0.11.0 -- vlt/` 逐一核对（都不存在）；英文串同样只在 v0.11.1 的词表里。
+⚠️ **修复型发布（v0.11.2）**：三处修复各取**新增符号名**做 needle，一个修复一条、互不替代：
+  ① 非翻译模式下「手腕屏」打不开（#98）：`_maybe_apply_anchor`（锚点未被追踪时保留面板、每秒重试贴锚点的新方法）
+     与 `ANCHOR_RETRY_S`（重试间隔常量）—— 两串在 v0.11.1 的代码里都不存在；
+  ② 「手腕屏」比桌面字幕慢几秒（#98）：`CTX_FLUSH`（`ID3D11DeviceContext::Flush` 的虚表索引常量，补在
+     `vlt/output/win_d3d11.py`）—— v0.11.1 里不存在；
+  ③ 「麦克风代理」首次说明每次启动都弹（#98）：`_write_proxy_leaves`（`vlt/gui_proxy.py` 新增的唯一写入口）
+     与 `_yaml_set_or_create_checked`（`vlt/config_io.py` 的「补建父级 + 落盘前解析复检」）—— 两串在 v0.11.1 里不存在。
+五串已用 `git grep <符号> v0.11.1 -- vlt/` 逐一核对（全部 0 命中），并在本地包（与 tag 同源）里预跑过一次命中。
+⚠️ 本版还有**没有新符号可搜**的改动（自愈退避、取消勾选后不重建面板的 `_closed` 守卫、心跳改走「不看 available」）——
+证据是用例 + 故障注入（改回旧写法必红），不是 needle。
 
 ⚠️ **别拿「某个名字还在不在」当反证**：本版也有纯改动型修复（重接线后的档位接管、失败文案换专门 key、
 产物对账/禁列双向断言等），这类改动没有新增可搜字符串 —— 它们的证据是本轮复核与故障注入，不是 needle。
