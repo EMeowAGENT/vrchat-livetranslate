@@ -6,6 +6,35 @@
 - 网络访问走默认 opener（尊重 HTTPS_PROXY / 系统代理）——GitHub 国内直连不稳，
   与 textin.py 显式禁代理（国内端点）正好相反，别抄错。
 - 每个结论都留一行 [update] 日志（成功/跳过/失败各一行），不许静默降级。
+
+## 两个更新源：Cloudflare R2（主）→ GitHub Release（兜底）
+
+大陆用户访问 GitHub 不稳定（API 限流 60 次/小时、下载域名常被墙），所以**主源**是自家
+Cloudflare R2 上的静态清单 `MANIFEST_URL`：
+
+  * 清单由 `scripts/publish_r2.py` 在发版时生成（**那边是格式的唯一真相**，含字段说明）；
+  * 产物地址与 sha256 都在清单里 → 下载不必再问 GitHub，也不受 GitHub 附件 CDN 的影响；
+  * R2 上全是**固定键**、对象带 `no-cache` → 覆盖发布后立刻生效（理由见 publish_r2.py 头部）。
+
+主源任何一步失败（连不上 / 清单不合契约 / 那一版没有本形态的包）都**回落**到原来的 GitHub
+API 源，并各留一行 `[update]` 日志：R2 挂掉或格式升级时老路径还在，不至于让所有人收不到更新。
+反过来，GitHub 挂了不影响主路径 —— 这就是这次改动的全部目的。
+
+**下载阶段也有兜底**（评审 §3）：`download_and_verify(..., fallback=…)` 允许在主源产物下载
+失败时用**同一版本**的 GitHub 附件重试一次 —— 大陆最常见的失败形态不是「清单拿不到」（843 B，
+秒级），而是「清单拿到了、37 MB 下到一半断了」，那时重试同一个 CF 地址往往还是断。
+
+⚠️ **信任边界（读一遍再改这个文件）**：`dl.kcm-nixi.cn` 是**更新链路的信任锚** —— 版本号、
+产物地址与 sha256 都由它提供，而 sha256 是**清单自证**（同一源给的摘要只能证明「字节没坏」，
+**不等于「这份内容是我发的」**）。所以：域名 / DNS / CF 账号 / R2 桶写权限，任一失守都等于
+可以给所有客户端下发任意程序。HTTPS 挡不住这一类（攻击者持有该域名的**有效证书**）。
+- 真正的解决办法是**清单签名**（公钥编译进客户端、私钥不进 CDN）—— 本次评审后决定**不做**，
+  记为待办（`CONTRIBUTING.md` §七）；在此之前靠运维收敛暴露面（域名自动续费 / registrar lock /
+  CF 2FA / CAA / 桶级最小权限 token）。
+- 应急手段：环境变量 `VLT_UPDATE_SOURCE=github` 可**强制跳过主源**（见 `_forced_source()`）。
+
+⚠️ 主源失败时抛的消息只进日志（用户看不到），所以那些文案**不走 `t()`**；
+   最终能到用户眼前的是兜底源（GitHub）的错误，仍按原样走词表。
 """
 from __future__ import annotations
 
@@ -29,6 +58,12 @@ from .config_io import _fmt_scalar, _write_config_text, _yaml_set_in_text
 from .i18n import t
 from .paths import is_frozen
 
+# 更新源（主）：自家 Cloudflare R2 上的静态清单。生成方 = scripts/publish_r2.py（格式的唯一真相）；
+# 域名写在客户端白名单里，改域要两边同时改（publish_r2.BASE_URL / MANIFEST_URL / ALLOWED_HOSTS）。
+MANIFEST_URL = "https://dl.kcm-nixi.cn/latest.json"
+MANIFEST_HOST = "dl.kcm-nixi.cn"
+MANIFEST_SCHEMA = 1
+# 更新源（兜底）：GitHub API。大陆不稳，只在主源失败时走。
 RELEASES_LATEST_API = "https://api.github.com/repos/nixi-agent/vrchat-livetranslate/releases/latest"
 # Release 页面基址（与上面的 API 同仓库）：拼 tag 页 = f"{RELEASES_HTML}/tag/vX.Y.Z"
 RELEASES_HTML = "https://github.com/nixi-agent/vrchat-livetranslate/releases"
@@ -47,16 +82,34 @@ PENDING_JSON = "update_pending.json"
 # APP_DIR：{"last_seen_version": "..."}（版本变化一次性提示用）
 STATE_JSON = "update_state.json"
 
-# 只允许这几个 host：查最新（api.github.com）、asset 跳转起点（github.com）、
-# asset 实际下载（两个 CDN 域）。重定向目标与最终落地地址都必须过这道白名单。
-ALLOWED_HOSTS = {"api.github.com", "github.com", "objects.githubusercontent.com",
-                 "release-assets.githubusercontent.com"}
+#: 紧急开关的**环境变量名**：值置 `github` ⇒ `fetch_latest_release()` 跳过主源、直接走 GitHub 兜底。
+#: 用途只有一个：主源被判定不可信（域名/桶失守、清单异常）时，让人能立刻绕开它 ——
+#: 这是本次评审要求的「可吊销手段」。它不是日常开关（除了排障没人该设它），所以**不写进 config.yaml**
+#: （配置会随用户数据长期留着，而这是运维侧的临时决定）。
+#: ⚠️ 边界（评审二审 §6）：它只管**检查**这一步（拿版本/地址）。已经打开的更新窗口里那次下载
+#: 用的是当时取到的那份清单，**不受这个开关影响** —— 要彻底断掉主源，得在域名/DNS 侧动手
+#: （或让桶里那份清单失效），别指望一个环境变量包打天下。
+ENV_UPDATE_SOURCE = "VLT_UPDATE_SOURCE"
+
+# 只允许这几个 host：清单与产物（dl.kcm-nixi.cn）、查最新（api.github.com）、
+# asset 跳转起点（github.com）、asset 实际下载（两个 CDN 域）。重定向目标与最终落地地址都必须过这道白名单。
+ALLOWED_HOSTS = {MANIFEST_HOST, "api.github.com", "github.com",
+                 "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
 
 _CHUNK = 256 * 1024
 
 
 class UpdateCheckError(RuntimeError):
     """检查/下载更新失败。消息直接给用户看，不带堆栈。"""
+
+
+class ChecksumMismatch(UpdateCheckError):
+    """下载下来的字节与清单/Release 声明的 sha256 不一致。
+
+    单独一类是为了**不触发备用源重试**（评审二审 §3）：摘要不符是完整性问题，
+    换个源再下一遍修不好它（同一个版本在两个源上本该是同一份字节），只会拖时间；
+    而网络类失败（超时 / 连接重置）换个源确实常常能好。
+    """
 
 
 # ---------------------------------------------------------------- 版本解析与比较
@@ -118,8 +171,12 @@ def _get_opener():
 
 
 @contextmanager
-def _mapped_errors():
-    """把 urllib/网络层的杂七杂八异常统一翻成给用户看的 UpdateCheckError。"""
+def _mapped_errors(rate_limit: str | None = None):
+    """把 urllib/网络层的杂七杂八异常统一翻成给用户看的 UpdateCheckError。
+
+    `rate_limit`：403/429 的文案。默认那句是 GitHub 的实情（未认证 60 次/小时），只有走 GitHub
+    时才对；主源（自家 CDN）撞到 403/429 是另一回事（对象/域名不对、被拦），传自己的文案进来。
+    """
     try:
         yield
     except UpdateCheckError:
@@ -127,19 +184,129 @@ def _mapped_errors():
     except HTTPError as exc:
         if exc.code in (403, 429):
             # 未认证限流 60 次/小时/IP；手动按钮被连点时最容易撞
-            raise UpdateCheckError(t("GitHub 限流（未认证 60 次/小时），稍后再试")) from exc
+            raise UpdateCheckError(rate_limit or t("GitHub 限流（未认证 60 次/小时），稍后再试")) from exc
         raise UpdateCheckError(f"HTTP {exc.code}") from exc
     except URLError as exc:
         raise UpdateCheckError(t("网络不可达：{msg}", msg=exc.reason)) from exc
     except TimeoutError as exc:
         raise UpdateCheckError(t("网络不可达：连接超时")) from exc
     except Exception as exc:  # noqa: BLE001
+        if _is_download_cancel(exc):
+            # 用户取消**不是错误**：原样抛出去，让 GUI 走它自己的取消分支
+            # （以前这里会把它包成 UpdateCheckError —— 于是「取消」被当成失败：
+            #  日志记的是失败，本版还会因此触发一次 37 MB 的备用源重试。实测逮到过。）
+            raise
         raise UpdateCheckError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _is_allowed_url(url: str) -> bool:
+    """URL 是否通过「https + host 白名单（+ 端口）」这道门（不抛异常，只回答是/否）。"""
+    try:
+        _check_url(url)
+    except UpdateCheckError:
+        return False
+    return True
+
+
+def parse_manifest(text: str, asset_name: str = EXE_ASSET_NAME) -> ReleaseInfo:
+    """把 CF 清单（`latest.json`）解析成 ReleaseInfo；不合契约的地方一律 UpdateCheckError。
+
+    清单是**发布侧与客户端之间唯一的契约**（生成方 = `scripts/publish_r2.py`）。这里严格校验的
+    理由：这里放过的每一个「奇怪但能用」的形态，最后都会变成用户机器上一次装了一半的更新 ——
+    宁可不更新（让调用方回落 GitHub），也不猜。
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise UpdateCheckError(t("响应不是合法 JSON：{msg}", msg=exc)) from exc
+    if not isinstance(data, dict):
+        raise UpdateCheckError("清单顶层不是对象")
+    schema = data.get("schema")
+    if schema != MANIFEST_SCHEMA:
+        # 出现不认识的格式版本：不猜、不兼容处理，直接回落 GitHub（将来升级格式时老客户端有救）
+        raise UpdateCheckError(f"清单的格式版本不认识：{schema!r}")
+    version = str(data.get("version") or "")
+    if parse_version(version) is None:
+        # version 会被当版本号比较，形态不对 = 永远收不到更新（或永远提示有更新）
+        raise UpdateCheckError(f"清单里的版本号不是严格 X.Y.Z：{version!r}")
+    assets = data.get("assets")
+    entry = assets.get(asset_name) if isinstance(assets, dict) else None
+    if not isinstance(entry, dict):
+        # 与 GitHub 源同一句话：那一版没有本形态要的包（Windows 单文件 exe / Linux AppImage）
+        raise UpdateCheckError(t("Release 附件不全：缺少 {name} 或校验值", name=asset_name))
+    url = str(entry.get("url") or "")
+    _check_url(url)                      # scheme + host 白名单：清单被改写/域名写错都要拦住
+    digest = str(entry.get("sha256") or "").lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise UpdateCheckError(f"{asset_name} 的校验值格式不对")
+    size = entry.get("size")
+    html = str(data.get("release_url") or "").strip()
+    if not _is_allowed_url(html):
+        # 这个地址会经 open_release_page() **直接交给浏览器打开**（与产物地址同级的东西），
+        # 所以和别的 URL 一样过白名单；不合规就用已知安全的 GitHub Release 页顶上（它只用于
+        # 「看看这次更新了什么」）。评审 §5 指出的就是这处口径不统一。
+        html = f"{RELEASES_HTML}/tag/v{version}"
+    return ReleaseInfo(tag=f"v{version}", version=version, html_url=html,
+                       asset_url=url, asset_name=asset_name, asset_digest=digest,
+                       sums_url="", asset_size=size if isinstance(size, int) and size > 0 else None)
+
+
+def fetch_latest_manifest(timeout: float = DEFAULT_TIMEOUT_S,
+                          asset_name: str = EXE_ASSET_NAME) -> ReleaseInfo:
+    """取主源（Cloudflare R2）的清单，返回**我要的那份产物**的描述。
+
+    下载器只需要 `asset_url` + `asset_digest`，两者清单里都有 —— 所以主源路径下一次网络走完，
+    不再像 GitHub 那条要先问 API 再 302 到 CDN。
+    """
+    req = Request(MANIFEST_URL, headers={
+        # UA 带上版本号：R2 侧访问日志里能看出是哪一版在查（与 GitHub 那条同口径）
+        "User-Agent": f"vrchat-livetranslate/{display_version()}",
+    })
+    with _mapped_errors(rate_limit=f"HTTP 403/429（对象不存在、被拦或限流）：{MANIFEST_HOST}"):
+        with _get_opener().open(req, timeout=timeout) as resp:
+            _check_url(_final_url(resp))     # 落地复检：跳转终点也必须在白名单
+            body = resp.read().decode("utf-8", "replace")
+    return parse_manifest(body, asset_name)
+
+
+def _forced_source() -> str:
+    """紧急开关的值（规范化）：`github` ⇒ 跳过主源。见 ENV_UPDATE_SOURCE 的注释。"""
+    return (os.environ.get(ENV_UPDATE_SOURCE) or "").strip().lower()
 
 
 def fetch_latest_release(timeout: float = DEFAULT_TIMEOUT_S,
                          asset_name: str = EXE_ASSET_NAME) -> ReleaseInfo:
-    """查 GitHub 最新 Release 里**我要的那份附件**（默认 exe；AppImage 传 APPIMAGE_ASSET_NAME）。
+    """查最新版本：**先主源（Cloudflare R2），失败回落 GitHub**。两条路都留一行 [update] 日志。
+
+    这是 GUI 唯一该调的入口（`check_for_updates` 用的就是它）。回落是**故意**的：
+    主源是自家对象存储、形态由我们控制，但「它挂了」不该等于「所有人都收不到更新」；
+    而 GitHub 那条老路已经跑了十几个版本、有全套用例守着，留着当兜底几乎零成本。
+
+    ⚠️ 只回落**主源坏了**，不回落**我们自己的代码坏了**：捕获面收窄到
+    `UpdateCheckError / OSError / TimeoutError`（网络与契约问题），解析里的 TypeError /
+    AttributeError 那类是 bug，必须原样冒到 `check_for_updates` 的日志里
+    —— 否则它会伪装成一句「回落到 GitHub」，把 bug 藏进正常路径（评审 §4）。
+    """
+    if _forced_source() == "github":
+        # 紧急开关：主源被判定不可信时绕开它（不留痕可不行，这行必须显眼）
+        print(f"[update] {ENV_UPDATE_SOURCE}=github：按紧急开关跳过主源（{MANIFEST_HOST}）",
+              flush=True)
+        return fetch_latest_release_github(timeout=timeout, asset_name=asset_name)
+    try:
+        info = fetch_latest_manifest(timeout=timeout, asset_name=asset_name)
+    except (UpdateCheckError, OSError, TimeoutError) as exc:
+        print(f"[update] ⚠️ 主源（{MANIFEST_HOST}）失败：{exc} → 回落 GitHub Release", flush=True)
+    else:
+        print(f"[update] 更新源：Cloudflare（{MANIFEST_HOST}）v{info.version}", flush=True)
+        return info
+    info = fetch_latest_release_github(timeout=timeout, asset_name=asset_name)
+    print(f"[update] 更新源：GitHub Release v{info.version}（主源不可用时的兜底）", flush=True)
+    return info
+
+
+def fetch_latest_release_github(timeout: float = DEFAULT_TIMEOUT_S,
+                                asset_name: str = EXE_ASSET_NAME) -> ReleaseInfo:
+    """兜底源：查 GitHub 最新 Release 里**我要的那份附件**（默认 exe；AppImage 传 APPIMAGE_ASSET_NAME）。
     /releases/latest 天然排除 prerelease 和 draft（GitHub 语义）。
 
     失败一律 UpdateCheckError：403/429=限流、URLError/超时=网络不可达、
@@ -281,11 +448,20 @@ def check_for_updates(local_version: str, config_path: Path,
 
 
 def _check_url(url: str) -> None:
-    """https + 白名单 host 才放行；其余一律 UpdateCheckError（重定向守卫与落地复检共用）。"""
+    """https + 白名单 host（+ 非默认端口）才放行；其余一律 UpdateCheckError
+    （重定向守卫与落地复检共用）。"""
     parts = urlsplit(url or "")
     if parts.scheme != "https":
         raise UpdateCheckError(t("拒绝非 https 地址：{url}", url=url))
     if parts.hostname not in ALLOWED_HOSTS:
+        raise UpdateCheckError(t("拒绝白名单外的地址：{url}", url=url))
+    try:
+        port = parts.port
+    except ValueError:              # 畸形端口（https://host:abc/）→ 不当成合法地址
+        port = -1
+    if port not in (None, 443):
+        # 白名单是「域名 + 默认端口」：`dl.kcm-nixi.cn:8443` 不是我们发布东西的地方
+        # （评审 §三 指出的口径不一致）。复用同一句话术，不新增词表 key。
         raise UpdateCheckError(t("拒绝白名单外的地址：{url}", url=url))
 
 
@@ -373,41 +549,145 @@ def _stream_to_file(url: str, dest: Path, timeout: float,
     return h.hexdigest()
 
 
+def github_fallback(info: ReleaseInfo, timeout: float = DEFAULT_TIMEOUT_S) -> ReleaseInfo:
+    """主源上的产物下载失败时的备用取件：**同一版本**在 GitHub Release 上的那份附件。
+
+    为什么值得多这一跳（评审 §3）：大陆最常见的失败形态不是「清单拿不到」（843 B，秒级），
+    而是「清单拿得到、37 MB 产物下到一半断了」—— 那时重试同一个 CF 地址往往还是断，
+    而 GitHub 附件走的是另一条 CDN 通路（未必更快，但实测可用）。
+
+    只接受**版本号一致**的回落：对不上宁可失败，也绝不跨版本装（那才是最坏的失败）。
+    """
+    alt = fetch_latest_release_github(timeout=timeout, asset_name=info.asset_name)
+    if alt.version != info.version:
+        raise UpdateCheckError(t("备用源上的版本是 v{got}，与要装的 v{want} 不同：已放弃回退",
+                                 got=alt.version, want=info.version))
+    print(f"[update] 备用源（GitHub）上有同一版 v{alt.version} 的 {alt.asset_name}，准备重试",
+          flush=True)
+    return alt
+
+
+#: 出现过「摘要不符」的版本号（进程内记着）。用途只有一个（评审三审 R3）：给这类失败留一条
+#: **用户可达**的出口 —— 第一次摘要不符**不**自动换源（换源救不了「源头对象就是错的」），
+#: 但用户在同一版本上再点一次「重试」时就**直接走备用源**（能救「中间缓存/传输把它改坏了」）。
+#: 不做持久化：重启程序后这个版本会重新走主源一次，那本来就是合理的默认。
+_MISMATCH_SEEN: set[str] = set()
+
+
+def _is_download_cancel(exc: BaseException) -> bool:
+    """是不是「用户取消了下载」——`vlt/ui_text.py::_DownloadCancelled` 由 GUI 的 progress 回调抛出。
+
+    ⚠️ 本模块不许 import ui_text（要能脱离 Tk 单测），所以**按类名判**：那个名字是它与本模块
+    之间的契约，`tests/test_update_check.py` 会钉住它。判错的后果是「用户点了关闭，程序却
+    又去 GitHub 下一遍 37 MB」（真机测试逮到过）。
+
+    也看 `__cause__` / `__context__`：别处（如 `_mapped_errors`）万一把它包了一层，
+    链上还能认出来。
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if any(cls.__name__ == "_DownloadCancelled" for cls in type(cur).__mro__):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def download_and_verify(info: ReleaseInfo, dest_dir: Path,
                         timeout: float = DOWNLOAD_TIMEOUT_S,
-                        progress: Callable[[int, int | None], None] | None = None) -> Path:
+                        progress: Callable[[int, int | None], None] | None = None,
+                        fallback: Callable[[], ReleaseInfo] | None = None) -> Path:
     """下载本次要换的那个附件（exe / AppImage，由 `info.asset_name` 定）到 dest_dir。
 
     调用方保证 dest_dir = **安装文件同目录**（同卷 rename 才近原子）：Windows 是 exe 旁边，
     Linux 是那个 `.AppImage` 旁边。
 
-    校验：期望值取 GitHub 的 asset digest（老 Release 回落 SHA256SUMS.txt 的 exe 行），
+    校验：期望值取清单 / Release 里的 sha256（老 GitHub Release 回落 SHA256SUMS.txt 的 exe 行），
     与实测 sha256 不一致/解析不出 → 删除已下载文件 + UpdateCheckError，绝不进入替换步骤。
     progress(done, total) 在下载线程里被调，total 取 Content-Length（缺省 None）——
     本模块不碰 Tk，GUI 负责把回调转进队列。
+
+    `fallback`：这个附件在**主源上下不动时的第二次机会**（GUI 传 `lambda: github_fallback(info)`）。
+    只在「下载/校验」失败时用一次；**用户取消不算失败**（点了关闭就别再发起第二次传输）；
+    **摘要不符也不算"网络失败"**（`ChecksumMismatch` → 不重试，见该类 docstring）；
+    它自己抛的异常原样上抛，但会把主源那次的原因串进异常链 + 日志（否则最后一行只剩备用源的错）。
     返回校验通过的文件路径（<dest_dir>/<asset_name>.new）。
+
+    ⚠️ 超时口径：这里的 `timeout` 是**每次 socket 操作的超时**，不是整条链的总时限 ——
+    一个「慢但在推进」的连接可以合法地跑很久（大陆到 CF 实测过 100~700 KB/s 的波动，
+    硬加总时限会把这种用户直接卡死在下不动）。真正的兜底是：一次失败后**只**重试一次，
+    且摘要不符不重试（那类问题换源修不好）。
     """
     dest = Path(dest_dir) / (info.asset_name + NEW_SUFFIX)
-    try:
-        expected = _expected_sha256(info, timeout)
-        actual = _stream_to_file(info.asset_url, dest, timeout, progress)
-    except Exception as exc:  # noqa: BLE001 — 任何失败都要清理残留 + 留痕，再原样上抛
-        dest.unlink(missing_ok=True)
-        print(f"[update] 下载失败：{exc}（残留已清理）", flush=True)
-        raise
-    if actual != expected:
-        dest.unlink(missing_ok=True)
-        print("[update] 校验失败已删除", flush=True)
-        raise UpdateCheckError(t("下载的文件与发布页的摘要对不上，已删除（请重试）"))
-    print(f"[update] 下载完成 sha256 校验通过（v{info.version}）", flush=True)
-    try:
-        write_pending(Path(dest_dir), info.version, actual)
-    except OSError as exc:
-        # json 写不进去不挡本次更新（【重载】不依赖它）；但【稍后】/残留恢复会因此走不通，
-        # 必须留痕 —— 禁静默降级
-        print(f"[update] ⚠️ 待更新信息没写下来（{exc}）：「稍后更新」退出时将不会自动替换",
+
+    def _once(src: ReleaseInfo) -> Path:
+        """一次完整的「下载 + 校验 + 落盘」；失败时清残留并原样上抛。"""
+        try:
+            expected = _expected_sha256(src, timeout)
+            actual = _stream_to_file(src.asset_url, dest, timeout, progress)
+        except BaseException as exc:  # noqa: BLE001 — 任何失败（含 Ctrl+C / 取消）都要清残留 + 留痕
+            dest.unlink(missing_ok=True)
+            if _is_download_cancel(exc):
+                # 取消不是失败，别和网络错误混在一行（评审二审 §4：日志里要能一眼分清）
+                print("[update] 下载已取消（残留已清理）", flush=True)
+            else:
+                print(f"[update] 下载失败：{exc}（残留已清理）", flush=True)
+            raise
+        if actual != expected:
+            dest.unlink(missing_ok=True)
+            print("[update] 校验失败已删除", flush=True)
+            raise ChecksumMismatch(t("下载的文件与发布页的摘要对不上，已删除（请重试）"))
+        print(f"[update] 下载完成 sha256 校验通过（v{src.version}）", flush=True)
+        try:
+            write_pending(Path(dest_dir), src.version, actual)
+        except OSError as exc:
+            # json 写不进去不挡本次更新（【重载】不依赖它）；但【稍后】/残留恢复会因此走不通，
+            # 必须留痕 —— 禁静默降级
+            print(f"[update] ⚠️ 待更新信息没写下来（{exc}）：「稍后更新」退出时将不会自动替换",
+                  flush=True)
+        return dest
+
+    # 走备用源之前先把「这次是从主源起步的」这件事定下来：上一次同一版本是摘要不符时
+    # （用户又点了一次重试），直接跳过主源走备用源 —— 见 `_MISMATCH_SEEN` 的说明。
+    _from_fallback = fallback is not None and info.version in _MISMATCH_SEEN
+    primary: BaseException | None = None
+    if _from_fallback:
+        print(f"[update] ⚠️ v{info.version} 上一次是摘要不符 → 这次直接走备用源（用户重试）",
               flush=True)
-    return dest
+    try:
+        if not _from_fallback:
+            return _once(info)
+    except Exception as exc:
+        # 只接 Exception：取消（`ui_text._DownloadCancelled`）**是** Exception 的子类，靠
+        # `_is_download_cancel` 认它；而 KeyboardInterrupt / SystemExit / asyncio.CancelledError
+        # 这类非 Exception 的 BaseException 不该被当成「网络失败」去白跑一次 37MB 兜底
+        # （评审三审 R1：原先写 `except BaseException` + 手动排除三个，行为等价但理由写反了）。
+        if fallback is None or _is_download_cancel(exc):
+            raise
+        if isinstance(exc, ChecksumMismatch):
+            # 摘要不符**本次不自动换源**（评审二审 §3，理由见 ChecksumMismatch docstring），
+            # 但要留一条**用户可达**的出口（评审三审 R3）：记下这个版本，用户再点一次「重试」
+            # 就直接走备用源 —— 换源确实救不了「源头对象就是错的」，但**能救**「中间缓存/传输
+            # 把它改坏了」，而后者是更常见的形态；每次点重试都白下一遍 37MB 才是要避免的。
+            _MISMATCH_SEEN.add(info.version)
+            print("[update] ⚠️ 摘要不符：本次不自动换源；再点一次「重试」会直接走备用源"
+                  "（换源救不了源头就错的对象，但能救中间缓存/传输改坏的）", flush=True)
+            raise
+        primary = exc
+        print(f"[update] ⚠️ 主源下载失败（{exc}）→ 换备用源重试一次", flush=True)
+    try:
+        return _once(fallback())
+    except Exception as exc:  # noqa: BLE001 — 备用源也失败：把两因都留下，再原样上抛
+        if not isinstance(exc, UpdateCheckError):
+            raise
+        if primary is None:
+            raise                       # 这一轮是从备用源起步的（用户重试那个分支），没有主因可串
+        # 只报备用源那个错会把真正的原因埋掉（大陆场景下备用源经常正是那个 403 限流），
+        # 所以：日志里先主因后备用源，异常链 `from primary` 也串上（评审二审 §1）。
+        print(f"[update] ⚠️ 备用源也失败：{exc}（主因仍是主源那次：{primary}）", flush=True)
+        raise type(exc)(str(exc)) from primary
+
 
 
 # ---------------------------------------------------------------- 运行形态判定

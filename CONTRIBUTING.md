@@ -203,8 +203,28 @@ PR 描述请按仓库的 **[PR 模板](.github/pull_request_template.md)** 填�
       写完确认没有 What's Changed / New Contributors 那两节。
 - [ ] **产物对账**：Release 附件应为 **exe** + **`SHA256SUMS.txt`** + **`…-x86_64.AppImage`** 三样；
       缺 AppImage 会红灯（`needs: appimage` 是故意的 —— 宁可整体红，也不发一个「只有 exe」的版本）。
+- [ ] **R2 发布与复核（CI 自动，但要看结论）**：`publish-r2` job 把四个对象**覆盖式**传到
+      `https://dl.kcm-nixi.cn`（`latest.json` / exe / AppImage / `SHA256SUMS.txt`，**全部带
+      `Cache-Control: no-cache`** —— 默认的 `max-age=14400` 会让同键覆盖后 CDN 继续回旧内容，实测过），
+      并**走公开域名把两份产物整份下回来逐字节复核**。它是 `release` 的前置：这一步红就不建 Release
+      （客户端 v0.12.0 起主要从 R2 收更新，「发了版但用户收不到」必须整体红）。
+      凭据是仓库 secrets `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`；本机补发 / 事后体检：
+      `python scripts/publish_r2.py publish --dist dist --tag vX.Y.Z --env-file <KEY=VALUE 文件>`
+      （只核现状用 `... verify --tag vX.Y.Z`）。
+      ⚠️ 固定键 ⇒ 主源上**没有历史版本可回滚**：要退版只能去 GitHub tag 页拿附件。
+- [ ] **R2 的信任边界（评审 #103 §1，已决策：暂不做清单签名）**：`dl.kcm-nixi.cn` 是更新链路的
+      **信任锚**，清单自带的 sha256 只能证明「字节没坏」，证明不了「内容是我们发的」——
+      域名 / DNS / CF 账号 / 桶写权限任一失守 = 可下发任意程序（HTTPS 挡不住，攻击者持有有效证书）。
+      当前靠运维收敛：域名自动续费 + registrar lock + CF 2FA + CAA + **桶级最小权限 token**。
+      待办（下次大版本前评估）：① 把仓库 secret 换成只读 `vrclt` 的 R2 token（需在 CF 后台建：
+      R2 → Manage R2 API Tokens → Object Read & Write + 指定桶）；② 清单签名（Ed25519，公钥编译进
+      客户端）—— 做了之后 CDN 才退化成哑管道。应急开关：`VLT_UPDATE_SOURCE=github` 强制跳过主源。
 - [ ] **下载复核**：用 `scripts/verify_release.py <tag> "<本次新增的关键字符串>"` 把附件拉下来对账
-      （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）。
+      （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对），
+      并**顺带对账 R2**：清单版本 == 本次 tag、清单里每个产物的 sha256 == GitHub 的 digest、
+      公开域上那个对象的字节数 == 附件 size（Range 探针，不整下）。
+- [ ] **更新链路体检（客户端视角）**：`scripts/verify/verify_update_source.py --local-version <上一版>`
+      —— 走真实入口（检查 → 主源清单 → 下载 → sha256 → pending 落盘）跑一遍，顺带报告兜底源是否可用。
 
 ---
 

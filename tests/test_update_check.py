@@ -3,7 +3,10 @@
 跑法：.venv/Scripts/python.exe tests/test_update_check.py
 
 全程离线：HTTP 层一律用假 opener 注入（整体替换模块级 `uc._opener`），
-绝不真连 GitHub —— CI 机器不一定能连外网。
+绝不真连 GitHub / Cloudflare —— CI 机器不一定能连外网。
+
+两个更新源都要覆盖：主源（Cloudflare 清单，`manifest_payload()` 造）与兜底源
+（GitHub Release，`payload()` 造），外加「主源失败才回落」的顺序与留痕（`test_manifest_source`）。
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import traceback
 from contextlib import redirect_stdout
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request
 
 ROOT = Path(__file__).resolve().parents[1]          # 不写死本机路径：CI / 别人克隆后也能跑
@@ -117,6 +121,31 @@ def payload(tag: str = "v9.9.9", *, asset: str = EXE_NAME, asset_size: int | Non
     }).encode()
 
 
+def manifest_payload(version: str = "9.9.9", *, asset: str = EXE_NAME, sha: str = "a" * 64,
+                     size: int | None = 12345678, url: str | None = None, schema: int = 1,
+                     release_url: str | None = None, assets=None) -> bytes:
+    """造一份 **Cloudflare 清单**（`scripts/publish_r2.py` 发出来的那个形态）。
+
+    字段含义见该脚本头部；这里的手写形态是**故意的**：客户端对清单的容忍度由它钉住，
+    发布侧改格式会在 tests/test_publish_r2.py 的「发布 → 解析」往返里红掉。
+    """
+    if assets is None:
+        if url is None:
+            url = f"https://dl.kcm-nixi.cn/{asset}"
+        assets = {asset: {"url": url, "size": size, "sha256": sha}}
+        other = APPIMAGE_NAME if asset == EXE_NAME else EXE_NAME
+        assets[other] = {"url": f"https://dl.kcm-nixi.cn/{other}", "size": 1, "sha256": "b" * 64}
+    return json.dumps({
+        "schema": schema,
+        "version": version,
+        "tag": f"v{version}",
+        "published_at": "2026-10-14T00:00:00Z",
+        "release_url": release_url if release_url is not None else
+        f"https://github.com/nixi-agent/vrchat-livetranslate/releases/tag/v{version}",
+        "assets": assets,
+    }).encode()
+
+
 # ---------------------------------------------------------------- Task 1：版本解析与比较
 
 
@@ -144,12 +173,12 @@ def test_is_newer() -> None:
 # ---------------------------------------------------------------- Task 2：拉取最新 Release
 
 
-def test_fetch_latest_release() -> None:
+def test_fetch_latest_release_github() -> None:
     old = uc._opener
     try:
         op = FakeOpener([FakeResp(payload("v9.9.9"))])
         uc._opener = op
-        info = uc.fetch_latest_release()
+        info = uc.fetch_latest_release_github()
         assert info.version == "9.9.9" and info.tag == "v9.9.9"
         assert info.asset_name == EXE_NAME, f"默认要的应该是 exe：{info.asset_name}"
         assert info.asset_url.endswith("/" + EXE_NAME)
@@ -162,39 +191,39 @@ def test_fetch_latest_release() -> None:
 
         # ★ AppImage 形态：要的就是 AppImage 那个附件（Windows 的 exe 在不在都无所谓）
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset=APPIMAGE_NAME))])
-        img = uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+        img = uc.fetch_latest_release_github(asset_name=APPIMAGE_NAME)
         assert img.asset_name == APPIMAGE_NAME and img.asset_url.endswith("/" + APPIMAGE_NAME), \
             f"没按 asset_name 取附件：{img}"
         # ★ 缺 AppImage 附件（比如只带了 exe 的 Release）→ 报错，绝不悄悄拿别的附件顶上
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9"))])
         try:
-            uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+            uc.fetch_latest_release_github(asset_name=APPIMAGE_NAME)
             raise AssertionError("Release 里没有 AppImage 居然没报错")
         except uc.UpdateCheckError as e:
             assert "附件" in str(e) and APPIMAGE_NAME in str(e), f"提示不对：{e}"
         # ★ AppImage 没有 SHA256SUMS.txt 兜底（那个文件里只有 exe 一行）→ 必须自带 digest
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset=APPIMAGE_NAME, digest=None))])
         try:
-            uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+            uc.fetch_latest_release_github(asset_name=APPIMAGE_NAME)
             raise AssertionError("AppImage 没有 digest 居然放行（没法校验）")
         except uc.UpdateCheckError as e:
             assert "附件" in str(e)
 
         # assets[].size 缺省 → asset_size 为 None（进度条改走 Content-Length / indeterminate）
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", asset_size=None))])
-        assert uc.fetch_latest_release().asset_size is None
+        assert uc.fetch_latest_release_github().asset_size is None
 
         # ★ 没有 SHA256SUMS.txt（2026-09 起官方 Release 就不带这个文件）→ 靠 digest 照样能更新。
         #   这就是实测踩到的那个 bug：旧逻辑硬要求两个附件，删掉 sums 后更新检查直接静默失败。
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="sums"))])
-        _nosum = uc.fetch_latest_release()
+        _nosum = uc.fetch_latest_release_github()
         assert _nosum.asset_digest and not _nosum.sums_url, \
             f"缺 sums 时应当用 digest 顶上：digest={_nosum.asset_digest!r} sums={_nosum.sums_url!r}"
 
         # exe 缺了 → UpdateCheckError
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", drop="asset"))])
         try:
-            uc.fetch_latest_release()
+            uc.fetch_latest_release_github()
             raise AssertionError("缺 exe 居然没报错")
         except uc.UpdateCheckError as e:
             assert "附件" in str(e)
@@ -202,7 +231,7 @@ def test_fetch_latest_release() -> None:
         # 既没 digest 也没 sums（没有任何可校验的凭据）→ 也必须报错，绝不装一个没法验的包
         uc._opener = FakeOpener([FakeResp(payload("v9.9.9", digest=None, drop="sums"))])
         try:
-            uc.fetch_latest_release()
+            uc.fetch_latest_release_github()
             raise AssertionError("没有任何校验凭据居然没报错")
         except uc.UpdateCheckError as e:
             assert "附件" in str(e)
@@ -212,7 +241,7 @@ def test_fetch_latest_release() -> None:
             uc._opener = FakeOpener([HTTPError(uc.RELEASES_LATEST_API, code, "x",
                                                None, io.BytesIO(b""))])
             try:
-                uc.fetch_latest_release()
+                uc.fetch_latest_release_github()
                 raise AssertionError(f"HTTP {code} 居然没报错")
             except uc.UpdateCheckError as e:
                 assert "限流" in str(e), f"HTTP {code} 提示不对：{e}"
@@ -220,7 +249,7 @@ def test_fetch_latest_release() -> None:
         # 断网 → 网络不可达
         uc._opener = FakeOpener([URLError("timed out")])
         try:
-            uc.fetch_latest_release()
+            uc.fetch_latest_release_github()
             raise AssertionError("断网居然没报错")
         except uc.UpdateCheckError as e:
             assert "网络不可达" in str(e)
@@ -228,13 +257,339 @@ def test_fetch_latest_release() -> None:
         # 非 semver tag → 报错不崩
         uc._opener = FakeOpener([FakeResp(payload("release-2024"))])
         try:
-            uc.fetch_latest_release()
+            uc.fetch_latest_release_github()
             raise AssertionError("坏 tag 居然没报错")
         except uc.UpdateCheckError:
             pass
-        print("  fetch_latest_release OK")
+        print("  fetch_latest_release_github OK")
     finally:
         uc._opener = old
+
+
+# ---------------------------------------------------------------- Task 2b：主源（Cloudflare 清单）与回落
+
+
+def test_manifest_source() -> None:
+    """主源 = 自家 Cloudflare 清单：解析契约 + 「主源失败才回落 GitHub」的行为。
+
+    这条守的是本次改动的**全部目的**：大陆用户不再需要连 GitHub 才能收到更新。
+    """
+    old = uc._opener
+    try:
+        # ① 清单正常 → **一次网络就够**（不该再顺带去问 GitHub）
+        op = FakeOpener([FakeResp(manifest_payload("9.9.9"), url=uc.MANIFEST_URL)])
+        uc._opener = op
+        info = uc.fetch_latest_release()
+        assert info.tag == "v9.9.9" and info.version == "9.9.9", info
+        assert info.asset_name == EXE_NAME and info.asset_url == f"https://dl.kcm-nixi.cn/{EXE_NAME}"
+        assert info.asset_digest == "a" * 64 and info.asset_size == 12345678, info
+        assert info.sums_url == "", "主源的清单自带 sha256，不该再去要 SHA256SUMS.txt"
+        # 「看看这次更新了什么」的落点仍来自清单的 release_url（按钮行为不变）
+        assert info.html_url.endswith("/tag/v9.9.9") and "github.com" in info.html_url, info.html_url
+        assert op.calls == [uc.MANIFEST_URL], f"主源正常时不该再问别处：{op.calls}"
+        # UA 必须带（与 GitHub 那条同口径）：R2 访问日志里要能看出是哪一版在查
+        assert op.reqs[0].headers.get("User-agent", "").startswith("vrchat-livetranslate/")
+
+        # ② AppImage 形态：清单里两份都有 → 取 AppImage 那份（落点/校验值都跟附件名走）
+        uc._opener = FakeOpener([FakeResp(manifest_payload("9.9.9"), url=uc.MANIFEST_URL)])
+        img = uc.fetch_latest_release(asset_name=APPIMAGE_NAME)
+        assert img.asset_name == APPIMAGE_NAME and img.asset_url.endswith(APPIMAGE_NAME), img
+        assert img.asset_digest == "b" * 64, img
+
+        # ③ 清单里没有本形态的包 → 报错（与 GitHub 源同一句话，别悄悄拿另一个平台的包顶上）
+        only_exe = {"assets": {EXE_NAME: {"url": f"https://dl.kcm-nixi.cn/{EXE_NAME}",
+                                          "size": 1, "sha256": "a" * 64}}}
+        try:
+            uc.parse_manifest(manifest_payload("9.9.9", **only_exe).decode(), APPIMAGE_NAME)
+            raise AssertionError("清单里没有 AppImage 居然放行")
+        except uc.UpdateCheckError as e:
+            assert "附件" in str(e) and APPIMAGE_NAME in str(e), f"提示不对：{e}"
+
+        # ④ 不合契约的清单逐条必须报错（这里放过的形态，最后都会变成一次装了一半的更新）
+        bad_cases = [
+            ("坏 JSON", b"{not json"),
+            ("顶层不是对象", b"[1,2,3]"),
+            ("schema 不认识", manifest_payload("9.9.9", schema=99)),
+            ("version 不是严格 X.Y.Z", manifest_payload("9.9.9-beta")),
+            ("url 不是 https", manifest_payload("9.9.9", url="http://dl.kcm-nixi.cn/x.exe")),
+            ("url 在白名单外", manifest_payload("9.9.9", url="https://evil.example.com/x.exe")),
+            ("sha256 形态不对", manifest_payload("9.9.9", sha="deadbeef")),
+            ("assets 不是对象", manifest_payload("9.9.9", assets=[])),
+        ]
+        for name, body in bad_cases:
+            try:
+                uc.parse_manifest(body.decode(), EXE_NAME)
+                raise AssertionError(f"{name} 居然解析通过")
+            except uc.UpdateCheckError:
+                pass
+
+        # size 缺省 → asset_size 为 None（进度条走 Content-Length / indeterminate），不算错
+        m = json.loads(manifest_payload("9.9.9").decode())
+        del m["assets"][EXE_NAME]["size"]
+        assert uc.parse_manifest(json.dumps(m), EXE_NAME).asset_size is None
+
+        # ⑤ 主源失败 → **回落** GitHub：两个请求、顺序对、日志留痕（禁静默降级）
+        buf = io.StringIO()
+        op = FakeOpener([URLError("cf 连不上"), FakeResp(payload("v9.9.9"))])
+        uc._opener = op
+        with redirect_stdout(buf):
+            info = uc.fetch_latest_release()
+        assert info.version == "9.9.9" and info.asset_url.endswith("/" + EXE_NAME), info
+        assert op.calls == [uc.MANIFEST_URL, uc.RELEASES_LATEST_API], f"回落顺序不对：{op.calls}"
+        logs = buf.getvalue()
+        for needle in ("主源", "回落", "GitHub"):
+            assert needle in logs, f"回落没留痕（缺 {needle}）：{logs!r}"
+        # 清单**不合契约**也算主源失败 → 同样回落（不是让所有人都收不到更新）
+        uc._opener = FakeOpener([FakeResp(b"{not json", url=uc.MANIFEST_URL),
+                                 FakeResp(payload("v9.9.9"))])
+        assert uc.fetch_latest_release().version == "9.9.9"
+
+        # ⑥ 两边都挂 → 抛兜底源（GitHub）的错：用户看到的话术与改动前一致
+        uc._opener = FakeOpener([URLError("cf 连不上"), URLError("timed out")])
+        try:
+            uc.fetch_latest_release()
+            raise AssertionError("两个源都挂了居然没报错")
+        except uc.UpdateCheckError as e:
+            assert "网络不可达" in str(e), f"提示不对：{e}"
+
+        # ⑦ 域名与白名单是**两处**：改清单域名时漏改白名单 → 主源会被自己的守卫拦掉（这里红）
+        assert urlsplit(uc.MANIFEST_URL).hostname in uc.ALLOWED_HOSTS, "清单域名不在白名单里"
+        print("  manifest source OK（主源解析 + 回落 GitHub）")
+    finally:
+        uc._opener = old
+
+
+# ---------------------------------------------------------------- Task 2c：下载回落与各处守卫（评审 §3~§5）
+
+
+def test_download_fallback_and_guards() -> None:
+    """评审 §3（下载阶段回落）/§4（只回落主源、不吞自己的 bug）/§5（release_url 白名单）
+    以及端口口径与紧急开关。全部离线（假 opener 按顺序回应）。"""
+    old = uc._opener
+    tmp = OUT / "dl_fallback"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        # ① 主源产物下不动 → 用**同一版本**的 GitHub 附件重试一次
+        alt_bytes = b"fallback-" * 100
+        alt_sha = hashlib.sha256(alt_bytes).hexdigest()
+        prim = uc.parse_manifest(manifest_payload("9.9.9").decode(), EXE_NAME)
+        cf_url = prim.asset_url
+        gh_url = f"{DL_BASE}/v9.9.9/{EXE_NAME}"
+        op = FakeOpener([
+            URLError("主源下到一半断了"),          # ① 主源产物
+            # ② github_fallback 查 API：校验值就是备用源那份（同一版本的两个落点，字节一致）
+            FakeResp(payload("v9.9.9", digest="sha256:" + alt_sha)),
+            FakeResp(alt_bytes, url=gh_url),       # ③ GitHub 附件
+        ])
+        uc._opener = op
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            out = uc.download_and_verify(prim, tmp, fallback=lambda: uc.github_fallback(prim))
+        assert op.calls == [cf_url, uc.RELEASES_LATEST_API, gh_url], f"请求序列不对：{op.calls}"
+        assert out.read_bytes() == alt_bytes, "换源之后落盘的不是备用源那份字节"
+        meta = json.loads((tmp / uc.PENDING_JSON).read_text(encoding="utf-8"))
+        assert meta == {"version": "9.9.9", "sha256": alt_sha}, meta
+        logs = buf.getvalue()
+        for needle in ("主源下载失败", "换备用源重试", "备用源（GitHub）"):
+            assert needle in logs, f"回落没留痕（缺 {needle}）：{logs!r}"
+        out.unlink()
+        (tmp / uc.PENDING_JSON).unlink(missing_ok=True)
+
+        # ② 备用源版本对不上 → 宁可失败，绝不跨版本装
+        uc._opener = FakeOpener([FakeResp(payload("v8.8.8"))])
+        try:
+            uc.github_fallback(prim)
+            raise AssertionError("版本不一致居然放行")
+        except uc.UpdateCheckError as e:
+            assert "v8.8.8" in str(e) and "9.9.9" in str(e), f"提示没点名两个版本：{e}"
+
+        # ③ 用户取消 ≠ 失败：不许再发起第二次传输（否则点了关闭还去下一遍 37MB）
+        class _DownloadCancelled(Exception):
+            pass
+
+        assert uc._is_download_cancel(_DownloadCancelled()), "取消异常的类名契约变了"
+        from vlt.ui_text import _DownloadCancelled as RealCancel
+        assert uc._is_download_cancel(RealCancel()), \
+            "ui_text 里的 _DownloadCancelled 改名/改结构了：取消会被当成失败去重试"
+
+        called: list[int] = []
+
+        def boom_fallback():
+            called.append(1)
+            raise AssertionError("用户取消了还去回退")
+
+        class _CancelResp:
+            url = cf_url
+            headers: dict = {}
+
+            def read(self, n: int = -1) -> bytes:
+                raise _DownloadCancelled()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        uc._opener = MapOpener({cf_url: _CancelResp()})
+        try:
+            uc.download_and_verify(prim, tmp, fallback=boom_fallback)
+            raise AssertionError("取消居然没抛出去")
+        except _DownloadCancelled:
+            pass
+        assert not called, "用户取消后仍然发起了第二次传输"
+        assert not (tmp / (EXE_NAME + uc.NEW_SUFFIX)).exists(), "取消后残留没清"
+
+        # ④ 我们**自己的代码**坏了（TypeError）→ 必须原样冒出来 + 不许去向 GitHub 回落
+        real_parse = uc.parse_manifest
+
+        def boom(text, asset_name=EXE_NAME):  # noqa: ANN001, ANN202
+            raise TypeError("注入的代码 bug")
+
+        try:
+            uc.parse_manifest = boom
+            op = FakeOpener([FakeResp(manifest_payload("9.9.9"), url=uc.MANIFEST_URL)])
+            uc._opener = op
+            try:
+                uc.fetch_latest_release()
+                raise AssertionError("解析里的 TypeError 被吞成「回落 GitHub」了")
+            except TypeError:
+                pass
+            assert op.calls == [uc.MANIFEST_URL], f"代码 bug 不该触发回落：{op.calls}"
+        finally:
+            uc.parse_manifest = real_parse
+
+        # ⑤ release_url 会直接交给浏览器打开 → 与别的 URL 同口径（白名单外的换掉）
+        evil = json.loads(manifest_payload("9.9.9", release_url="https://evil.example.com/x"))
+        assert uc.parse_manifest(json.dumps(evil), EXE_NAME).html_url == \
+            f"{uc.RELEASES_HTML}/tag/v9.9.9"
+        good_url = f"{uc.RELEASES_HTML}/tag/v9.9.9"
+        keep = json.loads(manifest_payload("9.9.9", release_url=good_url))
+        assert uc.parse_manifest(json.dumps(keep), EXE_NAME).html_url == good_url
+
+        # ⑥ 端口/协议也算白名单口径（`host:8443` 不是我们发布东西的地方）
+        for bad in ("https://dl.kcm-nixi.cn:8443/x.exe", "http://dl.kcm-nixi.cn/x.exe"):
+            try:
+                uc.parse_manifest(manifest_payload("9.9.9", url=bad).decode(), EXE_NAME)
+                raise AssertionError(f"非默认端口 / 非 https 居然放行：{bad}")
+            except uc.UpdateCheckError:
+                pass
+        assert uc._is_allowed_url(uc.MANIFEST_URL)
+        assert not uc._is_allowed_url("https://dl.kcm-nixi.cn:8443/x")
+
+        # ⑦ 紧急开关：VLT_UPDATE_SOURCE=github → 直接跳过主源（评审要求「可吊销手段」）
+        buf = io.StringIO()
+        op = FakeOpener([FakeResp(payload("v9.9.9"))])
+        uc._opener = op
+        os.environ[uc.ENV_UPDATE_SOURCE] = "github"
+        try:
+            with redirect_stdout(buf):
+                forced = uc.fetch_latest_release()
+        finally:
+            os.environ.pop(uc.ENV_UPDATE_SOURCE, None)
+        assert forced.version == "9.9.9"
+        assert op.calls == [uc.RELEASES_LATEST_API], f"紧急开关没跳过主源：{op.calls}"
+        assert f"{uc.ENV_UPDATE_SOURCE}=github" in buf.getvalue(), "紧急开关没留痕"
+
+        # ⑧ 摘要不符 ≠ 网络失败 → **本次不自动换源**（评审二审 §3：换源救不了「源头对象就是错的」）
+        mismatch = uc.parse_manifest(manifest_payload("9.9.9", sha="f" * 64).decode(), EXE_NAME)
+        tampered = b"tampered-" * 1000
+        uc._opener = FakeOpener([FakeResp(tampered, url=mismatch.asset_url)])
+        tried: list[int] = []
+
+        def must_not_run() -> uc.ReleaseInfo:
+            tried.append(1)
+            raise AssertionError("摘要不符还去换源重试了")
+
+        uc._MISMATCH_SEEN.discard("9.9.9")          # 让这条用例从干净状态开始
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                uc.download_and_verify(mismatch, tmp, fallback=must_not_run)
+            raise AssertionError("摘要不符居然装上了")
+        except uc.ChecksumMismatch as e:
+            assert type(e) is uc.ChecksumMismatch, "摘要不符应当抛 ChecksumMismatch（子类）"
+        assert not tried, "摘要不符触发了备用源重试"
+        assert "摘要不符：本次不自动换源" in buf.getvalue(), f"没说明为什么不重试：{buf.getvalue()!r}"
+        assert not (tmp / (EXE_NAME + uc.NEW_SUFFIX)).exists(), "摘要不符的残留没清"
+
+        # ⑨ 用户再点一次「重试」→ **直接走备用源**（评审三审 R3：给这类失败留一条用户可达的出口）
+        alt_bytes = b"fallback-after-mismatch-" * 100
+        alt_sha = hashlib.sha256(alt_bytes).hexdigest()
+        gh_url = f"{DL_BASE}/v9.9.9/{EXE_NAME}"
+        op = FakeOpener([
+            FakeResp(payload("v9.9.9", digest="sha256:" + alt_sha)),   # ① github_fallback 查 API
+            FakeResp(alt_bytes, url=gh_url),                            # ② GitHub 附件
+        ])
+        uc._opener = op
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            out = uc.download_and_verify(mismatch, tmp, fallback=lambda: uc.github_fallback(mismatch))
+        assert op.calls == [uc.RELEASES_LATEST_API, gh_url], \
+            f"重试时又去下了主源（应当直接换源）：{op.calls}"
+        assert out.read_bytes() == alt_bytes, "换源后落的不是备用源那份字节"
+        assert "上一次是摘要不符 → 这次直接走备用源" in buf.getvalue(), \
+            f"这次重试没留痕：{buf.getvalue()!r}"
+        out.unlink()
+        (tmp / uc.PENDING_JSON).unlink(missing_ok=True)
+        uc._MISMATCH_SEEN.clear()
+
+        # ⑩ 备用源也失败（大陆常见的 403 限流）→ 两因都留痕 + 异常链指向主因（评审二审 §1）
+        prim2 = uc.parse_manifest(manifest_payload("9.9.9").decode(), EXE_NAME)
+        uc._opener = FakeOpener([URLError("主源连不上：connection reset")])
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                uc.download_and_verify(prim2, tmp,
+                                       fallback=lambda: uc.github_fallback(prim2))  # API 被限流 → 抛
+            raise AssertionError("备用源也失败时居然返回了文件")
+        except uc.UpdateCheckError as e:
+            logs = buf.getvalue()
+            assert "主源下载失败（" in logs, f"主源那次没留痕：{logs!r}"
+            assert "备用源也失败" in logs, f"备用源那次没留痕：{logs!r}"
+            assert "connection reset" in logs, f"主因被埋掉了：{logs!r}"
+            assert isinstance(e.__cause__, uc.UpdateCheckError), \
+                f"没有把主因串进异常链（__cause__={e.__cause__!r}）"
+            assert "connection reset" in str(e.__cause__), f"链上的主因不对：{e.__cause__}"
+        assert "9.9.9" not in uc._MISMATCH_SEEN, "网络类失败不该记进「摘要不符」名单"
+
+        # ⑪ 非 Exception 的 BaseException（如 asyncio.CancelledError）**不该**被当成网络失败去兜底
+        #    （评审三审 R1：`except BaseException` 会把这类信号误判成下载失败，白跑一次 37MB）
+        class _NotAnException(BaseException):
+            pass
+
+        called2: list[int] = []
+
+        def boom_alt() -> uc.ReleaseInfo:
+            called2.append(1)
+            raise AssertionError("非 Exception 的 BaseException 触发了备用源")
+
+        class _WeirdResp:
+            url = mismatch_prim_url = cf_url
+            headers: dict = {}
+
+            def read(self, n: int = -1) -> bytes:
+                raise _NotAnException()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        uc._MISMATCH_SEEN.clear()
+        uc._opener = MapOpener({cf_url: _WeirdResp()})
+        try:
+            uc.download_and_verify(prim, tmp, fallback=boom_alt)
+            raise AssertionError("BaseException 被吞了")
+        except _NotAnException:
+            pass
+        assert not called2, "非 Exception 的 BaseException 不该触发备用源重试"
+        print("  下载回落 / 收窄异常 / release_url / 端口 / 紧急开关 / 摘要不重试 / 重试换源 / 两因留痕 / BaseException 不兜底 OK")
+    finally:
+        uc._opener = old
+        uc._MISMATCH_SEEN.clear()       # 模块级状态：别泄给后面的用例
 
 
 # ---------------------------------------------------------------- Task 3：忽略列表读写
@@ -309,27 +664,31 @@ def test_should_prompt_and_check() -> None:
     try:
         buf = io.StringIO()
         with redirect_stdout(buf):
-            # 1) 有更新
-            uc._opener = FakeOpener([FakeResp(payload("v9.9.9"))])
+            # 1) 有更新 —— 走真实生产路径：主源（Cloudflare 清单）
+            uc._opener = FakeOpener([FakeResp(manifest_payload("9.9.9"), url=uc.MANIFEST_URL)])
             status, got = uc.check_for_updates("0.1.1", cfg)
             assert status == "update" and got is not None and got.version == "9.9.9"
             # 2) 已是最新
-            uc._opener = FakeOpener([FakeResp(payload("v0.1.1"))])
+            uc._opener = FakeOpener([FakeResp(manifest_payload("0.1.1"), url=uc.MANIFEST_URL)])
             status, got = uc.check_for_updates("0.1.1", cfg)
             assert status == "latest" and got is not None
             # 3) 在忽略列表
             uc.add_ignored_version(cfg, "9.9.9")
-            uc._opener = FakeOpener([FakeResp(payload("v9.9.9"))])
+            uc._opener = FakeOpener([FakeResp(manifest_payload("9.9.9"), url=uc.MANIFEST_URL)])
             status, got = uc.check_for_updates("0.1.1", cfg)
             assert status == "ignored" and got is not None
-            # 4) 失败：只留日志不抛、info=None
-            uc._opener = FakeOpener([URLError("timed out")])
+            # 4) 主源不通 → 回落 GitHub 依然能得出同样的结论（兜底路径也要端到端能用）
+            uc._opener = FakeOpener([URLError("cf 连不上"), FakeResp(payload("v9.9.9"))])
+            status, got = uc.check_for_updates("0.1.1", cfg)
+            assert status == "ignored" and got is not None, "主源挂了之后没回落到 GitHub"
+            # 5) 两个源都挂：只留日志不抛、info=None
+            uc._opener = FakeOpener([URLError("cf 连不上"), URLError("timed out")])
             status, got = uc.check_for_updates("0.1.1", cfg)
             assert status == "error" and got is None
         logs = buf.getvalue()
-        # 留痕是硬要求：成功/跳过/失败每个分支都要有一行 [update] 日志
+        # 留痕是硬要求：成功/跳过/失败每个分支都要有一行 [update] 日志；用哪个源也要看得见
         for needle in ("检查中", "发现新版本 v9.9.9（当前 v0.1.1）", "已是最新",
-                       "忽略列表，跳过", "检查失败"):
+                       "忽略列表，跳过", "检查失败", "更新源：Cloudflare", "回落 GitHub"):
             assert needle in logs, f"[update] 日志缺：{needle}"
         print("  should_prompt / check_for_updates OK")
     finally:
@@ -370,6 +729,18 @@ def test_download_and_verify() -> None:
         meta = json.loads((tmp / uc.PENDING_JSON).read_text(encoding="utf-8"))
         assert meta == {"version": "9.9.9", "sha256": good}, f"pending json 不对：{meta}"
         out.unlink()
+
+        # sums 里多一行（AppImage；2026-10 起 `release.yml` 就是这么写的）→ 仍按附件名找到 exe 那行。
+        # 这条钉的是**解析口径**：客户端是按附件名逐行找的，多出来的行不该影响取值
+        # （维护者 2026-10 明确：< v0.2.0 的老客户端不在考虑范围内，这里只保自己这套口径不歪）
+        two_line = (f"{good}  {EXE_NAME}\n"
+                    f"{'0' * 64}  {APPIMAGE_NAME}\n").encode()
+        uc._opener = MapOpener({sums_url: FakeResp(two_line, url=sums_url),
+                                exe_url: FakeResp(exe_bytes, url=exe_url)})
+        out = uc.download_and_verify(info, tmp)
+        assert out.read_bytes() == exe_bytes, "两行 sums 里没取到 exe 的校验值"
+        out.unlink()
+        (tmp / uc.PENDING_JSON).unlink(missing_ok=True)
 
         # 没有 Content-Length → total=None（进度条降级显示，绝不除零）
         uc._opener = MapOpener({sums_url: FakeResp(sums, url=sums_url),
@@ -844,7 +1215,9 @@ def main() -> int:
     tests = [
         test_parse_version,
         test_is_newer,
-        test_fetch_latest_release,
+        test_fetch_latest_release_github,
+        test_manifest_source,
+        test_download_fallback_and_guards,
         test_fmt_scalar,
         test_ignore_list_roundtrip,
         test_should_prompt_and_check,
