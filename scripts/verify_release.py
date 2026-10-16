@@ -353,6 +353,9 @@ unpacked = WORK / f"{exe.name}_extracted"
 # 发现顺序：PATH → 本仓库 venv → 旧的一次性环境（历史路径，留着兜底）。
 # 以前只写死最后一条，工具一旦不装在那个临时环境里，就永远「跳过=未验证」。
 _cands = [
+    # ⚠️ 最可信的是**跑本脚本那个解释器自己的 venv**（正常用法 = 仓库的 .venv）：
+    #    放在 PATH 之前 —— PATH 上可能挂着坏掉的同名工具（实测 qrvenv 那份缺模块，会挡住好工具）。
+    str(Path(sys.executable).parent / "pyinstxtractor-ng.exe"),
     shutil.which("pyinstxtractor-ng"),
     shutil.which("pyinstxtractor-ng.exe"),
     str(ROOT / ".venv" / "Scripts" / "pyinstxtractor-ng.exe"),
@@ -371,18 +374,35 @@ else:
     #    否则会把上千个 pyc 解到仓库工作区里。两处都踩过，所以这里校验返回码 + 固定 cwd。
     # ⚠️ 再加一层：它偶发「跑完却没有 pyc」。这一版做了**重试一次 + 回落到进程内 PYZ 读取器**，
     #    两条都不成时记「未验证」，**不记 ❌**（工具链抖动 ≠ 产物缺陷，见 _needles_via_embedded_pyz）。
-    r = None
+    # ⚠️ 候选要**逐个真试**：PATH 上可能挂着一个**坏掉的**同名工具（实测本机
+    #    `%LOCALAPPDATA%\Temp\qrvenv\Scripts\pyinstxtractor-ng.exe` 缺模块 →
+    #    `ModuleNotFoundError: No module named 'pyinstxtractor_ng'` → rc=1，
+    #    而它排在候选表最前，把仓库 venv 里的好工具整个挡住 —— 这才是本轮
+    #    「六个 needle 全红」的真因（不是产物问题，也不是「解包跑完没产出」）。
+    #    判据 = **真跑出 pyc**；失败时把工具自己的输出尾巴打出来，下次不用猜。
+    # ⚠️ 紧跟 `--self-test` 之后那一下也可能失败（exe 刚被加载过）→ 每个候选失败后隔 3 秒再试一次。
     pycs: list[Path] = []
-    tries = 0
-    for tries in (1, 2):
-        r = subprocess.run([str(xtractor), exe.name], cwd=str(WORK), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=900)
-        pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
+    attempts: list[str] = []
+    r = None
+    for cand in [Path(p) for p in _cands if p and Path(p).exists()]:
+        for attempt in (1, 2):
+            r = subprocess.run([str(cand), exe.name], cwd=str(WORK), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=900)
+            pycs = [p for p in unpacked.rglob("*.pyc")] if unpacked.is_dir() else []
+            attempts.append(f"{Path(cand).name}#{attempt}:rc={r.returncode}/pyc={len(pycs)}")
+            if pycs:
+                break
+            if attempt == 1:
+                tail = [ln for ln in ((r.stderr or "") + (r.stdout or "")).strip().splitlines() if ln.strip()]
+                for ln in tail[-2:]:
+                    print(f"      {Path(cand).name} 输出｜{ln[:150]}")
+                time.sleep(3.0)
         if pycs:
             break
+    print("  解包工具尝试：" + " | ".join(attempts))
     if pycs:
         check("pyinstxtractor-ng 解包成功", True,
-              f"rc={r.returncode}，{len(pycs)} 个 pyc（第 {tries} 次尝试）")
+              f"rc={r.returncode}，{len(pycs)} 个 pyc（{' | '.join(attempts[-1:])}）")
         for nd in NEEDLES:
             hits = [p.relative_to(unpacked).as_posix() for p in pycs
                     if nd.encode("utf-8") in p.read_bytes()]
@@ -396,7 +416,7 @@ else:
             check("包内 vlt/__init__.pyc 版本号 = 本次 tag", want in blob and b"0.0.1" not in blob,
                   f"含 {TAG.lstrip('v')}：{want in blob}；仍含 0.0.1：{b'0.0.1' in blob}")
     else:
-        print(f"  ⚠️ pyinstxtractor-ng 连续 {tries} 次都没产出 pyc（末次 rc={r.returncode if r else '?'}）"
+        print(f"  ⚠️ 所有候选解包工具都没跑出 pyc（{' | '.join(attempts) or '无可用工具'}）"
               f"→ 回落到进程内 PYZ 读取器再扫一遍")
         try:
             pyz_hits, vlt_blob = _needles_via_embedded_pyz(exe, NEEDLES)
