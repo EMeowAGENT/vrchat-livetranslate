@@ -215,7 +215,7 @@ pan-CJK 主机上主字体本来就画得出，无脑换只会把它换成同族
       `https://dl.kcm-nixi.cn`（`latest.json` / exe / AppImage / `SHA256SUMS.txt`，**全部带
       `Cache-Control: no-cache`** —— 默认的 `max-age=14400` 会让同键覆盖后 CDN 继续回旧内容，实测过），
       并**走公开域名把两份产物整份下回来逐字节复核**。它是 `release` 的前置：这一步红就不建 Release
-      （客户端 v0.12.0 起主要从 R2 收更新，「发了版但用户收不到」必须整体红）。
+      （客户端 v0.11.3 起主要从 R2 收更新，「发了版但用户收不到」必须整体红）。
       凭据是仓库 secrets `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`；本机补发 / 事后体检：
       `python scripts/publish_r2.py publish --dist dist --tag vX.Y.Z --env-file <KEY=VALUE 文件>`
       （只核现状用 `... verify --tag vX.Y.Z`）。

@@ -716,7 +716,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
   ```
 
 ---

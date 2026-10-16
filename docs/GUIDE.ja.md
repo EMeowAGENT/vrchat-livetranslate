@@ -690,7 +690,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
   ```
 
 ---

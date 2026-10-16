@@ -684,7 +684,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
   ```
 
 ---

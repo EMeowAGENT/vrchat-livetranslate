@@ -1,11 +1,11 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.0 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **本版（v0.12.0：一个功能 + 三处修复）各取新增符号名做 needle，一条一个、互不替代**：
+⚠️ **本版（v0.11.3：一个功能 + 三处修复）各取新增符号名做 needle，一条一个、互不替代**：
   ① 更新主源切到 Cloudflare R2（#103）：`fetch_latest_manifest`（`vlt/update_check.py` 新增的主源清单取回入口）
      —— v0.11.2 里不存在（旧版只有 GitHub 一条路）；
   ② 韩文显示成方框（#104）：`resolve_script_font_path`（按书写系统解析字体的统一入口）与
@@ -196,7 +196,7 @@ check("sha256 实测 == GitHub 服务端 digest", bool(declared) and declared ==
       f"\n     实测:   {mine}")
 
 # ---- 主更新源（Cloudflare R2）与 GitHub 附件必须是同一份字节 -------------------------------
-# 客户端 v0.12.0 起**主要从 R2 收更新**（GitHub 只是兜底），于是「发布出去的东西」有了两个落点，
+# 客户端 v0.11.3 起**主要从 R2 收更新**（GitHub 只是兜底），于是「发布出去的东西」有了两个落点，
 # 而本脚本前面复核的只是 GitHub 那份 —— 两边对不上，用户从主源拿到的就不是我们验过的字节。
 # 三层判据：清单版本 == 本次 tag；清单里每个产物的 sha256 == GitHub 的服务端 digest；
 # 公开域上那个对象的字节数 == GitHub 附件 size（Range 探针 1 字节拿 total，不整下）。
