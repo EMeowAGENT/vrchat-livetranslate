@@ -521,7 +521,7 @@ def sync_monitor_controls(gui) -> None:
 
     开关本体在主界面（`gui._monitor_var`，唯一那个变量）；这里只负责灰化，避免出现
     「主界面明明是关的，设置页还能拖音量」这种两处状态打架的观感。
-    Linux 没有这两个控件（`None`）→ 什么都不做。
+    控件还没建出来（headless / 本机没有该页）时两个都是 `None` → 什么都不做。
     """
     en = bool(gui._monitor_var.get()) if getattr(gui, "_monitor_var", None) is not None else False
     vol = getattr(gui, "_monitor_vol", None)
@@ -597,40 +597,42 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
 
-    # ---- 耳返（Windows）：开关在主界面（输出行），这里只留 输出设备 + 音量 ----
+    # ---- 耳返（两端都建）：开关在主界面（输出行），这里只留 输出设备 + 音量 ----
     # ⚠️ 开关的 BooleanVar 由主界面 `build_output_row` 创建（`gui._monitor_var`），这里**不再新建**
     #    —— 两个 BooleanVar 各存一份状态，会出现「主界面勾了、设置页以为没开」。
     gui._monitor_combo = None
     gui._monitor_vol = None
     gui._monitor_vol_lbl = None
     gui._monitor_vol_var = None
-    if not gui._linux_fixed_audio:
-        mon_cfg = audio_cfg.get("monitor") or {}
-        head = ttk.Frame(body)
-        head.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(head, text=t("耳返音量:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(0, 4))
-        gui._monitor_vol_var = tk.DoubleVar(
-            master=body, value=float(mon_cfg.get("volume", 70) or 70))
-        gui._monitor_vol = ttk.Scale(
-            head, from_=0, to=100, orient=tk.HORIZONTAL, length=130,
-            variable=gui._monitor_vol_var, command=gui._on_monitor_volume)
-        gui._monitor_vol.pack(side=tk.LEFT)
-        gui._monitor_vol_lbl = ttk.Label(
-            head, text=f"{float(mon_cfg.get('volume', 70) or 70):.0f}%",
-            style="Dim.TLabel", width=5)
-        gui._monitor_vol_lbl.pack(side=tk.LEFT, padx=(6, 0))
+    mon_cfg = audio_cfg.get("monitor") or {}
+    head = ttk.Frame(body)
+    head.pack(fill=tk.X, pady=(10, 0))
+    ttk.Label(head, text=t("耳返音量:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+    gui._monitor_vol_var = tk.DoubleVar(
+        master=body, value=float(mon_cfg.get("volume", 70) or 70))
+    gui._monitor_vol = tk.Scale(
+        head, from_=0, to=100, resolution=1, orient=tk.HORIZONTAL, length=130,
+        variable=gui._monitor_vol_var, command=gui._on_monitor_volume,
+        **_ui_tk.slider_kwargs())
+    gui._monitor_vol.pack(side=tk.LEFT)
+    gui._monitor_vol_lbl = ttk.Label(
+        head, text=f"{float(mon_cfg.get('volume', 70) or 70):.0f}%",
+        style="Dim.TLabel", width=5)
+    gui._monitor_vol_lbl.pack(side=tk.LEFT, padx=(6, 0))
 
-        row = ttk.Frame(body)
-        row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(row, text=t("耳返输出:"), style="Dim.TLabel").pack(side=tk.LEFT)
-        gui._monitor_combo = ttk.Combobox(row, values=[auto], state="readonly")
-        gui._monitor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
-        gui._monitor_combo.set(mon_cfg.get("device_name") or auto)
-        gui._monitor_combo.bind("<<ComboboxSelected>>", lambda e: gui._on_monitor_change())
+    row = ttk.Frame(body)
+    row.pack(fill=tk.X, pady=(4, 0))
+    ttk.Label(row, text=t("耳返输出:"), style="Dim.TLabel").pack(side=tk.LEFT)
+    gui._monitor_combo = ttk.Combobox(row, values=[auto], state="readonly")
+    gui._monitor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+    gui._monitor_combo.set(mon_cfg.get("device_name") or auto)
+    gui._monitor_combo.bind("<<ComboboxSelected>>", lambda e: gui._on_monitor_change())
+    if not gui._linux_fixed_audio:
+        # Linux 的采集固定只抓 VRChat 应用流，没有「同设备自动改 process」这一步。
         ttk.Label(body, text=t("耳返会同时放给你自己听；与 VRChat 音频同设备时采集会自动改为只抓 VRChat"),
                   style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(
                       anchor=tk.W, pady=(4, 0))
-        sync_monitor_controls(gui)
+    sync_monitor_controls(gui)
 
     # ---- 麦克风代理（**两端都建**：Windows 走 PortAudio 输出流，Linux 走 pw-cat 管道 +
     #      运行时声明的虚拟麦。语义完全一致，见 vlt/output/micproxy*.py 的模块头）----
@@ -791,10 +793,9 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
         row=1, column=0, sticky="w", pady=3)
     gui._gate_scale = tk.Scale(
         ggrid, from_=INPUT_GATE_MIN_DB, to=INPUT_GATE_MAX_DB, resolution=1,
-        orient=tk.HORIZONTAL, variable=gui._gate_var, showvalue=False, length=320,
-        bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
-        highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
-        command=lambda _v: gui._on_gate_change())
+        orient=tk.HORIZONTAL, variable=gui._gate_var, length=320,
+        command=lambda _v: gui._on_gate_change(),
+        **_ui_tk.slider_kwargs())
     gui._gate_scale.grid(row=1, column=1, sticky="w", padx=(8, 6), pady=3)
     gui._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
                                   style="Dim.TLabel", width=9)

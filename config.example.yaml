@@ -336,9 +336,13 @@ output:
     # 耳返（sidetone）：把送进虚拟声卡的译音**同时**放给你自己听（通常选耳机）。
     # 开关在**主界面「输出」行**（日常会开关）；音量与输出设备在「设置 → 音频」。
     # 音量独立于对方听到的响度；0 = 静音。默认关闭（第一次开常被当成回声）。
+    # 平台：Windows 走 PortAudio；Linux 走 `pw-cat --playback`（PipeWire 原生，
+    #    不依赖 sounddevice）。device_name 在 Linux 上存 PipeWire `node.name`，
+    #    留空 = 系统默认输出。
     # ⚠️ 耳返设备若与「VRChat 音频」是同一个端点、而采集方式还是 endpoint，程序会
     #    **自动改用 process 采集**（只抓 VRChat）以避免把自己的译音再翻一遍；
     #    系统不支持 process 时耳返会被自动关掉（状态栏与日志会说明原因）。
+    #    Linux 的「VRChat 音频」固定按应用流采集，不存在这个回路，无需处理。
     monitor:
       enabled: false
       device_name: ""        # 空 = 系统默认输出（建议选耳机）

@@ -180,8 +180,8 @@ Hello, I'm Nixi. Today, we're going to test out the real-time simultaneous inter
 若升级前描述已经改变，或多个设备同名而无法确定原节点，请重新选择麦克风。
 同名选项会显示节点名称供区分；旧描述无法唯一匹配时按界面「自动检测」使用默认输入。
 
-Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」只有**一个下拉**（`麦克风`），
-`VRChat 音频` 与 `译音输出` 两项在 Linux 上不暴露给用户。
+Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」在 Linux 上只暴露
+**麦克风**与**耳返输出**两项，`VRChat 音频` 与 `译音输出` 不暴露给用户。
 
 - **「VRChat 音频」（别人说话）自动跟随 VRChat**：采集目标是 VRChat 自己的音频输出流
   （PipeWire 里的 `Stream/Output/Audio`，节点名通常就是 `VRChat.exe`），**不是**系统默认输出。
@@ -193,6 +193,11 @@ Linux 与 Windows 在这里**刻意不一样**：设置里的「音频设备」�
   VRChat 中途退出、或播放流增减，都会回到等待/重开，重新启动 VRChat 会自动接上，**不用重启本程序**。
 - **译音输出固定写到本程序自建的虚拟麦**（`vlt_mic_sink` / `vlt_mic_source`），
   同样不需要选输出设备；「输出」那一行的「译音输出」勾选框照旧是这条通路的总开关。
+- **耳返（sidetone）可用**：主界面「输出」行勾「耳返」，输出设备与音量在 设置 → 音频
+  （建议耳机）。播放走 `pw-cat --playback`（PipeWire 原生，不依赖 PortAudio）；下拉里存的是稳定的
+  `node.name`，留「自动检测」= 当前系统默认输出。耳返取的是**实际发给虚拟声卡的那批字节**
+  （播放侧 tap），所以与 VRChat 听到的同一条时间轴；Linux 的「VRChat 音频」固定按应用流采集，
+  耳返放到任何 sink 都不会被当成「别人说话」再翻一遍。
 - `config.yaml` 里的 `capture.loopback_device` 与 `output.audio.device_name` 在 Linux 上**被忽略**
   （键仍保留，Windows 侧照常生效），界面也不再把它们写出来。
 - **改「麦克风」后**：麦克风代理的**直通通路（VRChat 听到的原声）即时切换**，不用重开程序；
@@ -431,6 +436,7 @@ output:
 | 门限「开着」，远处小声的玩家照样被翻 | ⚠️ 不该发生 | 门限判在**多路混音之后**（与 Windows 同口径）。真发生请报 bug，并附启动日志里的 `[gate]` 行 |
 | VRChat 的麦克风列表里没有 `VLT Mic` | 设备只在程序运行期间存在 | **先起本程序再起 VRChat**；或在 VRChat 音频设置里刷新设备列表 |
 | 对方听不到译音 | 译音通路没开 / VRChat 没选 `VLT Mic` | 界面上勾「译音输出」，并在 VRChat 里把麦克风选成 `VLT Mic` |
+| 勾了耳返但自己听不到 | 主界面「耳返」没勾 / 选错输出节点 / `pw-cat` 起不来 | 先确认主界面「输出」行的「耳返」已勾；日志里看 `[monitor] 耳返已打开：…`；没有就换成具体的耳机 sink（别选 `VLT Mic` 这类内部节点），或用 `pw-dump` 确认输出节点的 `node.name` |
 | `pactl: Connection refused` | PulseAudio 兼容层没跑/不可达 | **不影响我们** —— 全程用 `pw-*` 原生工具。用 `pw-dump` 验证 PipeWire 本身是否正常 |
 | 系统声音突然没了 | ⚠️ 不该发生 | 报告 bug。虚拟声卡**在设计上不可能**被选成默认输出（依据见 `docs/平台约束记录.md` 第一节） |
 

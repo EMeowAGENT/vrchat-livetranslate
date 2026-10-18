@@ -108,6 +108,7 @@ class LinuxMicProxy(MicProxy):
             return False
 
         self._opened = True
+        self._start_monitor()
         return True
 
     def close(self) -> None:
@@ -125,6 +126,11 @@ class LinuxMicProxy(MicProxy):
         if th is not None and th.is_alive():
             th.join(timeout=2.0)
         self._thread = None
+
+        # 耳返是独立的一路输出（与虚拟声卡/麦克风无关），先关它再拆虚拟声卡。
+        if self._monitor is not None:
+            self._monitor.close()
+            self._monitor = None
 
         out = self._out
         self._out = None

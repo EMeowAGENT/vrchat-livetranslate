@@ -2096,6 +2096,12 @@ def monitor_capture_conflict(monitor_cfg: dict, capture_cfg: dict) -> bool:
     拿不准（枚举失败 / 找不到目标）一律返回 False —— 宁可漏判、由用户自己听出来，
     也不要因为一次枚举失败就把采集方式悄悄改掉。
     """
+    if platform.IS_LINUX:
+        # Linux 的「别人说话」固定按 VRChat 应用流采集（`pick_vrchat_targets`），
+        # 耳返放到任何 sink 都进不了那条腿 —— 不存在 Windows 端点 loopback 的回灌面。
+        # 不在这里早退的话，耳返选中默认输出时 `pick_loopback_target()` 会把它判成
+        # 「同一设备」，进而被 `apply_ear_monitor_policy()` 以「不支持 process」误关。
+        return False
     mon_name = str((monitor_cfg or {}).get("device_name") or "").strip()
     if not mon_name:
         mon_name = _default_output_name()

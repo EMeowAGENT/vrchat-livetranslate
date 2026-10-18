@@ -145,6 +145,19 @@ def _combo_width(names, minimum: int = 9, font_spec=None) -> int:
     return max(minimum, max((_char_width_for(str(n), f) for n in names), default=0))
 
 
+def slider_kwargs(*, width: int = 10) -> dict:
+    """深色主题的 `tk.Scale` 统一外观（全仓滑条只该有这一套）。
+
+    为什么不用 `ttk.Scale`：它跟 ttk 主题（`TScale`）走，槽/滑块/按下态是另一套配色，
+    放在本仓库的深色界面里会明显不一致（耳返音量曾经就是唯一一个 `ttk.Scale`）。
+    几何相关的 `from_` / `to` / `length` / `variable` / `command` 由调用点各自给，
+    这里只固化「看起来是什么样」。
+    """
+    return dict(showvalue=False, width=width, bg=PANEL, fg=TEXT,
+                troughcolor=SURFACE, activebackground=ACCENT,
+                highlightthickness=0, bd=0, sliderrelief=tk.FLAT)
+
+
 def combo_values(combo) -> list[str]:
     """读回 ttk.Combobox 的候选值（跨平台安全）。
 

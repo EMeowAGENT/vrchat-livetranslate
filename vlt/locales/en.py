@@ -168,6 +168,9 @@ STRINGS: dict[str, str] = {
     "耳返输出:": "Sidetone output:",
     "耳返打开失败（设备被占用或不可用），其余功能不受影响":
         "Sidetone failed to open (device busy or unavailable); everything else is unaffected",
+    "耳返设备打不开，已禁用耳返（其余功能不受影响）":
+        "Cannot open the sidetone device; sidetone is disabled (everything else is unaffected)",
+    "耳返暂不支持当前平台": "Sidetone is not supported on this platform",
     "耳返：{device}，音量 {vol}%": "Sidetone: {device}, volume {vol}%",
     "耳返已关闭": "Sidetone off",
     "耳返要配合「译音输出」才有声音": "Sidetone only produces sound together with the Voice Output switch",

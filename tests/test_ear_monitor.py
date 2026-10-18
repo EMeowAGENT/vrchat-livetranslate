@@ -5,10 +5,11 @@
 
 1. **音量**：0% 全静音、50% 幅度减半、100% 原样；缓冲里已有的旧音频也按新音量放。
 2. **缓冲**：推进来的 PCM 超过上限时**丢最旧的**；欠载补零（不拖引擎线程）。
+   （沿用 #108 的 120ms 口径；真机实测确认播放侧 tap 下足够。）
 3. **失败口径**：设备打不开 / 平台不支持 → 只禁用耳返，返回 False，不抛、不影响代理。
 4. **接线**：耳返必须从**播放侧** tap（`MicProxy._drain_translated()`）—— 它拿到的是实际
    发给虚拟声卡的那批字节、同一条时间轴；`TranslatedSink.push()` **不许**喂耳返
-   （那里是 TTS 突发入口，一个 delta 常有几百 ms，会被 120ms 监听缓冲截断）。
+   （那里是 TTS 突发入口；旧实现会被 120ms 监听缓冲从中间截断）。
 5. **热重开**：界面改开关/设备 → `restart_monitor()` 只重开这一路，不动虚拟声卡。
 6. **回路策略**：耳返与采集端点同设备 + 端点模式 → 自动改 process；
    process 不可用 → 关掉耳返并 warn（绝不静默留一个会自我回译的回路）。
@@ -87,7 +88,7 @@ def test_volume_math() -> None:
         m = EarMonitor(volume=volume)
         m._opened = True                                   # noqa: SLF001 — 跳过设备
         frame = int(fill).to_bytes(2, "little", signed=True) * 2
-        m._buf.extend(frame * samples)                     # noqa: SLF001
+        m.push(frame * samples)                            # noqa: SLF001
         out = np.zeros((samples, 2), dtype=np.int16)
         m._callback(out, samples, None, None)               # noqa: SLF001
         return out
@@ -126,9 +127,11 @@ def test_open_failure_is_contained() -> None:
     sys.modules["sounddevice"] = fake_sd
     from vlt import platform
     r1 = _patch(platform, "IS_WINDOWS", True)
+    r2 = _patch(platform, "IS_LINUX", False)
     try:
         assert m.open() is False, "设备打不开必须返回 False"
     finally:
+        r2()
         r1()
         if old_sd is None:
             sys.modules.pop("sounddevice", None)
@@ -139,15 +142,127 @@ def test_open_failure_is_contained() -> None:
     print("  设备打不开：返回 False + warn，不抛 OK")
 
 
-def test_non_windows_is_disabled() -> None:
+def test_linux_uses_pwcat() -> None:
+    """Linux：走 pw-cat 管道（不依赖 sounddevice），设备名解析成 PipeWire node.name。"""
+    import time
+
+    import vlt.output.earmonitor as EM
+    from vlt import platform
+
+    argv: dict = {}
+    written: list[bytes] = []
+
+    class FakeStdin:
+        def write(self, data):                # noqa: ANN001
+            written.append(bytes(data))
+            time.sleep(0.005)                 # 假装 pw-cat 在按实时消费，别让循环空转
+
+        def close(self):                      # noqa: ANN201
+            pass
+
+    class FakeProc:
+        def __init__(self, a, **kw):          # noqa: ANN001, ANN003
+            argv["argv"] = a
+            self.stdin = FakeStdin()
+            self.stderr = None
+            self.terminated = False
+
+        def poll(self):                       # noqa: ANN201
+            return None
+
+        def terminate(self):                  # noqa: ANN201
+            self.terminated = True
+
+        def kill(self):                       # noqa: ANN201
+            pass
+
+        def wait(self, timeout=None):         # noqa: ANN001, ANN201
+            return 0
+
+    fake_backend = SimpleNamespace(query_devices=lambda: [
+        {"name": "Headset", "node_name": "alsa_output.headset"},
+    ])
+    r1 = _patch(platform, "IS_LINUX", True)
+    r2 = _patch(platform, "IS_WINDOWS", False)
+    r3 = _patch(platform, "device_backend", lambda: fake_backend)
+    r4 = _patch(EM.subprocess, "Popen", lambda a, **kw: FakeProc(a, **kw))
+    m = EarMonitor(device_name="alsa_output.headset", volume=50,
+                   on_status=lambda *a: None)
+    try:
+        assert m.open() is True, "Linux 必须能打开耳返（pw-cat）"
+        assert any(a == "--target=alsa_output.headset" for a in argv["argv"]), argv["argv"]
+        assert argv["argv"][0] == "pw-cat" and "--playback" in argv["argv"]
+        assert argv["argv"][-1] == "-", "裸 PCM 必须从 stdin 进"
+        frame = (1000).to_bytes(2, "little", signed=True) * 2
+        m.push(frame * BLOCK_FRAMES)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            vals = [int(np.frombuffer(b, dtype=np.int16).max()) for b in list(written)]
+            if 500 in vals:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError(f"Linux 耳返没有按音量缩放后写进 pw-cat：{set(vals)}")
+    finally:
+        m.close()
+        r4(); r3(); r2(); r1()
+    assert m.opened is False
+    print("  Linux：pw-cat 管道 + --target=node.name + 音量缩放 OK")
+
+
+def test_linux_unknown_device_falls_back_to_default() -> None:
+    """设备名解析不到 → 留痕并用系统默认输出（与 Windows 同一口径）。"""
+    import time
+
+    import vlt.output.earmonitor as EM
+    from vlt import platform
+
+    argv: dict = {}
+
+    class FakeProc:
+        def __init__(self, a, **kw):          # noqa: ANN001, ANN003
+            argv["argv"] = a
+            self.stdin = SimpleNamespace(
+                write=lambda _b: time.sleep(0.005), close=lambda: None)
+            self.stderr = None
+
+        def poll(self):                       # noqa: ANN201
+            return None
+
+        def terminate(self):                  # noqa: ANN201
+            pass
+
+        def kill(self):                       # noqa: ANN201
+            pass
+
+        def wait(self, timeout=None):         # noqa: ANN001, ANN201
+            return 0
+
+    r1 = _patch(platform, "IS_LINUX", True)
+    r2 = _patch(platform, "IS_WINDOWS", False)
+    r3 = _patch(platform, "device_backend",
+                lambda: SimpleNamespace(query_devices=lambda: []))
+    r4 = _patch(EM.subprocess, "Popen", lambda a, **kw: FakeProc(a, **kw))
+    m = EarMonitor(device_name="Nope", on_status=lambda *a: None)
+    try:
+        assert m.open() is True
+        assert not any(a.startswith("--target=") for a in argv["argv"]), argv["argv"]
+    finally:
+        m.close()
+        r4(); r3(); r2(); r1()
+    print("  Linux：找不到设备 → 系统默认输出 OK")
+
+
+def test_unknown_platform_is_disabled() -> None:
     from vlt import platform
     m = EarMonitor(on_status=lambda *a: None)
-    r = _patch(platform, "IS_WINDOWS", False)
+    r1 = _patch(platform, "IS_WINDOWS", False)
+    r2 = _patch(platform, "IS_LINUX", False)
     try:
         assert m.open() is False
     finally:
-        r()
-    print("  非 Windows：明确禁用（不是静默无声）OK")
+        r2(); r1()
+    print("  非 Windows/Linux：明确禁用（不是静默无声）OK")
 
 
 # ---------------------------------------------------------------- ③ 接线 / 热重开
@@ -271,7 +386,9 @@ def test_proxy_restart_monitor() -> None:
 
 def test_conflict_detection() -> None:
     import vlt.engine as E
+    from vlt import platform
 
+    r0 = _patch(platform, "IS_LINUX", False)     # 这是 Windows 端点采集的判定
     r1 = _patch(E, "_default_output_name", lambda: "Speakers")
     r2 = _patch(E, "resolve_device_name", lambda name, kind: 5 if name == "Speakers" else None)
     r3 = _patch(E, "_output_name_of", lambda idx: "Speakers")
@@ -288,7 +405,15 @@ def test_conflict_detection() -> None:
         r3()
         r2()
         r1()
-    print("  同设备判定：自动/自动、同名（带 [Loopback] 后缀）都判为冲突 OK")
+        r0()
+    r = _patch(platform, "IS_LINUX", True)
+    try:
+        assert E.monitor_capture_conflict({"enabled": True, "device_name": "Speakers"},
+                                          {"loopback_device": "Speakers"}) is False, \
+            "Linux 采集固定只抓 VRChat 应用流，不存在耳返回灌"
+    finally:
+        r()
+    print("  同设备判定：Windows 自动/同名判冲突；Linux 恒不冲突 OK")
 
 
 def test_effective_mode_upgrades_to_process() -> None:
@@ -400,7 +525,9 @@ if __name__ == "__main__":
     test_volume_math()
     test_ring_drops_oldest_and_pads_silence()
     test_open_failure_is_contained()
-    test_non_windows_is_disabled()
+    test_linux_uses_pwcat()
+    test_linux_unknown_device_falls_back_to_default()
+    test_unknown_platform_is_disabled()
     test_push_does_not_feed_monitor()
     test_playout_tap_feeds_monitor_same_bytes()
     test_silence_is_not_pushed_to_monitor()

@@ -24,19 +24,15 @@ from .i18n import t
 from .output.overlay import resolve_offset
 from . import ui_tk
 from .ui_theme import (
-    ACCENT,
     FONT_MAX,
     FONT_MIN,
-    PANEL,
     PANEL_H_MAX,
     PANEL_H_MIN,
     PANEL_W_MAX,
     PANEL_W_MIN,
     SETTINGS_WIDTH,
     SRC_FONT_MIN,
-    SURFACE,
     TAB_INSET_X,
-    TEXT,
     TEXT_DIM,
     TEXT_MUTED,
 )
@@ -208,10 +204,9 @@ def build_tune_grid(grid: ttk.Frame, specs: list[tuple], label_w: int,
         val_lbl = ttk.Label(cell, text=f"{ctx.tune_values[key]:g}{unit}",
                             font=ui_tk.FONT_STATUS, foreground=TEXT_DIM, width=7)
         tk.Scale(cell, from_=lo, to=hi, resolution=res, orient=tk.HORIZONTAL,
-                 variable=var, showvalue=False, length=104, width=10,
-                 bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
-                 highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
-                 command=make_tune_handler(key, var, val_lbl, unit, ctx)).pack(
+                 variable=var, length=104,
+                 command=make_tune_handler(key, var, val_lbl, unit, ctx),
+                 **ui_tk.slider_kwargs()).pack(
                      side=tk.LEFT, padx=(4, 6))
         val_lbl.pack(side=tk.LEFT)
         ctx.tune_vars[key] = var
@@ -362,10 +357,8 @@ def build_desktop_tune_page(parent: ttk.Frame, ctx: DesktopCtx,
         lbl = ttk.Label(cell, text="", font=ui_tk.FONT_STATUS,
                         foreground=TEXT_DIM, width=width)
         tk.Scale(cell, from_=lo, to=hi, resolution=res, orient=tk.HORIZONTAL,
-                 variable=var, showvalue=False, length=104, width=10,
-                 bg=PANEL, fg=TEXT, troughcolor=SURFACE,
-                 activebackground=ACCENT, highlightthickness=0, bd=0,
-                 sliderrelief=tk.FLAT, command=cmd).pack(
+                 variable=var, length=104, command=cmd,
+                 **ui_tk.slider_kwargs()).pack(
                      side=tk.LEFT, padx=(4, 6))
         lbl.pack(side=tk.LEFT)
         return var, lbl
@@ -407,10 +400,9 @@ def build_desktop_tune_page(parent: ttk.Frame, ctx: DesktopCtx,
         r3, text=f"{ctx.desktop_alpha_var.get():.2f}",
         font=ui_tk.FONT_STATUS, foreground=TEXT_DIM, width=_w_alpha)
     tk.Scale(r3, from_=0.20, to=1.00, resolution=0.05, orient=tk.HORIZONTAL,
-             variable=ctx.desktop_alpha_var, showvalue=False, length=104, width=10,
-             bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
-             highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
-             command=lambda _v="": on_desktop_alpha(ctx)).pack(
+             variable=ctx.desktop_alpha_var, length=104,
+             command=lambda _v="": on_desktop_alpha(ctx),
+             **ui_tk.slider_kwargs()).pack(
                  side=tk.LEFT, padx=(4, 6))
     ctx.desktop_alpha_lbl.pack(side=tk.LEFT)
     ctx.desktop_drag_btn = ttk.Button(

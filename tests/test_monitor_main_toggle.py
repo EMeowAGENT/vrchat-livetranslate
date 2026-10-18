@@ -9,7 +9,7 @@
 3. 接线：勾选 → 写 `output.audio.monitor.enabled` + `proxy.restart_monitor(...)`；
 4. 设置页只剩音量/设备，且它们的可用态跟着主界面开关走；
 5. 「译音输出」没勾时勾耳返 → 照开流（配置一致）但状态栏说明为什么没声；
-6. Linux（无实现）→ 主界面不建这个控件。
+6. Linux（pw-cat 实现）→ 同样建主界面开关与设置页音量/设备。
 
 只读写 out/ 下的沙箱配置；代理是假对象，不开任何真实音频设备。
 """
@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import tkinter as tk
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,12 +39,6 @@ import vlt.i18n as _i18n  # noqa: E402
 
 _i18n.detect_system_language = lambda: "zh"
 
-from vlt import gui_layout  # noqa: E402
-from vlt import platform as _plat  # noqa: E402
-
-#: Linux 没有耳返实现（主界面不建控件、设置页也没有音量/设备）→ Windows 专用用例需明确跳过，
-#: 不能判红（CI 的 linux-tests 腿就是这么挂的）。
-_SKIP_WIN = "  ⚠️ Linux：耳返无实现（控件不建）→ 跳过这条 Windows 专用用例"
 from vlt.gui import TranslationGUI  # noqa: E402
 
 
@@ -94,9 +89,6 @@ def _build() -> TranslationGUI:
 # ---------------------------------------------------------------- ① 位置
 
 def test_toggle_lives_in_output_row() -> None:
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         assert gui._monitor_check is not None, "Windows 主界面必须有耳返开关"
@@ -116,9 +108,6 @@ def test_toggle_lives_in_output_row() -> None:
 # ---------------------------------------------------------------- ② 接线
 
 def test_toggle_writes_config_and_restarts_monitor() -> None:
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         gui._proxy = _FakeProxy()                        # noqa: SLF001
@@ -147,9 +136,6 @@ def test_toggle_saves_config_without_settings_controls() -> None:
     审阅 #3（EMeowAGENT）：早先 `_on_monitor_change` 在「没有音量控件」时整体早退，
     会把用户刚点的开关静默丢掉；现在只跳过 UI 同步，配置照常落盘。
     """
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         gui._proxy = None                                # noqa: SLF001
@@ -171,9 +157,6 @@ def test_toggle_saves_config_without_settings_controls() -> None:
 
 
 def test_settings_page_keeps_only_volume_and_device() -> None:
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         win = gui._settings_win                             # noqa: SLF001
@@ -183,6 +166,15 @@ def test_settings_page_keeps_only_volume_and_device() -> None:
         assert "耳返音量:" in texts, texts
         assert "耳返输出:" in texts, texts
         assert gui._monitor_vol is not None and gui._monitor_combo is not None
+
+        # 外观守卫：耳返音量必须和其他滑条同一套深色 tk.Scale（不许用 ttk.Scale）
+        assert isinstance(gui._monitor_vol, tk.Scale), \
+            f"耳返音量必须是 tk.Scale（ttk.Scale 跟 ttk 主题走，样式会不一致）：{type(gui._monitor_vol)}"
+        for key in ("bg", "fg", "troughcolor", "activebackground",
+                    "highlightthickness", "bd", "sliderrelief", "width"):
+            assert str(gui._monitor_vol.cget(key)) == str(gui._gate_scale.cget(key)), \
+                (f"耳返音量滑条的 {key} 与门限滑条不一致："
+                 f"{gui._monitor_vol.cget(key)!r} != {gui._gate_scale.cget(key)!r}")
 
         # 可用态跟主界面开关走
         gui._monitor_var.set(False)                       # noqa: SLF001
@@ -200,9 +192,6 @@ def test_settings_page_keeps_only_volume_and_device() -> None:
 
 
 def test_sidetone_without_voice_output_says_why() -> None:
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         gui._proxy = _FakeProxy()                        # noqa: SLF001
@@ -221,9 +210,6 @@ def test_sidetone_without_voice_output_says_why() -> None:
 
 def test_toggle_without_proxy_says_why() -> None:
     """没有麦克风代理（代理关掉 / 测试进程）时勾耳返：配置照常存，但要说清为什么没声。"""
-    if _plat.IS_LINUX:
-        print(_SKIP_WIN)
-        return
     gui = _build()
     try:
         gui._proxy = None                                # noqa: SLF001
@@ -240,21 +226,19 @@ def test_toggle_without_proxy_says_why() -> None:
         gui._root.destroy()                              # noqa: SLF001
 
 
-# ---------------------------------------------------------------- ③ Linux 不建
+# ---------------------------------------------------------------- ③ Linux 也建
 
-def test_no_toggle_on_linux() -> None:
-    old = gui_layout.IS_LINUX
-    gui_layout.IS_LINUX = True
+def test_toggle_on_linux_too() -> None:
+    """Linux 已有 pw-cat 实现 → 主界面开关与设置页音量/设备都必须建出来。"""
+    gui = _build()
     try:
-        gui = _build()
-        try:
-            assert gui._monitor_check is None, "Linux 无耳返实现，不该建一个点了没反应的开关"
-            assert gui._monitor_var is None
-            print("  Linux：主界面不建耳返开关 OK")
-        finally:
-            gui._root.destroy()                          # noqa: SLF001
+        assert gui._monitor_check is not None, "Linux 有 pw-cat 耳返实现，必须建主界面开关"
+        assert gui._monitor_var is not None
+        assert gui._monitor_vol is not None and gui._monitor_combo is not None, \
+            "设置页必须有耳返音量/输出设备"
+        print("  Linux：主界面开关 + 设置页音量/设备都在 OK")
     finally:
-        gui_layout.IS_LINUX = old
+        gui._root.destroy()                              # noqa: SLF001
 
 
 if __name__ == "__main__":
@@ -265,5 +249,5 @@ if __name__ == "__main__":
     test_settings_page_keeps_only_volume_and_device()
     test_sidetone_without_voice_output_says_why()
     test_toggle_without_proxy_says_why()
-    test_no_toggle_on_linux()
+    test_toggle_on_linux_too()
     print("ALL PASSED")

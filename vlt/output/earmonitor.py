@@ -12,9 +12,9 @@
 字节（已过 `output.audio.level` 的增益 + 限幅），同一时刻再给耳返一份 —— 所以「你听到的」
 与「对方听到的」不只是同一段音频，而是**同一条播放时间轴**。
 
-⚠️ 不要在 `TranslatedSink.push()` 处 tap：那是 TTS 突发到达的入口，一个 delta 常有几百 ms，
-而本模块的缓冲只有 120ms（满丢最旧）→ 会把**正在播的句子截断**（真机症状：
-「上一句还没播完就开始播下一句」，而进游戏那一路完全正常）。
+⚠️ 不要在 `TranslatedSink.push()` 处 tap：那是 TTS 突发到达的入口，一个 delta 常有几百 ms。
+旧实现就是在这里 tap、且监听缓冲只有 120ms（满丢最旧）→ 会把**正在播的句子截断**
+（真机症状：「上一句还没播完就开始播下一句」，而进游戏那一路完全正常）。
 
 ## 与采集回路的关系（重要）
 
@@ -28,14 +28,30 @@
 声学回路（耳返从外放漏进真实麦克风）不在这里处理：那是物理路径，需要闸门/AEC，
 见 `docs/dev/` 的已知限制。
 
+## 缓冲
+
+监听缓冲沿用 #108 的 **120ms、满丢最旧**。真机实测确认：播放侧 tap 的 20ms 块 +
+120ms 缓冲在 Linux 上也足够，不需要额外的「整块队列 + monotonic 定速输出」。
+
+## 平台
+
+* Windows → sounddevice / PortAudio 回调（默认输出或按名选的端点）；
+* Linux   → `pw-cat --playback` 管道 + 写线程（PipeWire 原生，与采集/译音同一条路）。
+  Linux 产物本来就不带 sounddevice（见 requirements-linux.txt），这里也不要求它，
+  所以耳返在两端都只依赖已有的东西。
+
+两端的抖动缓冲、补零、音量乘法完全共用（`_callback()` 只有这一份）。
+
 ## 失败口径
 
-打开设备失败（端点被占、WASAPI 怪错误）→ 只禁用耳返：日志一行、状态栏一条 warn，
-**翻译与译音输出完全不受影响**。测试/自检进程里一律不构造（会真开音频设备）。
+打开设备失败（端点被占、WASAPI 怪错误、pw-cat 起不来）→ 只禁用耳返：日志一行、
+状态栏一条 warn，**翻译与译音输出完全不受影响**。测试/自检进程里一律不构造
+（会真开音频设备）。
 """
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 
 from .. import platform
@@ -65,6 +81,9 @@ class EarMonitor:
         self._buf = bytearray()
         self._cap_bytes = int(SAMPLE_RATE * BYTES_PER_FRAME * DEFAULT_BUFFER_MS / 1000)
         self._stream = None
+        self._proc: subprocess.Popen | None = None      # Linux：pw-cat 管道
+        self._writer: threading.Thread | None = None    # Linux：往管道喂数据的线程
+        self._stop = threading.Event()
         self._opened = False
         self._dropped_chunks = 0
         self._real_name = ""
@@ -100,8 +119,10 @@ class EarMonitor:
         """打开监听输出。失败返回 False（只影响耳返）。"""
         if self._opened:
             return True
+        if platform.IS_LINUX:
+            return self._open_pwcat()
         if not platform.IS_WINDOWS:
-            print("[monitor] 耳返暂时只在 Windows 上实现（Linux 侧留空实现）", flush=True)
+            print("[monitor] 耳返暂不支持当前平台", flush=True)
             self._on_status("warn", "耳返暂不支持当前平台")
             return False
         try:
@@ -150,8 +171,11 @@ class EarMonitor:
         return False
 
     def close(self) -> None:
-        stream, self._stream = self._stream, None
         self._opened = False
+        self._stop.set()
+        stream, self._stream = self._stream, None
+        proc, self._proc = self._proc, None
+        writer, self._writer = self._writer, None
         if stream is not None:
             try:
                 stream.stop()
@@ -159,8 +183,136 @@ class EarMonitor:
             except Exception:                          # noqa: BLE001
                 pass
             print("[monitor] 耳返已关闭", flush=True)
+        if proc is not None:
+            # 先终止 pw-cat：写线程可能正阻塞在管道写里，只有这样它才会立刻退出。
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:                          # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:                      # noqa: BLE001
+                    pass
+            for pipe in (proc.stdin, proc.stderr):
+                try:
+                    if pipe is not None:
+                        pipe.close()
+                except Exception:                      # noqa: BLE001
+                    pass
+            print("[monitor] 耳返已关闭", flush=True)
+        if writer is not None and writer.is_alive() \
+                and writer is not threading.current_thread():
+            writer.join(timeout=2)
+        self._stop.clear()
         with self._lock:
             self._buf.clear()
+
+    # ------------------------------------------------------------ Linux 输出
+    def _open_pwcat(self) -> bool:
+        """Linux：`pw-cat --playback` 管道 + 写线程（与虚拟声卡同一条 PipeWire 原生路径）。
+
+        为什么不用 sounddevice：Linux 产物刻意不带 PortAudio（requirements-linux.txt），
+        而 `pw-cat` 本来就是译音输出/试听在用的系统工具 —— 不新增任何依赖。
+        """
+        target = self._linux_target()
+        argv = ["pw-cat", "--playback", "--raw",
+                "--format=s16", f"--rate={SAMPLE_RATE}", f"--channels={CHANNELS}",
+                # 默认 4/15；只有设备/图需要重采样时才起作用，顺手把重采样质量抬高。
+                "--quality=10"]
+        if target:
+            argv.append(f"--target={target}")
+        argv.append("-")
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    env=platform.child_env())
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[monitor] 启动 pw-cat 失败：{exc}", flush=True)
+            self._on_status("warn", "耳返设备打不开，已禁用耳返（其余功能不受影响）")
+            return False
+        self._proc = proc
+        self._stop.clear()
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True,
+                                        name="vlt-earmonitor")
+        self._writer.start()
+        self._opened = True
+        self._real_name = target or "系统默认输出"
+        print(f"[monitor] 耳返已打开：{self._real_name!r}（pw-cat，音量 {self._volume:.0f}%）",
+              flush=True)
+        return True
+
+    def _linux_target(self) -> str:
+        """配置里的设备名 → `pw-cat --target` 要的 PipeWire `node.name`。
+
+        界面在 Linux 上直接存 `node.name`（重连/改描述仍指向同一节点）；
+        手写配置可能是描述名，按描述精确匹配一次。找不到就留痕并回落系统默认输出
+        —— 与 Windows 侧「找不到 → 用默认设备」同一口径。
+        """
+        want = str(self._device_name or "").strip()
+        if not want:
+            return ""
+        try:
+            for d in platform.device_backend().query_devices():
+                node = str(d.get("node_name") or "")
+                name = str(d.get("name") or "")
+                if want in (node, name):
+                    return node or want
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[monitor] 耳返设备解析失败（{exc}）→ 用系统默认输出", flush=True)
+            return ""
+        print(f"[monitor] ⚠️ 找不到耳返设备 {want!r} → 用系统默认输出", flush=True)
+        return ""
+
+    def _writer_loop(self) -> None:
+        """把缓冲里的 PCM 每 10ms 一块喂给 pw-cat：不足补零、按音量缩放。
+
+        节拍由 pw-cat 的**管道背压**决定（与 `PwCatVirtualMic` 同一条路）。
+        实测确认：管道背压节拍 + 120ms 缓冲足够，不再额外做 monotonic 定速
+        （见模块头「缓冲」）。
+        """
+        import numpy as np
+
+        proc = self._proc
+        assert proc is not None and proc.stdin is not None
+        while not self._stop.is_set():
+            block = np.zeros((BLOCK_FRAMES, CHANNELS), dtype=np.int16)
+            self._callback(block, BLOCK_FRAMES, None, None)
+            try:
+                proc.stdin.write(block.tobytes())
+            except (BrokenPipeError, ValueError, OSError) as exc:
+                if self._stop.is_set():
+                    return                         # 正常关闭：进程是我们自己终止的
+                print(f"[monitor] pw-cat 管道断开（{type(exc).__name__}: {exc}）→ 已禁用耳返",
+                      flush=True)
+                self._disable("耳返设备打不开，已禁用耳返（其余功能不受影响）")
+                return
+            if proc.poll() is not None:
+                if self._stop.is_set():
+                    return
+                err = b""
+                try:
+                    if proc.stderr is not None:
+                        err = proc.stderr.read() or b""
+                except Exception:                      # noqa: BLE001
+                    pass
+                tail = err.decode("utf-8", "replace").strip()
+                print("[monitor] ❌ pw-cat 已退出 → 已禁用耳返"
+                      + (f"：{tail[:400]}" if tail else ""), flush=True)
+                self._disable("耳返设备打不开，已禁用耳返（其余功能不受影响）")
+                return
+
+    def _disable(self, msg: str) -> None:
+        """运行中失败：停用并留痕（进程由 `close()` 或下面这段收尾）。"""
+        self._opened = False
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:                          # noqa: BLE001
+                pass
+        with self._lock:
+            self._buf.clear()
+        self._on_status("warn", msg)
 
     # ------------------------------------------------------------ 内部
     @staticmethod
@@ -187,6 +339,7 @@ class EarMonitor:
         a = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) * gain
         np.clip(a, -32768.0, 32767.0, out=a)
         outdata[:] = a.astype(np.int16).reshape(-1, CHANNELS)
+
 
     @staticmethod
     def _as_frames(chunk: bytes):
