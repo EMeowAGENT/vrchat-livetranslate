@@ -100,6 +100,7 @@ def enumerate_audio_out_devices(devices: list[dict] | None = None) -> list[Devic
                     sample_rate=int(d.get("default_samplerate", 0)),
                     channels=int(d.get("max_output_channels", 0)),
                     kind="output",
+                    node_name=str(d.get("node_name") or ""),
                 ))
         return result
     except Exception:

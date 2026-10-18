@@ -107,7 +107,8 @@ def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
         root.update_idletasks()
         mics = enumerate_mic_devices()
         loops = [] if ctx.linux_fixed_audio else enumerate_loopback_devices()
-        outs = [] if ctx.linux_fixed_audio else enumerate_audio_out_devices()
+        # Linux 也要枚举输出：耳返的输出下拉在两端都有（译音输出不需要选）。
+        outs = enumerate_audio_out_devices()
         on_device_scan_result(ctx, cfg=cfg, mics=mics, loops=loops, outs=outs,
                               names_holder=scan_holder.get("names", {}),
                               scan_holder=scan_holder)
@@ -155,15 +156,17 @@ def on_device_scan_result(ctx: AudioCtx, cfg, mics, loops, outs,
     names_holder["out"] = []
     out_display = [auto]
     for info in outs:
-        names_holder["out"].append(info.name)
+        # Linux 存 PipeWire `node.name`（稳定标识），Windows 存 PortAudio 设备名。
+        names_holder["out"].append(
+            (info.node_name or info.name) if ctx.linux_fixed_audio else info.name)
         out_display.append(format_device_display(info))
 
     ctx.mic_combo.configure(values=mic_display)
     if not ctx.linux_fixed_audio:
         ctx.loopback_combo.configure(values=loop_display)
         ctx.audio_out_combo.configure(values=out_display)
-        if ctx.monitor_combo is not None:
-            ctx.monitor_combo.configure(values=out_display)
+    if ctx.monitor_combo is not None:
+        ctx.monitor_combo.configure(values=out_display)
 
     # 恢复配置里的选择（如果设备在列表里）
     capture_cfg = {}
@@ -200,13 +203,13 @@ def on_device_scan_result(ctx: AudioCtx, cfg, mics, loops, outs,
         else:
             ctx.audio_out_combo.set(auto)
 
-        if ctx.monitor_combo is not None:
-            mon_name = str((audio_cfg.get("monitor") or {}).get("device_name") or "")
-            if mon_name and mon_name in names_holder["out"]:
-                ctx.monitor_combo.set(
-                    out_display[names_holder["out"].index(mon_name) + 1])
-            else:
-                ctx.monitor_combo.set(auto)
+    if ctx.monitor_combo is not None:
+        mon_name = str((audio_cfg.get("monitor") or {}).get("device_name") or "")
+        if mon_name and mon_name in names_holder["out"]:
+            ctx.monitor_combo.set(
+                out_display[names_holder["out"].index(mon_name) + 1])
+        else:
+            ctx.monitor_combo.set(auto)
 
     if not mics and not loops and not outs:
         if ctx.set_status_fn:
