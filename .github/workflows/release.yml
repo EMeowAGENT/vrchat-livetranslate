@@ -206,6 +206,7 @@ jobs:
 
             - Windows 采集新增 process loopback 方式（只抓 VRChat 进程，默认关闭）：浏览器、音乐与系统提示音不再被当作游戏内语音送入模型，与 Linux 按应用流采集的语义一致 — #106 @nixi-agent
             - 新增耳返（sidetone）：把送入虚拟声卡的译音同时放给自己听，开关位于主界面「输出」行，音量与输出设备在「设置 → 音频」；与 VRChat 音频为同一设备时，开始翻译会自动将采集切换为只抓 VRChat，避免自身译音被再次翻译 — #107 @nixi-agent
+            - Linux 支持耳返：通过 pw-cat 播放，不依赖 PortAudio；开关与音量、输出设备的入口与 Windows 一致 — #109 @EMeowAGENT
 
             **修复**
 
@@ -215,6 +216,7 @@ jobs:
             **其它**
 
             - 发版复核脚本：解包工具改为按可信度排序并逐个试跑；needle 核对不再只依赖外部工具，失败时重试并回落到进程内读取器 — 直推
+            - 耳返音量滑条改为与其它滑条一致的深色样式，滑条参数统一到 ui_tk.slider_kwargs — #109 @EMeowAGENT
 
           files: |
             dist/VRChatLiveTranslate.exe

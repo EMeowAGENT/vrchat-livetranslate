@@ -1,6 +1,6 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
@@ -14,8 +14,10 @@
   ③ 耳返播放侧取音（#108）：`_drain_translated`（`vlt/output/micproxy.py` 里「取给虚拟声卡的那一块
      并同步喂耳返」的唯一 tap 点）—— 修 #107 截断问题引入的新方法；
   ④ 耳返开关移到主界面（#108）：`sync_monitor_controls`（`vlt/gui_settings.py` 里按开关灰化
-     设置页音量/设备入口的函数）—— 本版新增。
-五串已用 `git grep <符号> v0.11.3 -- vlt/` 逐一核对（全部 0 命中）。
+     设置页音量/设备入口的函数）—— 本版新增；
+  ⑤ Linux 耳返（#109）：`_open_pwcat`（Linux 侧 pw-cat 播放链路的打开入口）与
+     `slider_kwargs`（`vlt/ui_tk.py` 统一滑条样式的参数工厂）—— 两串都是本版新增。
+七串已用 `git grep <符号> v0.11.3 -- vlt/` 逐一核对（全部 0 命中）。
 ⚠️ 本版也有**没有新符号可搜**的改动（如 docstring 里「从播放侧取音」的接线说明、
 「未勾译音输出 / 无麦克风代理」的提示文案）—— 它们的证据是用例与故障注入，不是 needle。
 
