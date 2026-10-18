@@ -647,7 +647,7 @@ vlt/
 server/                   Сервер комнаты (Cloudflare Worker + Durable Object, разворачивается отдельно)
 scripts/                   Инструменты разведки и отладки (probe_* / osc_listen / verify_release / room_e2e_local)
                           + run_tests.py (запуск тестов) + verify/ (приёмочные скрипты на реальной машине; нужен рабочий стол/железо, в CI не идут)
-tests/                    98 файлов, 752 тестовых функций (работают офлайн; CI выполняет их по
+tests/                    101 файлов, 783 тестовых функций (работают офлайн; CI выполняет их по
                           файлам, без tests/test_engine.py — ему нужен настоящий ключ API)
 docs/                     Результаты измерений P0.5 / P1 / P2 (протокол, задержка, экран на запястье)
 testdata/                 Встроенный тестовый звук (китайский 8.56 с, английский 7.92 с, 16 кГц моно PCM)
@@ -715,7 +715,7 @@ build_exe.bat                                              :: сборка + п�
   (SHA256, реальный запуск `--self-test`, строка версии, поиск строк новых функций в байткоде, попиксельное сравнение иконки):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls"
   ```
 
 ---

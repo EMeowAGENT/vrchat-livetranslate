@@ -9,11 +9,11 @@
 
 ```bat
 :: 发布（CI 与本机同一条命令；本机凭据在 D:\\workspace\\.r2.env）
-python scripts/publish_r2.py publish --dist dist --tag v0.11.3 --env-file D:/workspace/.r2.env
+python scripts/publish_r2.py publish --dist dist --tag v0.12.0 --env-file D:/workspace/.r2.env
 :: 只复核公开域名上现在是什么（不上传、不改任何东西）
-python scripts/publish_r2.py verify --tag v0.11.3
+python scripts/publish_r2.py verify --tag v0.12.0
 :: 只看清单会被生成成什么样（不联网）
-python scripts/publish_r2.py manifest --dist dist --tag v0.11.3
+python scripts/publish_r2.py manifest --dist dist --tag v0.12.0
 ```
 
 ## 键与缓存：固定键 + `Cache-Control: no-cache`（实测结论，别改回默认）
@@ -40,10 +40,10 @@ GitHub Release 页，而 `publish-r2` 跑在 `release` 之前 —— 那几分�
 ```json
 {
   "schema": 1,
-  "version": "0.11.3",
-  "tag": "v0.11.3",
+  "version": "0.12.0",
+  "tag": "v0.12.0",
   "published_at": "2026-10-12T18:32:11Z",
-  "release_url": "https://github.com/nixi-agent/vrchat-livetranslate/releases/tag/v0.11.3",
+  "release_url": "https://github.com/nixi-agent/vrchat-livetranslate/releases/tag/v0.12.0",
   "assets": {
     "VRChatLiveTranslate.exe":            {"url": "https://dl.kcm-nixi.cn/VRChatLiveTranslate.exe",
                                             "size": 34648043, "sha256": "…64hex…"},
@@ -449,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--tag", required=True, help="发布 tag，如 v0.11.3（必须严格 vX.Y.Z）")
+        sp.add_argument("--tag", required=True, help="发布 tag，如 v0.12.0（必须严格 vX.Y.Z）")
         sp.add_argument("--base-url", default=BASE_URL, help=f"公开下载域（默认 {BASE_URL}）")
 
     mp = sub.add_parser("manifest", help="只生成 latest.json（不联网）")

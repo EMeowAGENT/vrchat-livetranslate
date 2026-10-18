@@ -1,22 +1,23 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.11.3 "DEGRADED_NOTE_RECOVERED,resolve_script_font_path,load_script_fonts,fetch_latest_manifest,_silence_tail,INPUT_GATE_DEFAULT_TAIL_MS"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **本版（v0.11.3：一个功能 + 三处修复）各取新增符号名做 needle，一条一个、互不替代**：
-  ① 更新主源切到 Cloudflare R2（#103）：`fetch_latest_manifest`（`vlt/update_check.py` 新增的主源清单取回入口）
-     —— v0.11.2 里不存在（旧版只有 GitHub 一条路）；
-  ② 韩文显示成方框（#104）：`resolve_script_font_path`（按书写系统解析字体的统一入口）与
-     `load_script_fonts`（一次性加载各书写系统字体）—— 两串都是本版新增。注意 `_split_script_runs`
-     **不能**当 needle：切 run 的框架在 v0.11.2（泰文那版）里就有，本版只是把它泛化到多书写系统；
-  ③ 输入门限关闸补数字静音（#105）：`_silence_tail`（补等长静音的新方法）与 `INPUT_GATE_DEFAULT_TAIL_MS`
-     （600ms 常量）—— 两串在 v0.11.2 里都不存在；
-  ④ 手腕屏降级说明进状态栏（#100）：`DEGRADED_NOTE_RECOVERED`（降级原因恢复可见的新文案常量）。
-六串已用 `git grep <符号> v0.11.2 -- vlt/ scripts/` 逐一核对（全部 0 命中），并在本地包（与 tag 同源）里预跑过命中。
-⚠️ 本版也有**没有新符号可搜**的改动（#100 的「定点重试遵守 `_closed` 纪律」「`start()` 归零自愈状态」）——
-它们的证据是用例与故障注入，不是 needle；别因为搜不到就以为那部分没进包。
+⚠️ **本版（v0.12.0：两个新功能 + 两处修复）取新增符号名做 needle，一条一个、互不替代**：
+  ① Windows process loopback（#106）：`process_loopback_available`（`vlt/platform/win.py` 新增的
+     build / API 门禁入口）—— v0.11.3 里不存在；
+  ② 耳返（#107）：`monitor_capture_conflict`（`vlt/engine.py` 的「耳返设备 == 采集端点」判定，
+     也决定是否把采集自动升级为 process）与 `apply_ear_monitor_policy`（`vlt/gui_engine.py`
+     每次开始翻译前的回路处置）—— 两串都是本版新增；
+  ③ 耳返播放侧取音（#108）：`_drain_translated`（`vlt/output/micproxy.py` 里「取给虚拟声卡的那一块
+     并同步喂耳返」的唯一 tap 点）—— 修 #107 截断问题引入的新方法；
+  ④ 耳返开关移到主界面（#108）：`sync_monitor_controls`（`vlt/gui_settings.py` 里按开关灰化
+     设置页音量/设备入口的函数）—— 本版新增。
+五串已用 `git grep <符号> v0.11.3 -- vlt/` 逐一核对（全部 0 命中）。
+⚠️ 本版也有**没有新符号可搜**的改动（如 docstring 里「从播放侧取音」的接线说明、
+「未勾译音输出 / 无麦克风代理」的提示文案）—— 它们的证据是用例与故障注入，不是 needle。
 
 """
 from __future__ import annotations
