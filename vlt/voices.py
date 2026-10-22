@@ -4,8 +4,8 @@
 （DashScope 规则：把 A 模型的音色填给 B 模型会 `InvalidParameter`）——
 - **说话译音**：实时模型 `qwen3.x-livetranslate-flash-realtime` 直出译音，
   音色写 `session.voice`（或 `directions.<X>.voice` 按方向覆盖）。默认 `Tina`。
-- **打字译音**：文本翻译后单独调 `qwen3-tts-flash` 合成，音色写 `text_input.tts.voice`。
-  默认 `Cherry`。
+- **打字译音**：文本翻译后单独调 Qwen-Audio-TTS（`qwen-audio-3.1-tts-flash`）合成，
+  音色写 `text_input.tts.voice`。默认 `longanfengyue_v3.1`。
 
 只收录**多语种**能读的音色（中/英/日/韩… 都能念）：VRChat 里语言对随时切换，
 方言音色（上海-阿珍 / 北京-晓东 / 四川-程川…）读外语会翻车，故不进下拉；
@@ -24,13 +24,16 @@ REALTIME_VOICES: tuple[str, ...] = (
     "Bodega", "Alek", "Dolce", "Andre", "Marina", "Chloe",
 )
 
-# 打字译音（qwen3-tts-flash）：同系列多语种音色，与实时表**不完全重合**（如 Cherry
-# 只在 TTS 侧、Tina 只在实时侧），所以两张表各列各的。
+# 打字译音（Qwen-Audio-TTS 3.1）：**只收多语音色**。
+# 为什么只放这四个：3.1 家族里的纯中文音色读外语会翻车（VRChat 里语言对随时切换），
+# 与上面「方言音色不进下拉」同一条理由；这四个是官方标注覆盖
+# 中文/英语/日语/韩语/法语/德语/葡萄牙语/意大利语/越南语/印尼语的。
+# ⚠️ 官方列表不含俄语/西班牙语/泰语 —— 那几种语言仍能合成（未报错），但发音质量未验证，
+#    见 `vlt/tts.py` 的 `TTS_SUPPORTED_LANGS` 与启动时的 WARN。
+# 老 `qwen3-tts-flash` 的音色（Cherry/Serena/…）**不适用**于新模型：跨模型填 voice 会
+# InvalidParameter，所以它们已从这张表移除。
 TTS_VOICES: tuple[str, ...] = (
-    "Cherry", "Serena", "Ethan", "Chelsie", "Momo", "Vivian", "Moon", "Maia",
-    "Kai", "Nofish", "Bella", "Jennifer", "Ryan", "Katerina", "Aiden",
-    "Mia", "Bellona", "Neil", "Elias", "Bodega", "Sonrisa", "Alek",
-    "Dolce", "Sohee", "Ono Anna", "Lenn", "Emilien", "Andre",
+    "longanfengyue_v3.1", "longanhuan_v3.1", "longanlingxin_v3.1", "xunanchuan_v3.1",
 )
 
 

@@ -548,8 +548,13 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             # 打字也要出声：文本翻译不回音频，这一步单独用 TTS 合成后喂虚拟声卡
             "tts": {
                 "enabled": bool((raw_textin.get("tts") or {}).get("enabled", True)),
-                "model": str((raw_textin.get("tts") or {}).get("model") or "qwen3-tts-flash"),
-                "voice": str((raw_textin.get("tts") or {}).get("voice") or "Cherry"),
+                # Qwen-Audio-TTS（2026-07-14 起千问云主推的离线 TTS 家族）：
+                # 老 `qwen3-tts-flash` 在 maas 网关上已不服务（400 空体），故换默认值。
+                "model": str((raw_textin.get("tts") or {}).get("model")
+                             or "qwen-audio-3.1-tts-flash"),
+                # 3.1 的多语音色之一（女声，日语在列）。老的 Cherry 属于旧模型，不能混用。
+                "voice": str((raw_textin.get("tts") or {}).get("voice")
+                             or "longanfengyue_v3.1"),
                 # 流式合成（SSE）：首段音频 0.36~0.42s 就能起播（整段合成要等 1.6~1.9s 才开口）
                 "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),

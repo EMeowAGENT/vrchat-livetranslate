@@ -144,6 +144,23 @@ AudioHandler = Callable[[bytes], None]      # 24kHz 单声道 s16le PCM
 UsageHandler = Callable[[dict], None]
 
 
+class SessionNotReady(RuntimeError):
+    """会话还没就绪（连接已建、`session.update` 还没发出去）。
+
+    为什么单独一个类：重连期间采集泵**仍在跑**，它会在新会话「连上但还没配置好」的
+    窗口里调 `send_audio`。那个窗口里发音频会造成两个坏结果（真机日志实测）：
+
+    1. 服务端先收到 `input_audio_buffer.append` → 按**默认会话**（没有目标语言/音色）
+       把这一轮 start 掉；随后到达的 `session.update` 被拒：
+       `Session update error: session already started or finished or failed.` → 1007 断开；
+    2. 断开 → 再重连 → 采集泵又撞进同一个窗口 → 自激成「会话风暴」
+       （实测 175 分钟里 107 个会话、63 次断线，会话寿命中位 7.5s）。
+
+    `_SessionProxy` 见到这个异常就**静默跳过这一块**（本来就没发出去，不是发送失败），
+    只计数、进断线诊断；绝不能记成「发送失败」刷屏。
+    """
+
+
 class LiveTranslateSession(abc.ABC):
     """一条双工实时翻译会话。实现类负责该代次的事件名/字段分派。"""
 

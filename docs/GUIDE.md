@@ -334,9 +334,10 @@ text_input:                   # 打字输入（底栏输入框，回车发送）
   timeout_s: 20               # 单次翻译超时（秒）
   tts:                        # 打字也要出声（译文经 TTS 合成 → 虚拟声卡 → 对方能听到）
     enabled: true             # 需勾选「译音输出」且方向含「我说」；没开译音时这步自动跳过，只出文字
-    model: qwen3-tts-flash    # 也可换 qwen3-tts-instruct-flash
-    voice: Cherry             # 多语言音色（中/英/日实测都能读）
-    stream: true              # 流式合成（SSE）：首段音频 ~0.5s 起播；false = 等整段（~1.7s 才开口）
+    model: qwen-audio-3.1-tts-flash   # Qwen-Audio-TTS；别填回已停服的 qwen3-tts-flash
+    voice: longanfengyue_v3.1         # 3.1 多语音色（官方覆盖 zh/en/ja/ko/fr/de/pt/it/vi/id）
+    # ⚠️ 已知缺口：官方列表不含 ru/es/th —— 仍能合成，但发音质量未验证
+    stream: true              # 流式合成（SSE）：首段音频 ~0.8s 到；false = 等整段（~1.9s 才开口）
     timeout_s: 30
 
 merger:
@@ -707,7 +708,7 @@ vlt/
 ├── gui.py                Tkinter 图形界面（含 --self-test 无头验收）
 ├── config.py             配置加载；凭据解析顺序；写坏自愈
 ├── textin.py             打字输入：文本翻译（实时模型不接受文本入口，故走 compatible-mode）
-├── tts.py                打字出声：译文经 qwen3-tts 合成成音频，喂给虚拟声卡那条通路
+├── tts.py                打字出声：译文经 Qwen-Audio-TTS 合成成音频，喂给虚拟声卡那条通路
 ├── credentials.py        API key 的保存 / 清除 / 打码
 ├── devices.py            音频设备枚举与「按名字解析回索引」
 ├── paths.py              可写目录决策（源码 / exe / 绿色版）+ 旧文件迁移
@@ -812,9 +813,9 @@ build_exe.bat                                              :: 打包 + 打完自
 - WebSocket 链路**无回声消除与降噪** → **戴耳机是硬要求**（外放会把别人的声音采进来，同一句识别两遍）
 - 同时翻译两个方向 = 两条 WebSocket 会话，预算按两个方向叠算
 - **打字出声是「翻译 + TTS」两次请求**：文字几乎立刻出来，声音要等 TTS 合成回来。
-  默认走**流式合成**（`text_input.tts.stream: true`）：首段音频 **~0.5s** 就能起播，
-  而整段合成要等 ~1.7s 才开口（把 `stream` 关掉即回到该行为）。
-  音色是 TTS 音色（默认 `Cherry`），与语音通路的实时模型音色**不是同一个**。
+  默认走**流式合成**（`text_input.tts.stream: true`）：首段音频 **~0.8s** 到（起播再加 ~0.3s 抖动缓冲），
+  而整段合成要等 ~1.9s 才开口（把 `stream` 关掉即回到该行为）。
+  音色是 TTS 音色（默认 `longanfengyue_v3.1`），与语音通路的实时模型音色**不是同一个**。
   条件与第三条通路一致：勾了「译音输出」且虚拟声卡可用，否则自动跳过、只出文字
 - **打字替代的是麦克风**：所以只在方向含「我说」时可用，且需要先点「开始翻译」
 - **房间传的是「你自己说的话的识别原文」，不是译文**，而且要**先点「开始翻译」**才发得出去；

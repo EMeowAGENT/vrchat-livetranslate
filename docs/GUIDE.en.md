@@ -329,8 +329,9 @@ text_input:                   # typing input (bottom-bar box, Enter sends)
   timeout_s: 20               # per-translation timeout (seconds)
   tts:                        # typed input speaks too (translation → TTS → virtual sound card → the other person hears it)
     enabled: true             # requires "Voice Output" ticked and a direction including "Me"; with voice output off this step is skipped and only text comes out
-    model: qwen3-tts-flash    # qwen3-tts-instruct-flash also works
-    voice: Cherry             # multilingual voice (measured working for Chinese / English / Japanese)
+    model: qwen-audio-3.1-tts-flash   # Qwen-Audio-TTS; do NOT go back to the retired qwen3-tts-flash
+    voice: longanfengyue_v3.1         # 3.1 multilingual voice (zh/en/ja/ko/fr/de/pt/it/vi/id per official list)
+    # NOTE: ru/es/th are NOT on the official list — synthesis still returns audio, quality unverified
     timeout_s: 30
 
 merger:
@@ -630,7 +631,7 @@ vlt/
 ├── gui.py                Tkinter GUI (includes the headless --self-test acceptance run)
 ├── config.py             Config loading; credential resolution order; self-healing after a bad write
 ├── textin.py             Typing input: text translation (the realtime model takes no text entry, hence compatible-mode)
-├── tts.py                Spoken typing: the translation is synthesized by qwen3-tts and fed to the virtual-sound-card leg
+├── tts.py                Spoken typing: the translation is synthesized by Qwen-Audio-TTS and fed to the virtual-sound-card leg
 ├── credentials.py        Save / clear / mask the API key
 ├── devices.py            Audio device enumeration and "resolve a name back to an index"
 ├── paths.py              Writable-directory decision (source / exe / portable) + migration of old files
@@ -733,7 +734,7 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
 - The WebSocket path has **no echo cancellation or noise suppression** → **wearing headphones is a hard requirement** (on speakers the other person's voice gets captured too and the same sentence gets recognized twice)
 - Translating both directions at once = two WebSocket sessions, and the budget is charged for both
 - **Typing with voice is two requests: "translate + TTS"** — the text appears almost immediately, but the audio has to wait for TTS synthesis (measured end-to-end ≈ 2.6 s),
-  so the other person hears it a second or two after you see it in the bubble; the voice is a TTS voice (default `Cherry`), **not the same** as the realtime-model voice of the speech path.
+  so the other person hears it a second or two after you see it in the bubble; the voice is a TTS voice (default `longanfengyue_v3.1`), **not the same** as the realtime-model voice of the speech path.
   Same conditions as the third leg: "Audio output" ticked and a virtual sound card available, otherwise it's skipped automatically and only text is produced
 - **Typing replaces the microphone**: so it's only available when the direction includes "I speak", and only after you've clicked "Start translation"
 - **What the room carries is the recognized source text of what *you* say, not the translation**, and it

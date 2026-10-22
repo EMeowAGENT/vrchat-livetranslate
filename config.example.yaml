@@ -369,9 +369,16 @@ text_input:
   # 没开译音时这一步自动跳过，只出文字。
   tts:
     enabled: true
-    model: qwen3-tts-flash   # 也可换 qwen3-tts-instruct-flash
-    voice: Cherry            # 多语言音色（中/英/日实测都能读）；界面「⚙ 设置 → 音色」可选
-    stream: true             # 流式合成（SSE）：首段音频 ~0.5s 就能起播；false = 等整段（~1.7s 才开口）
+    # Qwen-Audio-TTS（2026-07-14 起千问云主推的离线 TTS 家族）。
+    # ⚠️ 别填回老的 qwen3-tts-flash：它在 maas.qianwenaiapi.com 上已不服务（HTTP 400 空体）。
+    #    3.1 而不是 3.0：3.0 只有中文/英语，3.1 的多语音色覆盖 zh/en/ja/ko/fr/de/pt/it/vi/id。
+    model: qwen-audio-3.1-tts-flash
+    # 3.1 的四个多语音色：longanfengyue_v3.1 / longanhuan_v3.1 /
+    # longanlingxin_v3.1 / xunanchuan_v3.1（界面「⚙ 设置 → 音色」可选，也可手填）。
+    voice: longanfengyue_v3.1
+    # ⚠️ 已知语言缺口：这四个音色的官方列表**不含俄语/西班牙语/泰语**（老 Cherry 是含 ru/es 的）。
+    #    这几种语言仍会合成、实测也不报错，但发音质量未验证；首次用到时每种语言打一行 WARN。
+    stream: true             # 流式合成（SSE）：首段音频 ~0.8s 就能起播；false = 等整段（~1.7s 才开口）
     timeout_s: 30
     reuse_conn: true         # 复用同一条 HTTPS 连接：连续多段省一次 DNS+TCP+TLS（实测后段省 94~186ms/段）。
                              # false = 每次新建连接（与旧行为完全一致，出问题可先关掉它定位）
