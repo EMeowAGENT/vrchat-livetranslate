@@ -146,7 +146,8 @@ def test_old_config_is_migrated() -> None:
         path.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cfg = load_config(path)
+            # ⚠️ 显式给一把假 key：`load_config` 在拿不到 key 时会 SystemExit（CI 上没有 key）
+            cfg = load_config(path, api_key="sk-test")
         return cfg, buf.getvalue()
 
     cfg, out = _load({"text_input": {"tts": {"model": "qwen3-tts-flash", "voice": "Cherry"}}})
