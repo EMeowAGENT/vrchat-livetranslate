@@ -209,6 +209,97 @@ def test_proxy_drops_not_ready_chunks() -> None:
     print("  代理对 not-ready 会话只计数丢弃（send_fails=0、未刷「发送失败」）+ 诊断留痕 OK")
 
 
+# ================================================================ 收尾 / 失败路径
+
+async def _close_during_start() -> dict:
+    """停止信号正好落在 start 的窗口里：必须把**还没发布**的那条连接也收掉。"""
+    from vlt.session import qwen38
+    from vlt.session.base import SessionConfig
+
+    ws = _FakeWS()
+    original = qwen38.websockets
+    qwen38.websockets = _FakeWSModule(ws)                  # type: ignore[assignment]
+    try:
+        s = qwen38.QwenLiveTranslateSession(SessionConfig())
+        task = asyncio.create_task(s.start(lambda d: None, None))
+        await asyncio.wait_for(ws.recv_entered.wait(), timeout=3)
+        # 此时 _ws 还没发布、_starting_ws 已就位 → close() 必须走 _starting_ws 分支
+        t0 = asyncio.get_running_loop().time()
+        await asyncio.wait_for(s.close(), timeout=5)        # 不该卡（_finished_evt 还没建）
+        elapsed = asyncio.get_running_loop().time() - t0
+        closed_during = ws.closed
+        types = ws.types()
+        ws.release.set()                                    # 放行 start：它应看到 _closing 直接退出
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(task, timeout=5)
+        return {"closed": closed_during, "types": types, "published": s._ws,
+                "elapsed": elapsed}
+    finally:
+        qwen38.websockets = original                       # type: ignore[assignment]
+
+
+def test_close_during_start_releases_starting_ws() -> None:
+    """停止撞上重连窗口：`session.finish` 要发到 `_starting_ws` 上，且连接被关掉。"""
+    obs = asyncio.run(_close_during_start())
+    assert obs["closed"], "close() 没关掉 _starting_ws 那条连接（会白占一个 RPM 名额）"
+    assert "session.finish" in obs["types"],         f"close() 应在这条还没发布的连接上发 session.finish，实际 {obs['types']}"
+    assert obs["published"] is None, "已经 close 的会话不该再把 ws 发布成 _ws"
+    assert obs["elapsed"] < 1.0, f"close() 不该干等 session.finished（用了 {obs['elapsed']:.2f}s）"
+    print("  start 窗口里 close() → 收掉 _starting_ws、发 finish、不发布 _ws OK")
+
+
+class _ErrorWS:
+    """连上后服务端直接回 error：start() 必须抛错，并把这条没人要的连接关掉。"""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed = False
+
+    async def recv(self) -> str:
+        return json.dumps({"type": "error", "error": {"message": "bad key"}})
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __aiter__(self):                        # noqa: ANN204
+        return self
+
+    async def __anext__(self):                  # noqa: ANN204
+        raise StopAsyncIteration
+
+
+def test_start_failure_closes_unpublished_ws() -> None:
+    """start() 抛错（服务端拒会话）→ 未发布的连接必须被关掉（防泄漏）。"""
+    from vlt.session import qwen38
+    from vlt.session.base import SessionConfig
+
+    ws = _ErrorWS()
+
+    class _Mod:
+        async def connect(self, *_a, **_kw):     # noqa: ANN002, ANN003, ANN201
+            return ws
+
+    original = qwen38.websockets
+    qwen38.websockets = _Mod()                  # type: ignore[assignment]
+    try:
+        s = qwen38.QwenLiveTranslateSession(SessionConfig())
+        raised: BaseException | None = None
+        try:
+            asyncio.run(s.start(lambda d: None, None))
+        except BaseException as exc:            # noqa: BLE001
+            raised = exc
+    finally:
+        qwen38.websockets = original            # type: ignore[assignment]
+    assert isinstance(raised, RuntimeError), f"应把服务端 error 抛成 RuntimeError，实际 {raised!r}"
+    assert ws.closed, "start() 失败时没有关掉这条未发布的连接 → socket 泄漏"
+    assert s._ws is None, "失败后不该发布 _ws"    # noqa: SLF001
+    print("  start() 失败 → 未发布连接被关掉（不泄漏）OK")
+
+
+
 def _cfg():
     from vlt.config import AppConfig, Direction
 
@@ -226,4 +317,6 @@ if __name__ == "__main__":
     test_no_audio_before_session_update()
     test_append_sent_after_session_update()
     test_proxy_drops_not_ready_chunks()
+    test_close_during_start_releases_starting_ws()
+    test_start_failure_closes_unpublished_ws()
     print("ALL PASSED")

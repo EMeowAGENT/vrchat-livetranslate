@@ -497,27 +497,27 @@ def test_tts_payload_and_decode() -> bool:
     pcm = tts_mod.synthesize("Hello there", api_key="sk-x", language="en")
     payload = json.loads(f.req.data.decode("utf-8"))
     want = 12000 * 2                                    # 0.5s @24kHz 单声道 s16
-    # 迁移后的字段口径（Qwen-Audio-TTS）：`input.language` 是**短码**（不是 language_type），
+    # 迁移后的字段口径（Qwen-Audio-TTS）：`input.language_hints` 是**短码数组**（不是 language_type），
     # 整段合成必须带 `format=wav` + `sample_rate=24000`（下游 miniaudio 要容器格式）。
     cond = (abs(len(pcm) - want) <= 2
             and payload["model"] == tts_mod.DEFAULT_MODEL
             and payload["input"]["text"] == "Hello there"
             and payload["input"]["voice"] == tts_mod.DEFAULT_VOICE
-            and payload["input"]["language"] == "en"
+            and payload["input"]["language_hints"] == ["en"]
             and payload["input"]["format"] == "wav"
             and payload["input"]["sample_rate"] == 24000
             and "language_type" not in payload["input"])
     print(f"  base64 路径：{len(pcm)}B（期望≈{want}）model={payload['model']} "
-          f"voice={payload['input']['voice']} lang={payload['input'].get('language')} "
+          f"voice={payload['input']['voice']} lang={payload['input'].get('language_hints')} "
           f"format={payload['input'].get('format')}  {'OK' if cond else '✗'}")
     ok &= cond
 
-    # 语言码拿不准 → 不传 language（别让服务端收到垃圾值；也绝不退回 language_type）
+    # 语言码拿不准 → 不传 language_hints（别让服务端收到垃圾值；也绝不退回 language_type）
     f = FakeOpener(body)
     tts_mod._opener = f
     tts_mod.synthesize("hi", api_key="sk-x", language=None)
     inp = json.loads(f.req.data.decode("utf-8"))["input"]
-    cond = "language" not in inp and "language_type" not in inp
+    cond = "language_hints" not in inp and "language_type" not in inp
     print(f"  未给语言码：input={inp}  {'OK' if cond else '✗'}")
     ok &= cond
 

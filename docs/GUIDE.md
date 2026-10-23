@@ -143,7 +143,7 @@ session:
 
 **`base_url` 才是「实际连哪」的唯一依据**；`provider` 只决定界面默认值、key 存哪个文件。
 两条线路的三条路径完全一样（`/api-ws/v1/realtime`、`/compatible-mode/v1/chat/completions`、
-`/api/v1/services/aigc/multimodal-generation/generation`），换线路只需要改 `base_url` 这一个值。
+`/api/v1/services/audio/tts/SpeechSynthesizer`），换线路只需要改 `base_url` 这一个值。
 
 > 🔍 **排障**：日志里 `[net] 线路=… host=…` 就是当前实际连的地址，
 > `[gui] 服务线路已保存：…` 是界面写盘的结果。两行对不上 → 说明改完还没重新开始翻译。

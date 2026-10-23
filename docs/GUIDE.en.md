@@ -148,7 +148,7 @@ After switching to the international line, `base_url` becomes:
 **`base_url` is the single source of truth for where traffic actually goes**; `provider` only
 decides the UI default and which key file is used. Both lines expose the exact same three paths
 (`/api-ws/v1/realtime`, `/compatible-mode/v1/chat/completions`,
-`/api/v1/services/aigc/multimodal-generation/generation`), so switching lines only changes
+`/api/v1/services/audio/tts/SpeechSynthesizer`), so switching lines only changes
 `base_url`.
 
 > 🔍 **Troubleshooting**: the `[net] 线路=… host=…` line in the log is the address actually in use,

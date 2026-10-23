@@ -18,6 +18,8 @@ from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
                            DEFAULT_VAD_SILENCE_MS, VAD_SILENCE_MS_MIN, VAD_SILENCE_MS_MAX)
 
 from .paths import APP_DIR, BUNDLE_DIR
+from .voices import (DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE,
+                     LEGACY_TTS_MODELS, LEGACY_TTS_VOICES)
 
 ROOT = APP_DIR                                    # 保留别名，兼容既有引用
 DEFAULT_CONFIG = APP_DIR / "config.yaml"           # 可写：用户配置
@@ -529,6 +531,25 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             "gate_preroll_ms": raw_capture.get("gate_preroll_ms", 250),
         },
     }
+    # ---- 打字译音（TTS）老配置迁移 ------------------------------------------------
+    # 2026-07-14 起千问云把离线 TTS 换成 Qwen-Audio-TTS，旧 `qwen3-tts-flash` 在 maas
+    # 网关只回 `HTTP 400：{}`。老用户的 config.yaml 里 `model`/`voice` 是**实写**的，
+    # 不迁移就会「升级完还是 400」，而设置界面只有音色、没有 model 输入框 → 用户在界面上
+    # 没法自救。所以这里**在内存里**改成新默认并响亮留痕；磁盘上的旧值不改（下次启动会
+    # 再走同一段，幂等），用户保存一次设置即落盘。
+    # 只认 `LEGACY_TTS_VOICES` 这张旧音色表：手填的复刻/设计音色 id 不在此列，必须保留。
+    tts_raw = raw_textin.get("tts") or {}
+    tts_model = str(tts_raw.get("model") or "")
+    tts_voice = str(tts_raw.get("voice") or "")
+    if tts_model in LEGACY_TTS_MODELS:
+        print(f"[config] ⚠️ text_input.tts.model={tts_model!r} 属于千问云已停服的旧 TTS 模型"
+              f"（2026-07-14 起改用 Qwen-Audio-TTS）→ 本次按 {DEFAULT_TTS_MODEL} 运行；"
+              f"在「设置 → 音频」里保存一次可写回 config.yaml", flush=True)
+        tts_model = ""
+    if tts_voice in LEGACY_TTS_VOICES:
+        print(f"[config] ⚠️ text_input.tts.voice={tts_voice!r} 是旧模型的音色（新模型不认）"
+              f" → 本次改用 {DEFAULT_TTS_VOICE}；在「设置 → 音频」里选一个再保存即可", flush=True)
+        tts_voice = ""
     return AppConfig(
         session_base=session_base,
         directions=directions,
@@ -547,18 +568,16 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
             "timeout_s": float(raw_textin.get("timeout_s", 20.0)),
             # 打字也要出声：文本翻译不回音频，这一步单独用 TTS 合成后喂虚拟声卡
             "tts": {
-                "enabled": bool((raw_textin.get("tts") or {}).get("enabled", True)),
+                "enabled": bool(tts_raw.get("enabled", True)),
                 # Qwen-Audio-TTS（2026-07-14 起千问云主推的离线 TTS 家族）：
-                # 老 `qwen3-tts-flash` 在 maas 网关上已不服务（400 空体），故换默认值。
-                "model": str((raw_textin.get("tts") or {}).get("model")
-                             or "qwen-audio-3.1-tts-flash"),
-                # 3.1 的多语音色之一（女声，日语在列）。老的 Cherry 属于旧模型，不能混用。
-                "voice": str((raw_textin.get("tts") or {}).get("voice")
-                             or "longanfengyue_v3.1"),
-                # 流式合成（SSE）：首段音频 0.36~0.42s 就能起播（整段合成要等 1.6~1.9s 才开口）
-                "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
-                "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
-                "reuse_conn": bool((raw_textin.get("tts") or {}).get("reuse_conn", True)),
+                # 老 `qwen3-tts-flash` 在 maas 网关上已不服务（400 空体）。旧配置的迁移在
+                # 上面 `LEGACY_TTS_*` 那段做（模型/音色都换，但不动用户手填的复刻音色）。
+                "model": tts_model or DEFAULT_TTS_MODEL,
+                "voice": tts_voice or DEFAULT_TTS_VOICE,
+                # 流式合成（SSE）：首段音频 ~0.8s 到（整段合成要等 ~1.9s 才开口）
+                "stream": bool(tts_raw.get("stream", True)),
+                "timeout_s": float(tts_raw.get("timeout_s", 30.0)),
+                "reuse_conn": bool(tts_raw.get("reuse_conn", True)),
             },
         },
     )

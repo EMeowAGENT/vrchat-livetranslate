@@ -144,7 +144,7 @@ session:
 **실제로 어디에 연결할지를 정하는 것은 `base_url` 하나뿐입니다**. `provider` 는 화면 기본값과 key
 저장 위치를 정할 뿐입니다. 두 회선의 세 경로는 완전히 같으므로(`/api-ws/v1/realtime`,
 `/compatible-mode/v1/chat/completions`,
-`/api/v1/services/aigc/multimodal-generation/generation`), 회선 전환은 `base_url` 한 곳만 바꾸면
+`/api/v1/services/audio/tts/SpeechSynthesizer`), 회선 전환은 `base_url` 한 곳만 바꾸면
 됩니다.
 
 > 🔍 **문제 해결**: 로그의 `[net] 线路=… host=…` 가 실제로 연결하는 주소이고,

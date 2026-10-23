@@ -5,10 +5,10 @@
     端点  /api/v1/services/audio/tts/SpeechSynthesizer   （由 endpoints.tts_url 派生）
     模型  qwen-audio-3.1-tts-flash                       （3.1 才有四个多语音色）
     音色  longanfengyue_v3.1                             （女声，日语在列）
-    请求  {"model": ..., "input": {"text", "voice", "format", "sample_rate", "language"}}
+    请求  {"model": ..., "input": {"text", "voice", "format", "sample_rate", "language_hints"}}
           format=wav（整段，下游 miniaudio 要容器）／pcm（流式，分片是裸 PCM）
           sample_rate=24000
-          language 是**短码**（zh/en/ja…），字段名不是老的 `language_type`
+          language_hints 是**短码数组**（["zh"/"ja"…]，服务端只取第一个），字段名不是老的 `language_type`
 
 ## 为什么单钉这几条
 
@@ -131,6 +131,41 @@ def test_defaults_are_migrated() -> None:
     print(f"  默认值已迁移（{tts.DEFAULT_MODEL} / {tts.DEFAULT_VOICE}）+ 音色表 4 个多语音色 OK")
 
 
+def test_old_config_is_migrated() -> None:
+    """老 config.yaml（qwen3-tts-flash + Cherry）→ 内存里必须按新默认运行，并留 WARN。
+
+    这条是 reviewer 提的 P1：只改「缺省值」不够 —— 老用户的配置里 model/voice 是**实写**的，
+    不迁移的话升级完还是 `HTTP 400：{}`，而设置界面没有 model 输入框，用户没法自救。
+    """
+    import tempfile
+
+    from vlt.config import load_config
+
+    def _load(payload: dict):
+        path = Path(tempfile.mkdtemp(prefix="vlt-tts-migrate-")) / "config.yaml"
+        path.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cfg = load_config(path)
+        return cfg, buf.getvalue()
+
+    cfg, out = _load({"text_input": {"tts": {"model": "qwen3-tts-flash", "voice": "Cherry"}}})
+    ttscfg = cfg.text_input["tts"]
+    assert ttscfg["model"] == tts.DEFAULT_MODEL, f"旧模型没迁移：{ttscfg}"
+    assert ttscfg["voice"] == tts.DEFAULT_VOICE, f"旧音色没迁移：{ttscfg}"
+    assert "已停服的旧 TTS 模型" in out, f"迁移必须留痕（否则用户不知道为什么变了）：{out!r}"
+    assert "旧模型的音色" in out, out
+    print("  老配置（qwen3-tts-flash + Cherry）→ 新默认 + WARN OK")
+
+    # 手填的声音复刻 / 设计音色不在旧表里 → 必须原样保留（不能一刀切改名）
+    cfg2, out2 = _load({"text_input": {"tts": {"model": "qwen3-tts-flash",
+                                               "voice": "my_clone_0001"}}})
+    assert cfg2.text_input["tts"]["model"] == tts.DEFAULT_MODEL
+    assert cfg2.text_input["tts"]["voice"] == "my_clone_0001",         f"手填音色被误伤：{cfg2.text_input['tts']}"
+    print("  旧模型 + 手填复刻音色 → 只换模型、保留用户音色 OK")
+
+
+
 def test_example_config_matches_defaults() -> None:
     """`config.example.yaml` 的 text_input.tts 段必须与新默认值同步（否则新用户一开始就错）。"""
     data = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
@@ -141,7 +176,7 @@ def test_example_config_matches_defaults() -> None:
 
 
 def test_integral_payload_uses_wav_and_language_code() -> None:
-    """整段：`format=wav` + `sample_rate=24000` + `language` 短码（不是 language_type）。"""
+    """整段：`format=wav` + `sample_rate=24000` + `language_hints` 短码数组（不是 language_type）。"""
     opener = _Opener(_integral_body())
     with _Patch(_get_opener=lambda: opener,                               # noqa: SLF001
                 _decode_to_24k_mono=lambda raw: b"PCM:" + raw):           # noqa: SLF001
@@ -152,10 +187,11 @@ def test_integral_payload_uses_wav_and_language_code() -> None:
     assert inp["voice"] == tts.DEFAULT_VOICE
     assert inp["format"] == "wav", f"整段必须用容器格式（miniaudio 要解）：{inp}"
     assert inp["sample_rate"] == 24000
-    assert inp["language"] == "ja", f"语言要取短码（ja-JP → ja）：{inp}"
+    assert inp["language_hints"] == ["ja"], f"语言提示要取短码数组（ja-JP → [\"ja\"]）：{inp}"
+    assert "language" not in inp, f"字段名必须是 language_hints（数组），不是 language：{inp}"
     assert "language_type" not in inp, f"新端点不认 language_type：{inp}"
     assert pcm == b"PCM:WAVDATA"
-    print(f"  整段请求体：format=wav / sample_rate=24000 / language={inp['language']} OK")
+    print(f"  整段请求体：format=wav / sample_rate=24000 / language_hints={inp['language_hints']} OK")
 
 
 def test_stream_payload_uses_pcm() -> None:
@@ -168,26 +204,26 @@ def test_stream_payload_uses_pcm() -> None:
     assert parts == [b"\x07\x08" * 30], f"流式分片不对：{parts!r}"
     assert inp["format"] == "pcm", f"流式必须用裸 PCM（wav 会被当噪声播）：{inp}"
     assert inp["sample_rate"] == 24000
-    assert inp["language"] == "zh"
+    assert inp["language_hints"] == ["zh"]
     assert inp["voice"] == tts.DEFAULT_VOICE
-    print("  流式请求体：format=pcm / sample_rate=24000 / language=zh OK")
+    print("  流式请求体：format=pcm / sample_rate=24000 / language_hints=[zh] OK")
 
 
 def test_unknown_language_is_not_sent() -> None:
-    """认不出的语言码 → 整个 `language` 字段都不传（也绝不退回 language_type）。"""
+    """认不出的语言码 → 整个 `language_hints` 字段都不传（也绝不退回 language_type）。"""
     opener = _Opener(_integral_body())
     with _Patch(_get_opener=lambda: opener,                               # noqa: SLF001
                 _decode_to_24k_mono=lambda raw: raw):                     # noqa: SLF001
         tts.synthesize("hi", api_key="k", language="klingon")
     inp = _payload_of(opener)["input"]
-    assert "language" not in inp, inp
+    assert "language_hints" not in inp, inp
     assert "language_type" not in inp, inp
     opener2 = _Opener(_integral_body())
     with _Patch(_get_opener=lambda: opener2,                              # noqa: SLF001
                 _decode_to_24k_mono=lambda raw: raw):                     # noqa: SLF001
         tts.synthesize("hi", api_key="k", language=None)
-    assert "language" not in _payload_of(opener2)["input"]
-    print("  未知语言 / 未给语言：不带 language（且不退回 language_type）OK")
+    assert "language_hints" not in _payload_of(opener2)["input"]
+    print("  未知语言 / 未给语言：不带 language_hints（且不退回 language_type）OK")
 
 
 def test_lang_gap_warns_once_per_language() -> None:
@@ -238,6 +274,7 @@ def test_empty_http_body_gets_readable_message() -> None:
 if __name__ == "__main__":
     print("test_tts_payload:")
     test_defaults_are_migrated()
+    test_old_config_is_migrated()
     test_example_config_matches_defaults()
     test_integral_payload_uses_wav_and_language_code()
     test_stream_payload_uses_pcm()

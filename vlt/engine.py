@@ -603,11 +603,14 @@ class Engine:
         # 采集循环是长跑任务，不能直接持有 session 对象：重连会换新对象，
         # 旧引用会把音频继续发到死连接上。统一走这个代理。
         self._proxy = _SessionProxy(self)
-        # 「建会话」的互斥锁：重建路径是「关旧 + 建新」两步，采集泵在此期间一直在跑。
-        # 两条并发重建会各建一条连接、后建的覆盖前者（前一条变成没人关的泄漏连接），
-        # 还多烧一次 RPM 预算。锁把「关旧 + 建新」变成一个原子步骤；
-        # 看门狗也靠 `locked()` 判断「已经在建会话了，别再起第二条重连」。
-        self._session_lock = asyncio.Lock()
+        # 「建会话」的互斥锁：**按事件循环懒建**（Engine 支持 stop→start，每次 start 都是
+        # 新 loop；`asyncio.Lock` 一旦在某个 loop 上争用就被绑定，跨 loop 复用会抛
+        # "bound to a different event loop"）。`_thread_run` 每次启动都把它重置成 None。
+        self._session_lock_obj: asyncio.Lock | None = None
+        # 会话工厂接缝：`None` = 用模块级 `create_session`（既有测试会整体替换
+        # `vlt.engine.create_session`，动态取名保证那种替换仍然生效）；测试也可以按实例
+        # 赋一个返回假会话的可调用对象。别替换 `_create_session`：那会绕开锁。
+        self._session_factory = None
         self._reconnect_task: asyncio.Task | None = None
         self._last_audio_ts = 0.0      # 上一段 TTS 音频到达时刻（判句边界）
         self._pending_seal = False     # 上一句终版文本已到 → 下一段音频前封句尾
@@ -1098,6 +1101,8 @@ class Engine:
     def _thread_run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        # 新 loop = 新锁：上一轮用过的 Lock 可能已绑定到旧 loop（见 __init__ 的说明）。
+        self._session_lock_obj = None
         try:
             self._loop.run_until_complete(self._async_run())
         except Exception as exc:
@@ -1358,6 +1363,21 @@ class Engine:
             device_fallbacks=fallbacks,
         )
 
+    @property
+    def _session_lock(self) -> asyncio.Lock:
+        """建会话互斥锁（**懒建，跟随当前事件循环**）。
+
+        Engine 支持 stop→start，每次 `_thread_run` 都是新 loop；`asyncio.Lock` 在某个
+        loop 上被争用后会被绑定到它，跨 loop 复用会抛 `bound to a different event loop`。
+        所以不在 `__init__` 里建，而在第一次用到时（已经在跑的那个 loop 里）建；
+        `_thread_run` 每次启动把 `_session_lock_obj` 重置成 None。
+        """
+        lock = self._session_lock_obj
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_lock_obj = lock
+        return lock
+
     async def _create_session(self, scfg: SessionConfig) -> None:
         """建会话的**唯一**公开入口：先拿 `_session_lock`，再进函数体。
 
@@ -1385,11 +1405,14 @@ class Engine:
                 f"连接预算已满（{len(recent)}/{rpm}/min），等待 {wait:.0f}s")
             await asyncio.sleep(wait)
 
-        self._session = create_session(scfg)
+        self._session = (self._session_factory or create_session)(scfg)
         # 新会话 = 新的一页：repeat 抑制状态清零（上一段的重复历史不带过来）
         self._repeat_suppressed = False
         self._repeat_dropped = 0
         self._final_hist.clear()
+        # 诊断计数在**分配新会话时**归零（不是建好之后）——否则本次重连窗口里
+        # 累计的「未就绪丢弃」会被自己的清零抹掉，那行诊断几乎恒为 0。
+        self._proxy.not_ready_chunks = 0
         t0 = time.perf_counter()
         await self._session.start(
             on_text=self._on_text,
@@ -1401,22 +1424,6 @@ class Engine:
         ms = (time.perf_counter() - t0) * 1000
         self._events.on_status("info", f"会话已建立（{ms:.0f}ms）")
         self._events.on_stats({"connect_ms": round(ms, 1)})
-        # 新会话已经「可发送」→ 上一个重连窗口的丢弃计数归零（诊断只看当前这一轮）。
-        self._proxy.not_ready_chunks = 0
-
-    async def _new_session_in_locked(self, scfg: SessionConfig) -> None:
-        """在**已持锁**的临界区里建会话（供 `_reconnect_session` / `_rebuild_session` 用）。
-
-        为什么不直接调 `_create_session_locked`：`_create_session` 是「建会话」的唯一
-        公开入口，测试/外部替身会**整个替换**它（`eng._create_session = fake`，见
-        `tests/test_reconnect.py`）—— 那种替身自己不拿锁，所以在临界区里调它安全。
-        只有它仍是原装实现时才走 `_create_session_locked()`（原装实现会再拿一次锁 → 死锁）。
-        """
-        bound = self.__dict__.get("_create_session")
-        if bound is not None:
-            await bound(scfg)
-            return
-        await self._create_session_locked(scfg)
 
     async def _rebuild_session(self) -> None:
         try:
@@ -1427,7 +1434,7 @@ class Engine:
                     await self._session.close()
                     self._session = None
                 scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-                await self._new_session_in_locked(scfg)
+                await self._create_session_locked(scfg)
             d = self._cfg.directions[self._direction]
             self._events.on_status("info",
                 f"语言已切换：{d.source_lang or '自动'}→{d.target_lang}")
@@ -1849,7 +1856,7 @@ class Engine:
                 pass
             self._session = None
             scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-            await self._new_session_in_locked(scfg)
+            await self._create_session_locked(scfg)
 
     async def _reconnect_loop(self, reason: str) -> None:
         backoff = [float(x) for x in self._cfg.session_base.get("reconnect_backoff", [2, 5, 10, 30])]

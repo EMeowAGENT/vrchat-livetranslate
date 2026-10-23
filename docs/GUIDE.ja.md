@@ -145,7 +145,7 @@ session:
 **実際にどこへ接続するかを決めるのは `base_url` だけ**です。`provider` は画面の既定値と key の
 保存先を決めるだけです。両回線の 3 つのパスはまったく同じ（`/api-ws/v1/realtime`、
 `/compatible-mode/v1/chat/completions`、
-`/api/v1/services/aigc/multimodal-generation/generation`）なので、回線の切り替えは `base_url` の
+`/api/v1/services/audio/tts/SpeechSynthesizer`）なので、回線の切り替えは `base_url` の
 1 か所を変えるだけで済みます。
 
 > 🔍 **トラブルシュート**：ログの `[net] 线路=… host=…` が実際に接続しているアドレス、

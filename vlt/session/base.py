@@ -174,6 +174,15 @@ class LiveTranslateSession(abc.ABC):
         # 最近一次「上游有人说话」的时刻（`note_voice()` 打点；0.0 = 这条腿全程没声音）
         self._last_voice_at: float = 0.0
 
+    @property
+    def is_ready(self) -> bool:
+        """能不能上送音频。基类默认 True（老实现/测试替身保持原语义）。
+
+        `QwenLiveTranslateSession` 覆盖成「`session.update` 已下发」——采集泵靠它判断
+        重连窗口（连上了但还没配置好）不要发音频，见 `base.SessionNotReady`。
+        """
+        return True
+
     def note_voice(self) -> None:
         """上游告诉会话：**刚刚这一块音频是「有人在说话」**（电平过 `SILENCE_PEAK`）。
 

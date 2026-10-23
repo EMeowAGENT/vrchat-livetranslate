@@ -174,10 +174,53 @@ def test_parser_ignores_comment_and_control_lines() -> None:
     print("  id/event/注释行不影响 JSON 拼装 OK")
 
 
+
+def test_non_sse_response_requeries_as_wav() -> None:
+    """服务端没按 SSE 回（application/json）→ **重新发一次整段请求（wav）**，别拿裸 PCM 去解。
+
+    reviewer 的 P2：流式请求带的是 `format=pcm`（裸 PCM、无容器头），旧写法在这条降级分支
+    里 `_decode_to_24k_mono(raw)` 必然 `DecodeError`；而且抛 TtsError 会绕过外层整段兜底。
+    """
+    import base64 as _b64
+
+    class _JsonOpener:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.reqs: list = []
+
+        def open(self, req, timeout=None):                       # noqa: ANN001, ANN201
+            self.reqs.append(req)
+            return _Resp(self._body, ctype="application/json")
+
+    body = json.dumps({"output": {"audio": {"data": _b64.b64encode(b"WAVDATA").decode()}}}).encode()
+    opener = _JsonOpener(body)
+
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        tts._opener = opener                                        # noqa: SLF001
+        original = tts._decode_to_24k_mono                          # noqa: SLF001
+        tts._decode_to_24k_mono = lambda raw: b"PCM:" + raw          # noqa: SLF001
+        try:
+            parts = list(tts.synthesize_stream("你好", api_key="sk-x", language="zh"))
+        finally:
+            tts._decode_to_24k_mono = original                      # noqa: SLF001
+            tts._opener = None                                      # noqa: SLF001
+    out = buf.getvalue()
+
+    assert parts == [b"PCM:WAVDATA"], f"应重新要一份 wav 再解码，实际 {parts!r}"
+    assert len(opener.reqs) == 2,         f"降级路径应「流式 1 次 + 整段 1 次」，实际 {len(opener.reqs)} 次请求"
+    assert "重新发一次整段合成" in out, f"降级必须留痕：{out!r}"
+    # 第二次请求必须是 wav（第一次是 pcm）
+    second = json.loads(opener.reqs[1].data.decode("utf-8"))
+    assert second["input"]["format"] == "wav", second
+    print("  非 SSE 降级 → 重新要一份 wav（不是拿裸 PCM 硬解）OK")
+
+
+
 if __name__ == "__main__":
     print("test_tts_sse_multiline:")
     test_multiline_sse_yields_every_chunk()
     test_sentence_begin_is_skipped()
     test_last_event_without_trailing_blank_line()
     test_parser_ignores_comment_and_control_lines()
+    test_non_sse_response_requeries_as_wav()
     print("ALL PASSED")

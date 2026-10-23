@@ -36,6 +36,28 @@ TTS_VOICES: tuple[str, ...] = (
     "longanfengyue_v3.1", "longanhuan_v3.1", "longanlingxin_v3.1", "xunanchuan_v3.1",
 )
 
+# ---------------------------------------------------------------- 默认值与旧值（迁移用）
+# **单一真相源**：`vlt/tts.py` 与 `vlt/config.py` 都从这里取，别在别处再写第二份字符串。
+DEFAULT_TTS_MODEL = "qwen-audio-3.1-tts-flash"
+DEFAULT_TTS_VOICE = "longanfengyue_v3.1"
+
+#: 千问云已停服的旧离线 TTS 模型（2026-07-14 起改 Qwen-Audio-TTS）。
+#: 老 config.yaml 里如果还写着这些 id，`load_config` 会**在内存里**改成新默认并留 WARN ——
+#: 否则升级完还是 `HTTP 400：{}`，而设置界面没有 model 输入框，用户没法自救。
+LEGACY_TTS_MODELS: frozenset[str] = frozenset({
+    "qwen3-tts-flash",
+    "qwen3-tts-instruct-flash",
+})
+
+#: 旧模型的音色（新模型不认这些 id，跨模型填 voice 会 InvalidParameter）。
+#: 迁移时**只认这张表**：手填的声音复刻 / 声音设计 id 不在此列，必须原样保留。
+LEGACY_TTS_VOICES: frozenset[str] = frozenset({
+    "Cherry", "Serena", "Ethan", "Chelsie", "Momo", "Vivian", "Moon", "Maia",
+    "Kai", "Nofish", "Bella", "Jennifer", "Ryan", "Katerina", "Aiden",
+    "Mia", "Bellona", "Neil", "Elias", "Bodega", "Sonrisa", "Alek",
+    "Dolce", "Sohee", "Ono Anna", "Lenn", "Emilien", "Andre",
+})
+
 
 def voice_choices(current: str | None, catalog: tuple[str, ...]) -> list[str]:
     """下拉候选：目录音色 + （若当前值不在表里）把当前值排到最前。

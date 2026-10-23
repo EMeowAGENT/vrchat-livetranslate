@@ -150,7 +150,7 @@ session:
 **Именно `base_url` определяет, куда реально идут запросы**; `provider` задаёт только значение по
 умолчанию в интерфейсе и то, какой файл ключа используется. У обеих линий одинаковые три пути
 (`/api-ws/v1/realtime`, `/compatible-mode/v1/chat/completions`,
-`/api/v1/services/aigc/multimodal-generation/generation`), поэтому смена линии меняет только
+`/api/v1/services/audio/tts/SpeechSynthesizer`), поэтому смена линии меняет только
 `base_url`.
 
 > 🔍 **Диагностика**: строка `[net] 线路=… host=…` в логе — это адрес, по которому идёт трафик, а
