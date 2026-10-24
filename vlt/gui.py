@@ -439,6 +439,12 @@ class TranslationGUI(ProxyMethods):
     def _unsync_engine_ctx(self):
         c = self._engine_ctx
         for n in _E2G: setattr(self, f"_{n}", getattr(c, n))
+        # ⚠️ 引擎列表会被 gui_engine.start/stop **整体换新**（`ctx.engines = []`），
+        #    而打字输入读的是 ChatCtx 里的 engines_ref。不在这里立刻写回，用户点完
+        #    「开始翻译」后、下一跳 poll 之前的回车就会看到启动前的空列表 ——
+        #    真机上表现为「回车/发送都没反应、字还在框里、状态栏弹一句让人去点开始翻译」。
+        self._chat_ctx.engines_ref = self._engines
+        self._chat_ctx.engine_dirs_ref = self._engine_dirs
     # ── 设备选择（→ gui_audio）──
     def _sync_audio_ctx(self) -> None: gui_audio.sync_from_gui(self._audio_ctx, self)
     def _start_device_scan(self) -> None:

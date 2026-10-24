@@ -29,6 +29,7 @@ from .glossary_text import (
 )
 from .i18n import t
 from .output.micproxy import MODE_PASSTHROUGH, MODE_TRANSLATED
+from .voices import DEFAULT_TTS_MODEL
 from .ui_state import current_key_slot
 from .ui_text import (
     VOICE_PREVIEW_MODEL,
@@ -139,6 +140,30 @@ def on_speech_voice_change(ctx: VoiceCtx, cfg: Any, engines: list, _event=None, 
     print(f"[gui] 说话译音音色 → {voice!r}（已写入 session.voice）", flush=True)
 
 
+def read_tts_model_from_disk() -> str | None:
+    """从**磁盘**读 `text_input.tts.model`；文件缺失返回 `None`，解析失败留痕后返回 `None`。
+
+    为什么必须读盘、不能只用内存：`load_config()` 已经把「复刻/设计模型 + 内置音色」
+    在内存里回落成默认值，设置窗拿的是**同一份**内存 `cfg` —— 只看内存的话，
+    「启动时就已漂移」的用户永远不会触发落盘修复（评审 ⚠️2 实测：A/A2 都不落盘）。
+    磁盘那份才是需要被修的真相。读失败不阻断保存，退回内存快照即可。
+    """
+    try:
+        raw = yaml.safe_load(_cfg_mod.DEFAULT_CONFIG.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            return None
+        section = ((raw.get("text_input") or {}).get("tts") or {})
+        if not isinstance(section, dict):
+            return None
+        return str(section.get("model") or "")
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[gui] 读磁盘打字译音模型失败，退回内存快照：{type(exc).__name__}: {exc}",
+              flush=True)
+        return None
+
+
 def on_tts_voice_change(ctx: VoiceCtx, cfg: Any, _event=None, *,
                         set_status: Callable) -> None:
     """「打字译音」音色：写 text_input.tts.voice 并同步内存。"""
@@ -146,10 +171,26 @@ def on_tts_voice_change(ctx: VoiceCtx, cfg: Any, _event=None, *,
     if not voice:
         return
     set_tts_voice_config(cfg, voice)
+    model_changed = ""
     if isinstance(cfg.text_input, dict):
-        cfg.text_input.setdefault("tts", {})["voice"] = voice
+        tts_cfg = cfg.text_input.setdefault("tts", {})
+        tts_cfg["voice"] = voice
+        # 主线的下拉只有内置音色；老配置若把复刻/设计目标模型留在 model 里，
+        # 选内置音色必须把模型一起改回默认，否则合成接口必失败。
+        # ⚠️ 判定要看**磁盘**上的 model：启动时已经漂移的用户，内存里早被
+        #    `load_config()` 修干净了，只读内存会漏掉落盘（评审 ⚠️2）。
+        disk_model = read_tts_model_from_disk()
+        stale = next((m for m in (disk_model, str(tts_cfg.get("model") or ""))
+                      if _cfg_mod.tts_model_mismatch(m, voice)), "")
+        if stale:
+            tts_cfg["model"] = DEFAULT_TTS_MODEL
+            set_tts_model_config(DEFAULT_TTS_MODEL)
+            model_changed = f"；模型 {stale!r} 与内置音色不匹配，已改回 {DEFAULT_TTS_MODEL!r}"
+            print(f"[gui] ⚠️ 打字译音模型 {stale!r} 与内置音色 {voice!r} 不匹配 → "
+                  f"已改回 {DEFAULT_TTS_MODEL!r}", flush=True)
     set_status("info", t("打字译音音色已保存：{v}（下一条打字即生效）", v=voice))
-    print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）", flush=True)
+    print(f"[gui] 打字译音音色 → {voice!r}（已写入 text_input.tts.voice）{model_changed}",
+          flush=True)
 
 
 def set_voice_config(cfg: Any, voice: str) -> None:
@@ -160,6 +201,12 @@ def set_voice_config(cfg: Any, voice: str) -> None:
 def set_tts_voice_config(cfg: Any, voice: str) -> None:
     """把打字译音音色写回 `text_input.tts.voice`。"""
     write_leaf(["text_input", "tts", "voice"], voice, "保存打字译音音色",
+               create=True)
+
+
+def set_tts_model_config(model: str) -> None:
+    """把打字译音模型写回 `text_input.tts.model`（只有「模型随音色一起修」时才用）。"""
+    write_leaf(["text_input", "tts", "model"], model, "保存打字译音模型",
                create=True)
 
 

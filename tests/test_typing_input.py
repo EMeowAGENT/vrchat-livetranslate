@@ -19,6 +19,10 @@ send_typed」这一层，所以 45/45 全绿而功能是死的。
 
 故障注入：把 `_submit_typed` 里改成 `send_typed(ctx)`（拆分后的原始写法），
 第 1 条必须变红。
+
+⚠️ 本文件是**回调层**用例，`engines_ref` 是手工塞进去的 —— 它只能证明
+「回调 → send_typed → 引擎」这一小段。真实的 `_start()` → poll 接线另见
+`tests/test_typing_input_wiring.py`（#113 之后真机仍不通，就是漏了这一层）。
 """
 from __future__ import annotations
 

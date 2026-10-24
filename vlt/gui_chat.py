@@ -78,9 +78,15 @@ class ChatCtx:
     q: Any = None                         # queue.Queue
     poll_job: Any = None                  # root.after 句柄（poll 循环）
 
-    # ── 引擎引用（poll 使用） ──
+    # ── 引擎引用（poll / 打字发送使用） ──
+    # ⚠️ `gui_engine.start()` / `stop()` 会把 `gui._engines` **整体换成一个新 list**
+    #    （`ctx.engines = []`），构建期绑定的 engines_ref 会立刻指向启动前的空列表，
+    #    而且再也不会更新 —— 打字输入于是永远看到 `targets=[]`（静默不发）。
+    #    所以除了 engines_ref 这份快照，还要有**每跳现取**的活引用（同 overlay_out_fn 的纪律）。
     engines_ref: list = field(default_factory=list)       # 可变 list 容器
     engine_dirs_ref: list = field(default_factory=list)   # 同上
+    engines_fn: Optional[Callable] = None                 # () -> list（开始/停止后仍是最新的）
+    engine_dirs_fn: Optional[Callable] = None             # () -> list（同上）
 
     # ── 每跳现取的活引用（**不许缓存实例**） ──
     # 桌面字幕 / 手腕屏是「开始翻译」后才建的，而构建期就跑起了 poll：那时它们还是
@@ -283,20 +289,32 @@ def send_typed(ctx: ChatCtx, engines: list, engine_dirs: list,
                set_status_fn) -> None:
     """把输入框里的文字交给「我说」那条腿翻译并送出（下游与说话完全一致）。"""
     if ctx.text_entry is None or ctx.text_var is None:
+        # 真机上不该发生（输入行可见就一定有控件）；但绝不允许「按了没反应也没痕迹」。
+        print("[gui] 打字未发送：输入行控件不存在（text_entry / text_var 为空）",
+              flush=True)
         return
     text = ctx.text_var.get().strip()
     if not text:
+        print("[gui] 打字未发送：输入框为空", flush=True)
         return
     targets = [e for e, dirn in zip(engines, engine_dirs) if dirn == "mine"]
     if not targets:
-        _notify(set_status_fn, "warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
-                                        "且方向要含「我说」"))
+        # 两种完全不同的原因必须分开说：没引擎 = 还没开始翻译；有引擎但方向不含
+        # 「我说」= 本次会话本来就不该有打字入口。旧文案一律叫人「先点开始翻译」，
+        # 在方向选错时会把用户指到错误的方向。
+        print(f"[gui] 打字未发送：engines={len(engines)} dirs={list(engine_dirs)}"
+              "（没有「我说」那条腿）", flush=True)
+        msg = (t("打字只对「我说」方向有效 —— 当前方向不含「我说」")
+               if engines else t("引擎还没就绪，稍后重试"))
+        _notify(set_status_fn, "warn", msg)
         return
     sent = sum(1 for e in targets if e.send_text(text))
     if sent:
         ctx.text_var.set("")      # 清空：肉眼确认已发出
         _notify(set_status_fn, "info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
     else:
+        print(f"[gui] 打字未发送：{len(targets)} 条「我说」腿都返回 False"
+              "（引擎不在运行状态？）", flush=True)
         _notify(set_status_fn, "warn", t("引擎还没就绪，稍后重试"))
 
 
@@ -557,6 +575,10 @@ def refresh_status(ctx: ChatCtx, engines: list, direction_var,
 def setup_poll_ctx(ctx: ChatCtx, gui) -> None:
     """设置 ChatCtx 上的回调引用（从 gui 实例读取）。"""
     c = ctx; c.q = gui._q; c.engines_ref = gui._engines; c.engine_dirs_ref = gui._engine_dirs
+    # 活引用：gui._engines 会被开始/停止**整体换新**，快照 engines_ref 只够用一拍。
+    # poll 每跳用这两个 getter 刷新（与 *_out_fn 同一纪律）。
+    c.engines_fn = lambda: gui._engines
+    c.engine_dirs_fn = lambda: gui._engine_dirs
     c.set_status_fn = gui._set_status          # 打字发送的状态回报（issue #110）
     c.room_status_next = gui._room_status_next; c.gate_level_tick = gui._gate_level_tick
     # 活引用：闭包捕获的是 gui 实例，取值发生在**每跳 poll 里**，所以
@@ -583,7 +605,15 @@ def poll(ctx: ChatCtx, root: tk.Misc,
 
     手腕屏 / 桌面字幕实例**不通过参数传进来** —— 它们是「开始翻译」后才创建的，
     而本循环在构建期就起跑了；一律走 ``ctx.*_out_fn()`` 每跳现取（见 ChatCtx）。
+
+    引擎列表同理：`gui_engine.start/stop` 会把它**整体换新**，而本循环的下一跳
+    是直接重排 `poll` 自己、不会再走 `gui._poll` 里的 `setup_poll_ctx` ——
+    所以必须在这里每跳现取，否则 `engines_ref` 永远停在启动前的空列表。
     """
+    if ctx.engines_fn is not None:
+        ctx.engines_ref = ctx.engines_fn()
+    if ctx.engine_dirs_fn is not None:
+        ctx.engine_dirs_ref = ctx.engine_dirs_fn()
     try:
         while True:
             item = ctx.q.get_nowait()

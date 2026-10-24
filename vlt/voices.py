@@ -58,6 +58,18 @@ LEGACY_TTS_VOICES: frozenset[str] = frozenset({
     "Dolce", "Sohee", "Ono Anna", "Lenn", "Emilien", "Andre",
 })
 
+#: 音色实验室分支写进 `text_input.tts.model` 的**复刻 / 设计目标模型**前缀。
+#: 这类模型必须配它自己产出的自定义 voice id；配内置音色（或旧音色迁移后的默认音色）
+#: 一定合成失败（老端点回 404 `Model not exist`，新端点回 400 空 body）。
+#: 判定只此一份 —— `config.load_config()` 与设置页的「改音色顺手修模型」都调
+#: `vlt/config.py::tts_model_mismatch()`，别再各处手写 startswith。
+REPLICA_TTS_MODEL_PREFIXES: tuple[str, ...] = ("qwen3-tts-vc-", "qwen3-tts-vd-")
+
+
+def is_replica_model(model: str | None) -> bool:
+    """这个 model 是不是「音色实验室」的复刻 / 设计目标模型（`qwen3-tts-vc-*` / `-vd-*`）。"""
+    return str(model or "").strip().startswith(REPLICA_TTS_MODEL_PREFIXES)
+
 
 def voice_choices(current: str | None, catalog: tuple[str, ...]) -> list[str]:
     """下拉候选：目录音色 + （若当前值不在表里）把当前值排到最前。

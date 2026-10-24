@@ -27,7 +27,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# 「界面接线」用例断言的是中文状态栏文案（无「我说」腿时提示里含「麦克风」）。
+# 「界面接线」用例断言的是中文状态栏文案（无「我说」腿时提示里含方向说明）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
@@ -399,7 +399,8 @@ def test_gui_wiring() -> bool:
         gui._text_var.set("你好")
         gui._send_typed()
         msg = gui._status_label.cget("text")
-        cond = fake.got == [] and "麦克风" in msg
+        # 有引擎但方向不含「我说」：提示必须指方向，而不是叫人再点一次开始翻译。
+        cond = fake.got == [] and "我说" in msg
         print(f"  无「我说」腿：引擎收到={fake.got} 状态={msg!r}  {'OK' if cond else '✗'}")
         ok &= cond
     finally:
@@ -555,6 +556,31 @@ def test_tts_errors() -> bool:
     except tts_mod.TtsError as exc:
         cond = "400" in str(exc) and "InvalidParameter" in str(exc)
         print(f"  HTTP 400：{str(exc)[:70]}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+    # 网关空对象拒绝（实测 maas 的 TTS 就这样）：报错必须给出线路/模型的排查方向，
+    # 不能只甩一个 `HTTP 400：{}` 让用户对着日志发呆。
+    err = HTTPError(tts_mod.ENDPOINT, 400, "Bad Request", {}, io.BytesIO(b'{}'))
+    tts_mod._opener = FakeOpener(err=err)
+    try:
+        tts_mod.synthesize("hi", api_key="sk-x")
+        print("  空对象 400：没有报错  ✗")
+        ok = False
+    except tts_mod.TtsError as exc:
+        cond = "未给原因" in str(exc) and "线路" in str(exc)
+        print(f"  空对象 400 → {str(exc)[-50:]}  {'OK' if cond else '✗'}")
+        ok &= cond
+
+    # 默认 `text_input.tts.stream: true`：流式被协议性拒绝后会退回整段合成 ——
+    # 抛给用户的必须是**整段那条腿**的原因，不能把信息更全的错误换成裸状态码。
+    tts_mod._opener = FakeSseOpener(None, err=err)
+    try:
+        list(tts_mod.synthesize_stream("hi", api_key="sk-x"))
+        print("  流式空对象 400：没有报错  ✗")
+        ok = False
+    except tts_mod.TtsError as exc:
+        cond = "未给原因" in str(exc) and "线路" in str(exc)
+        print(f"  流式空对象 400 → 整段失败原因透传  {'OK' if cond else '✗'}")
         ok &= cond
 
     tts_mod._opener = FakeOpener('{"output": {}}')

@@ -18,8 +18,8 @@ from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
                            DEFAULT_VAD_SILENCE_MS, VAD_SILENCE_MS_MIN, VAD_SILENCE_MS_MAX)
 
 from .paths import APP_DIR, BUNDLE_DIR
-from .voices import (DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE,
-                     LEGACY_TTS_MODELS, LEGACY_TTS_VOICES)
+from .voices import (DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_VOICES,
+                     LEGACY_TTS_MODELS, LEGACY_TTS_VOICES, is_replica_model)
 
 ROOT = APP_DIR                                    # 保留别名，兼容既有引用
 DEFAULT_CONFIG = APP_DIR / "config.yaml"           # 可写：用户配置
@@ -336,6 +336,21 @@ def _warn_provider_host_mismatch(provider: str, base_url: str) -> None:
               "—— 地址以 base_url 为准；要切线路请在界面「设置 → 常规」里切换", flush=True)
 
 
+def tts_model_mismatch(model: str | None, voice: str | None) -> bool:
+    """「复刻/设计模型 + 非自定义音色」—— 这个组合一定合成失败，模型必须修回默认。
+
+    两个调用点共用这一份判定（别再各写一遍 `startswith`）：
+    - `load_config()`：启动时在**内存**里回落（磁盘不动，保住注释/键顺序）；
+    - `gui_voice.on_tts_voice_change()`：用户改音色时把修正**落盘**。
+
+    `voice` 为空表示「旧音色已迁移、将用默认音色」——默认音色是内置音色，同样要修；
+    只有**手填的自定义 voice id**（声音复刻产出的那种，不在 `TTS_VOICES` 里）才配得上
+    复刻/设计模型，属于合法配置，绝不能改。
+    """
+    v = str(voice or "").strip()
+    return is_replica_model(model) and (not v or v in TTS_VOICES)
+
+
 def load_config(path: str | Path | None = None, api_key: str | None = None,
                 require_key: bool = True) -> AppConfig:
     p = ensure_config(Path(path) if path else None)   # 缺文件时从 config.example.yaml 生成
@@ -550,6 +565,20 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         print(f"[config] ⚠️ text_input.tts.voice={tts_voice!r} 是旧模型的音色（新模型不认）"
               f" → 本次改用 {DEFAULT_TTS_VOICE}；在「设置 → 音频」里选一个再保存即可", flush=True)
         tts_voice = ""
+    # ---- 音色实验室遗留：复刻/设计模型 + 内置音色 --------------------------------
+    # 「音色实验室」分支会把**复刻/设计目标模型**（qwen3-tts-vc-* / qwen3-tts-vd-*）写进
+    # `text_input.tts.model`，并配一个自定义 voice id。主线的内置音色下拉只改 voice、不改
+    # model —— 用户把音色切回内置音色后就成了「clone 模型 + 内置音色」，合成必失败。
+    # ⚠️ 必须排在上面两步**之后**：旧音色（Maia/Cherry…）会先被换成默认音色，
+    #    判定必须把「迁移后的默认音色」也当成内置音色，否则这类用户会漏判。
+    # 自定义 voice id + 复刻模型是合法配置，保持原样。
+    if tts_model_mismatch(tts_model, tts_voice):
+        print(f"[config] ⚠️ 打字译音模型 {tts_model!r} 与内置音色 "
+              f"{tts_voice or DEFAULT_TTS_VOICE!r} 不匹配（复刻/设计模型必须配自定义 voice）"
+              f"→ 本次按 {DEFAULT_TTS_MODEL} 运行；在「设置 → 音频」里重选一次音色即可写回"
+              " config.yaml", flush=True)
+        tts_model = ""
+
     return AppConfig(
         session_base=session_base,
         directions=directions,
