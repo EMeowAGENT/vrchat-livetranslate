@@ -705,8 +705,12 @@ def synthesize_stream(
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
                              language=language, timeout=timeout, endpoint=url)
-        except TtsError:
-            raise exc
+        except TtsError as synth_exc:
+            # ⚠️ 抛**整段那条腿**的错误，不要抛流式那次的状态码：用户看到的必须是
+            # 「实际最后失败的那次请求」的原因（空 body 已由 `_http_reason_text` 翻成人话）。
+            # 曾经 `raise exc` 把信息更全的整段错误丢掉，默认 `stream: true` 的用户只看到
+            # 流式那条较弱的文案 —— 正是「对着 HTTP 400 发呆」的来源（评审 ⚠️1）。
+            raise synth_exc from exc
         return
     except TtsError as exc:
         if got:
