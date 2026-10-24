@@ -90,9 +90,8 @@ STRINGS: dict[str, str] = {
     "打字:": "Type:",
     "发送": "Send",
     "回车发送 · Esc 清空": "Enter to send · Esc to clear",
-    "打字替代的是麦克风 —— 先点「开始翻译」，且方向要含「我说」":
-        "Typing replaces the microphone — click \"Start\" first, "
-        "and the direction must include \"Me\"",
+    "打字只对「我说」方向有效 —— 当前方向不含「我说」":
+        "Typing only works in the \"Me\" direction — current direction doesn't include it",
     "打字已送出（{n} 字），翻译中…": "Sent {n} characters, translating…",
     "引擎还没就绪，稍后重试": "Engine not ready yet — try again shortly",
 

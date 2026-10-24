@@ -27,7 +27,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# 「界面接线」用例断言的是中文状态栏文案（无「我说」腿时提示里含「麦克风」）。
+# 「界面接线」用例断言的是中文状态栏文案（无「我说」腿时提示里含方向说明）。
 # 界面语言会跟随系统语言（CI 与外国机器是英文系统）→ 必须钉死，
 # 否则同一份代码在不同机器上结果不同。产品代码不依赖这个补丁。
 import vlt.i18n as _i18n  # noqa: E402
@@ -399,7 +399,8 @@ def test_gui_wiring() -> bool:
         gui._text_var.set("你好")
         gui._send_typed()
         msg = gui._status_label.cget("text")
-        cond = fake.got == [] and "麦克风" in msg
+        # 有引擎但方向不含「我说」：提示必须指方向，而不是叫人再点一次开始翻译。
+        cond = fake.got == [] and "我说" in msg
         print(f"  无「我说」腿：引擎收到={fake.got} 状态={msg!r}  {'OK' if cond else '✗'}")
         ok &= cond
     finally:
