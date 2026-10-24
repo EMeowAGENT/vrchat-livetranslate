@@ -426,6 +426,10 @@ class _SessionProxy:
         self.chunks = 0
         self.silent_chunks = 0
         self.send_fails = 0          # 发送失败的块数（不计入静音统计，只用于留痕/诊断）
+        # 重连窗口里**本来就没发出去**的块数（会话连上了但 session.update 还没下发）。
+        # 与 send_fails 严格分开：那是「发了但失败」，这是「还没到能发的时候」——
+        # 混在一起会把每次重连都误读成发送故障（见 base.SessionNotReady）。
+        self.not_ready_chunks = 0
         self._voice_note_warned = False   # 「上报有人说话」失败只留一次痕（每块都打会刷屏）
         # 长静音闸门（②）：配置非法时 silence_gate_settings 已留痕并回落默认值
         en, after_s, preroll_s = silence_gate_settings(
@@ -485,6 +489,14 @@ class _SessionProxy:
         self.sent_bytes += len(pcm)
         if session is None:
             # 还没连上（或正在重连）也要计入——这是"输入侧"的度量，用于诊断
+            return
+        if not getattr(session, "is_ready", True):
+            # 会话「连上了但还没配置好」（重连窗口：session.update 还没下发）。
+            # 这一块**本来就没发出去**，不是发送失败 → 静默丢弃、只计数：
+            # 记进 send_fails 会打「发送音频失败」那行，把每次重连都误读成发送故障。
+            # 真发上去的后果更重：服务端先按默认会话开始，随后的 session.update 被拒
+            # （`session already started`）→ 1007 → 再重连，自激成会话风暴。
+            self.not_ready_chunks += 1
             return
         try:
             await session.send_audio(pcm)
@@ -591,6 +603,14 @@ class Engine:
         # 采集循环是长跑任务，不能直接持有 session 对象：重连会换新对象，
         # 旧引用会把音频继续发到死连接上。统一走这个代理。
         self._proxy = _SessionProxy(self)
+        # 「建会话」的互斥锁：**按事件循环懒建**（Engine 支持 stop→start，每次 start 都是
+        # 新 loop；`asyncio.Lock` 一旦在某个 loop 上争用就被绑定，跨 loop 复用会抛
+        # "bound to a different event loop"）。`_thread_run` 每次启动都把它重置成 None。
+        self._session_lock_obj: asyncio.Lock | None = None
+        # 会话工厂接缝：`None` = 用模块级 `create_session`（既有测试会整体替换
+        # `vlt.engine.create_session`，动态取名保证那种替换仍然生效）；测试也可以按实例
+        # 赋一个返回假会话的可调用对象。别替换 `_create_session`：那会绕开锁。
+        self._session_factory = None
         self._reconnect_task: asyncio.Task | None = None
         self._last_audio_ts = 0.0      # 上一段 TTS 音频到达时刻（判句边界）
         self._pending_seal = False     # 上一句终版文本已到 → 下一段音频前封句尾
@@ -629,13 +649,14 @@ class Engine:
         base_url = sb.get("base_url") or endpoints.default_base_url(endpoints.DEFAULT_PROVIDER)
         try:
             self._chat_endpoint = endpoints.chat_url(base_url)
-            self._tts_endpoint = endpoints.multimodal_url(base_url)
+            # TTS 走 Qwen-Audio-TTS 的 SpeechSynthesizer（不是老的多模态生成路径）
+            self._tts_endpoint = endpoints.tts_url(base_url)
         except ValueError as exc:
             print(f"[net] ⚠️ 出网端点派生失败（{exc}）→ 打字翻译/译音回落千问云默认端点",
                   flush=True)
             _dflt = endpoints.default_base_url(endpoints.DEFAULT_PROVIDER)
             self._chat_endpoint = endpoints.chat_url(_dflt)
-            self._tts_endpoint = endpoints.multimodal_url(_dflt)
+            self._tts_endpoint = endpoints.tts_url(_dflt)
 
     # ---------------------------------------------------------------- 公开接口
 
@@ -1080,6 +1101,8 @@ class Engine:
     def _thread_run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        # 新 loop = 新锁：上一轮用过的 Lock 可能已绑定到旧 loop（见 __init__ 的说明）。
+        self._session_lock_obj = None
         try:
             self._loop.run_until_complete(self._async_run())
         except Exception as exc:
@@ -1340,7 +1363,39 @@ class Engine:
             device_fallbacks=fallbacks,
         )
 
+    @property
+    def _session_lock(self) -> asyncio.Lock:
+        """建会话互斥锁（**懒建，跟随当前事件循环**）。
+
+        Engine 支持 stop→start，每次 `_thread_run` 都是新 loop；`asyncio.Lock` 在某个
+        loop 上被争用后会被绑定到它，跨 loop 复用会抛 `bound to a different event loop`。
+        所以不在 `__init__` 里建，而在第一次用到时（已经在跑的那个 loop 里）建；
+        `_thread_run` 每次启动把 `_session_lock_obj` 重置成 None。
+        """
+        lock = self._session_lock_obj
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_lock_obj = lock
+        return lock
+
     async def _create_session(self, scfg: SessionConfig) -> None:
+        """建会话的**唯一**公开入口：先拿 `_session_lock`，再进函数体。
+
+        为什么要串行：重建路径（`_reconnect_session` / `_rebuild_session`）是
+        「关旧会话 + 建新会话」两步组合，而采集泵、看门狗、语言/词库热更新都在旁边跑。
+        不串行就会两条建会话流程交错：各自 close 一次旧会话、各建一条新连接，
+        后建的把先建的覆盖掉 → 前一条既没人持有也没人关闭（泄漏连接），还多烧一次
+        RPM 预算（实测 RPM 10，白烧一次就可能把重连推进「预算已满」的等待里）。
+        """
+        async with self._session_lock:
+            await self._create_session_locked(scfg)
+
+    async def _create_session_locked(self, scfg: SessionConfig) -> None:
+        """`_create_session` 的函数体（**调用方必须已持有 `_session_lock`**）。
+
+        ⚠️ 别在这里回头调 `_create_session()`：它第一步就是再拿同一把锁，而
+        `asyncio.Lock` **不可重入** → 自己把自己锁死（表现为看门狗再也不重连）。
+        """
         now = time.monotonic()
         rpm = int(self._cfg.session_base.get("max_new_sessions_per_minute", 4))
         recent = [t for t in self._connect_ts if now - t < 60]
@@ -1350,11 +1405,14 @@ class Engine:
                 f"连接预算已满（{len(recent)}/{rpm}/min），等待 {wait:.0f}s")
             await asyncio.sleep(wait)
 
-        self._session = create_session(scfg)
+        self._session = (self._session_factory or create_session)(scfg)
         # 新会话 = 新的一页：repeat 抑制状态清零（上一段的重复历史不带过来）
         self._repeat_suppressed = False
         self._repeat_dropped = 0
         self._final_hist.clear()
+        # 诊断计数在**分配新会话时**归零（不是建好之后）——否则本次重连窗口里
+        # 累计的「未就绪丢弃」会被自己的清零抹掉，那行诊断几乎恒为 0。
+        self._proxy.not_ready_chunks = 0
         t0 = time.perf_counter()
         await self._session.start(
             on_text=self._on_text,
@@ -1369,11 +1427,14 @@ class Engine:
 
     async def _rebuild_session(self) -> None:
         try:
-            if self._session is not None:
-                await self._session.close()
-                self._session = None
-            scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-            await self._create_session(scfg)
+            # 「关旧 + 建新」必须是一个原子步骤：中间被第二条重建插进来就会各建一条
+            # 连接、后建的覆盖前者（见 `_create_session` 的说明）。
+            async with self._session_lock:
+                if self._session is not None:
+                    await self._session.close()
+                    self._session = None
+                scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+                await self._create_session_locked(scfg)
             d = self._cfg.directions[self._direction]
             self._events.on_status("info",
                 f"语言已切换：{d.source_lang or '自动'}→{d.target_lang}")
@@ -1704,9 +1765,16 @@ class Engine:
         用户实测：服务端返回 1011 `model repeat output happened` 掐断连接后，
         那条腿直接「运行错误」结束，只能重开界面。现在改为自动重连（带退避，
         并复用 `_create_session` 里的 RPM 预算等待）。
+
+        ⚠️ 正在建会话（`_session_lock` 被持有）时**立刻返回**：新会话的 `start()`
+        是「连上 → 下发 session.update → 才发布 `_ws`」，这期间 `is_alive` 还是 False
+        （没有 `_ws`），不挡就会判定「刚建的会话死了」再起第二条重连 → 两条重建互相
+        覆盖（同一把锁只是让它们排队，白烧一次 RPM 预算、还会把刚连上的会话关掉）。
         """
         if self._stopping or self._session is None:
             return
+        if self._session_lock.locked():
+            return                                  # 正在建会话：别插队起第二条重连
         if getattr(self._session, "is_alive", True):
             return
         if self._reconnect_task is not None and not self._reconnect_task.done():
@@ -1754,6 +1822,9 @@ class Engine:
         if self._repeat_dropped:
             lines.append(f"[diag] 本地 repeat 抑制：已丢弃 {self._repeat_dropped} 条重复输出"
                          f"（重复文本：{self._repeat_text[:40]!r}）")
+        if self._proxy.not_ready_chunks > 0:
+            lines.append(f"[diag] 重连窗口丢弃 {self._proxy.not_ready_chunks} 块"
+                         f"（等 session.update 下发）")
         lines.append("[diag] 断开前最近 12 条译文本（看是否在重复同一句）：")
         tail = list(self._text_hist)[-12:]
         if not tail:
@@ -1772,15 +1843,20 @@ class Engine:
         print("\n".join(lines), flush=True)
 
     async def _reconnect_session(self) -> None:
-        """关掉旧会话再建一个（失败会抛，交给重试循环）。"""
-        try:
-            if self._session is not None:
-                await self._session.close()
-        except Exception:  # noqa: BLE001
-            pass
-        self._session = None
-        scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-        await self._create_session(scfg)
+        """关掉旧会话再建一个（失败会抛，交给重试循环）。
+
+        「关旧 + 建新」整段在 `_session_lock` 里 —— 否则第二次重建可能插进第一步与
+        第二步之间，把刚建好的连接又关掉/覆盖掉（真机表现是「重连成功但立刻又断」）。
+        """
+        async with self._session_lock:
+            try:
+                if self._session is not None:
+                    await self._session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._session = None
+            scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+            await self._create_session_locked(scfg)
 
     async def _reconnect_loop(self, reason: str) -> None:
         backoff = [float(x) for x in self._cfg.session_base.get("reconnect_backoff", [2, 5, 10, 30])]

@@ -21,8 +21,8 @@ from typing import Any
 
 import websockets
 
-from .base import (AudioHandler, LiveTranslateSession, SessionConfig, TextDelta, TextHandler,
-                   UsageHandler, should_finalize)
+from .base import (AudioHandler, LiveTranslateSession, SessionConfig, SessionNotReady,
+                   TextDelta, TextHandler, UsageHandler, should_finalize)
 
 # 关闭握手的上限（秒）。**真链路实测（2026-09-30）：百炼服务端不回 close 帧** ——
 # `ws.close()` 稳吃 10.01s（两次测量一致），也就是 websockets 的默认 close_timeout，
@@ -86,6 +86,9 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         super().__init__(cfg)
         self._gen = "38" if cfg.model.lower().startswith("qwen3.8") else "35"
         self._ws: Any = None
+        # 「连上了但还没配置好」的连接：start() 期间放在这里，**不发布成 `_ws`**。
+        # 采集泵只认 `_ws`/is_ready，所以这个窗口里它发不出音频（见 base.SessionNotReady）。
+        self._starting_ws: Any = None
         self._recv_task: asyncio.Task | None = None
         # 黑匣子：最近的服务端事件类型（断线诊断用）
         self._evt_hist: deque[tuple[str, float]] = deque(maxlen=80)
@@ -117,7 +120,7 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                     on_usage: UsageHandler | None = None) -> None:
         self.on_text, self.on_audio, self.on_usage = on_text, on_audio, on_usage
         await self._budget.acquire()
-        self._ws = await websockets.connect(
+        ws = await websockets.connect(
             self.cfg.url,
             additional_headers={"Authorization": f"Bearer {self.cfg.api_key}"},
             open_timeout=15,
@@ -126,25 +129,60 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             ping_timeout=20,
             max_size=None,
         )
-        # 3.8 连上后会先给 session.created
+        # ⚠️ 从这里到 `session.update` 发出去之前，**绝对不能**把 ws 暴露成 `self._ws`：
+        # 采集泵（engine._SessionProxy）是长跑的，重连期间照样每 100ms 调一次 send_audio。
+        # 一旦它在这个窗口里把 `input_audio_buffer.append` 发上去，服务端会先按默认会话
+        # 开始这一轮，随后到达的 session.update 被判
+        #   `Session update error: session already started or finished or failed.`
+        # → 1007 断开 → 重连 → 再撞同一个窗口（真机实测：175 分钟 107 个会话）。
+        # 所以 ws 先放 `_starting_ws`，等配置真正下发完再发布。
+        self._starting_ws = ws
         try:
-            first = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=10))
-            if first.get("type") == "error":
-                raise RuntimeError(f"服务端拒绝会话：{json.dumps(first.get('error') or first, ensure_ascii=False)}")
-        except asyncio.TimeoutError:
-            pass
-        payload = self._session_payload()
-        await self._ws.send(json.dumps({"event_id": "evt_update", "type": "session.update",
-                                        "session": payload}))
-        td = (((payload.get("audio") or {}).get("input") or {}).get("turn_detection")
-              or payload.get("turn_detection") or {})
-        print(f"[session] 会话配置已下发：断句={td.get('type')}，"
-              f"静音断句={td.get('silence_duration_ms')}ms"
-              f" | 语言={self.cfg.source_lang or 'auto'}→{self.cfg.target_lang}"
-              f" | 音色={self.cfg.voice} | 模型={self.cfg.model}", flush=True)
+            # 3.8 连上后会先给 session.created
+            try:
+                first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if first.get("type") == "error":
+                    raise RuntimeError(f"服务端拒绝会话：{json.dumps(first.get('error') or first, ensure_ascii=False)}")
+            except asyncio.TimeoutError:
+                pass
+            payload = self._session_payload()
+            await ws.send(json.dumps({"event_id": "evt_update", "type": "session.update",
+                                      "session": payload}))
+            td = (((payload.get("audio") or {}).get("input") or {}).get("turn_detection")
+                  or payload.get("turn_detection") or {})
+            print(f"[session] 会话配置已下发：断句={td.get('type')}，"
+                  f"静音断句={td.get('silence_duration_ms')}ms"
+                  f" | 语言={self.cfg.source_lang or 'auto'}→{self.cfg.target_lang}"
+                  f" | 音色={self.cfg.voice} | 模型={self.cfg.model}", flush=True)
+            if self._closing:
+                # 停止信号在 start 期间到达：别再发布，直接关掉这条还没人用的连接。
+                await ws.close()
+                return
+            # 配置已上线 → 现在才允许上送音频。`_ws` 是「可发送」的唯一真源。
+            self._ws = ws
+        except BaseException:
+            # 下发失败（服务端拒会话 / 网络断 / 停止信号打断）：这条连接还没有主人，
+            # 必须在这里关掉 —— 否则 `_starting_ws` 在 finally 里被清空后，socket 就泄漏了
+            # （引擎会不断重试，泄漏会累积成「连上但没人用」的连接）。
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        finally:
+            self._starting_ws = None
         # 建「等 session.finished」的事件：必须在事件循环里建（close() 与接收循环共用）。
         self._finished_evt = asyncio.Event()
         self._recv_task = asyncio.create_task(self._recv_loop())
+
+    @property
+    def is_ready(self) -> bool:
+        """能不能上送音频（`session.update` 已发出、且没在关闭）。
+
+        采集泵在重连窗口里靠它判断；不要用 `_ws is not None` 代替 —— 那个窗口正是
+        「连上了但还没配置」的危险区（见 base.SessionNotReady）。
+        """
+        return self._ws is not None and not self._closing
 
     def turn_detection_payload(self) -> dict:
         """服务端断句配置（实测数据见 `base.DEFAULT_VAD_SILENCE_MS` 上方注释）。
@@ -187,7 +225,11 @@ class QwenLiveTranslateSession(LiveTranslateSession):
 
     async def send_audio(self, pcm16_16k: bytes) -> None:
         if self._ws is None:
-            raise RuntimeError("会话尚未 start()")
+            # 两种情形都落到这里：还没 start()；或**连上了但 session.update 还没下发**
+            # （start() 期间 ws 只挂在 `_starting_ws` 上，故意不发布）。后者正是重连风暴的
+            # 起点 —— 采集泵这时发音频会让服务端按默认会话开始，update 随后被拒 → 1007。
+            # 用专门的异常类型，好让 `_SessionProxy` 静默丢块（不记「发送失败」）。
+            raise SessionNotReady("会话还没配置好（session.update 未下发）")
         await self._ws.send(json.dumps({
             "event_id": "evt_audio",
             "type": "input_audio_buffer.append",
@@ -243,15 +285,19 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         外层再套一层 `wait_for` —— 前者管协议层握手，后者保证任何实现都不会卡住收尾。
         """
         self._closing = True
-        if self._ws is not None:
+        # 连接可能还没发布成 `_ws`（start() 期间正在下发 session.update）—— 那时它在
+        # `_starting_ws` 上。**必须也能收尾**：否则「停止翻译」正好撞上重连窗口时，
+        # 那条已经连上的连接没人关（服务端等到超时，还白占一个 RPM 名额）。
+        ws = self._ws or self._starting_ws
+        if ws is not None:
             try:
-                await self._ws.send(json.dumps({"event_id": "evt_finish", "type": "session.finish"}))
+                await ws.send(json.dumps({"event_id": "evt_finish", "type": "session.finish"}))
             except Exception:
                 pass
             await self._wait_session_finished()
             t0 = time.perf_counter()
             try:
-                await asyncio.wait_for(self._ws.close(), timeout=CLOSE_WAIT_S)
+                await asyncio.wait_for(ws.close(), timeout=CLOSE_WAIT_S)
             except asyncio.TimeoutError:
                 # 降级路径必须留痕（本仓库禁静默降级）：否则「停止怎么要好几秒」无从查起。
                 print(f"[session] 服务端 {CLOSE_WAIT_S:.1f}s 内没回 close 帧 → 放弃等待"

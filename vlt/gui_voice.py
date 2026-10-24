@@ -392,7 +392,7 @@ def preview_voice(ctx: VoiceCtx, cfg: Any, kind: str, *,
     base_url = str(cfg.session_base.get("base_url") or "")
     try:
         omni_endpoint = endpoints.chat_url(base_url)
-        tts_endpoint = endpoints.multimodal_url(base_url)
+        tts_endpoint = endpoints.tts_url(base_url)   # Qwen-Audio-TTS（不是老多模态路径）
     except ValueError as exc:
         set_status("error", t("试听失败：{msg}", msg=exc))
         print(f"[gui] ❌ 试听取消：无法从当前线路派生端点（{exc}）", flush=True)

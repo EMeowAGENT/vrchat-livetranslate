@@ -58,6 +58,10 @@ class _FakeSession:
     async def send_audio(self, pcm: bytes) -> None:
         self.received += len(pcm)
 
+    async def start(self, on_text=None, on_audio=None, on_usage=None):   # noqa: ANN001, ANN201
+        """`_create_session_locked` 会真的调 start()（工厂接缝改了之后）。"""
+        self.started = True
+
     async def close(self) -> None:
         self.closed = True
 
@@ -102,13 +106,14 @@ def test_watchdog_reconnects_dead_session() -> None:
 
     calls = {"n": 0}
 
-    async def fake_create(scfg):                  # noqa: ANN001, ANN202
+    def fake_create(scfg):                  # noqa: ANN001, ANN202
         calls["n"] += 1
         eng._session = fresh
         eng._connect_ts.append(0.0)
         eng._events.on_status("info", "会话已建立（1ms）")
+        return fresh                        # ⚠️ 工厂必须返回会话对象（_create_session_locked 用它）
 
-    eng._create_session = fake_create             # type: ignore[assignment]
+    eng._session_factory = fake_create             # type: ignore[assignment]
 
     async def run() -> None:
         await eng._watchdog()
@@ -235,11 +240,12 @@ def test_send_failure_does_not_kill_leg() -> None:
         # 看门狗接手 → 换新会话 → 后续音频发到新会话
         fresh = _FakeSession(alive=True)
 
-        async def fake_create(scfg):                   # noqa: ANN001, ANN202
+        def fake_create(scfg):                   # noqa: ANN001, ANN202
             eng._session = fresh
             eng._connect_ts.append(0.0)
+            return fresh                         # ⚠️ 工厂必须返回会话对象
 
-        eng._create_session = fake_create              # type: ignore[assignment]
+        eng._session_factory = fake_create              # type: ignore[assignment]
         await eng._watchdog()
         assert eng._reconnect_task is not None, "会话不健康却没安排重连"
         await asyncio.wait_for(eng._reconnect_task, timeout=5)

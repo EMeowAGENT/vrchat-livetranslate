@@ -497,22 +497,27 @@ def test_tts_payload_and_decode() -> bool:
     pcm = tts_mod.synthesize("Hello there", api_key="sk-x", language="en")
     payload = json.loads(f.req.data.decode("utf-8"))
     want = 12000 * 2                                    # 0.5s @24kHz 单声道 s16
+    # 迁移后的字段口径（Qwen-Audio-TTS）：`input.language_hints` 是**短码数组**（不是 language_type），
+    # 整段合成必须带 `format=wav` + `sample_rate=24000`（下游 miniaudio 要容器格式）。
     cond = (abs(len(pcm) - want) <= 2
             and payload["model"] == tts_mod.DEFAULT_MODEL
             and payload["input"]["text"] == "Hello there"
             and payload["input"]["voice"] == tts_mod.DEFAULT_VOICE
-            and payload["input"]["language_type"] == "English")
+            and payload["input"]["language_hints"] == ["en"]
+            and payload["input"]["format"] == "wav"
+            and payload["input"]["sample_rate"] == 24000
+            and "language_type" not in payload["input"])
     print(f"  base64 路径：{len(pcm)}B（期望≈{want}）model={payload['model']} "
-          f"voice={payload['input']['voice']} lang={payload['input'].get('language_type')}  "
-          f"{'OK' if cond else '✗'}")
+          f"voice={payload['input']['voice']} lang={payload['input'].get('language_hints')} "
+          f"format={payload['input'].get('format')}  {'OK' if cond else '✗'}")
     ok &= cond
 
-    # 语言码拿不准 → 不传 language_type（别让服务端收到垃圾值）
+    # 语言码拿不准 → 不传 language_hints（别让服务端收到垃圾值；也绝不退回 language_type）
     f = FakeOpener(body)
     tts_mod._opener = f
     tts_mod.synthesize("hi", api_key="sk-x", language=None)
     inp = json.loads(f.req.data.decode("utf-8"))["input"]
-    cond = "language_type" not in inp
+    cond = "language_hints" not in inp and "language_type" not in inp
     print(f"  未给语言码：input={inp}  {'OK' if cond else '✗'}")
     ok &= cond
 
@@ -649,7 +654,10 @@ def test_tts_streaming() -> bool:
         return ("data: " + json.dumps({"output": {"audio": {"data": base64.b64encode(pcm).decode()}}})
                 + "\n")
 
-    sse = [ev(c1), "data: {坏 JSON，要跳过}\n", ev(c2), "data: [DONE]\n", ev(c3)]
+    # 注意：SSE 的事件边界是**空行**（新端点的 data 行还是多行 JSON），所以每个事件后面
+    # 都补一个空行 —— 坏 JSON 也必须自成一个事件，否则会把紧邻的好事件一起毒掉。
+    sse = [ev(c1), "\n", "data: {坏 JSON，要跳过}\n", "\n",
+           ev(c2), "\n", "data: [DONE]\n", "\n", ev(c3)]
 
     # ① SSE 路径：脏分片跳过、[DONE] 不当数据、顺序与字节数原样、请求带 SSE 头
     f = FakeSseOpener(FakeSseResp(sse))
@@ -725,7 +733,8 @@ def test_tts_streaming() -> bool:
     ok &= cond
 
     # ⑤ 服务端在流末尾补发的「整段汇总」必须被吃掉（实测踩过：整句被念两遍）
-    tts_mod._opener = FakeSseOpener(FakeSseResp([ev(c1), ev(c2), ev(c1 + c2)]))
+    tts_mod._opener = FakeSseOpener(FakeSseResp([ev(c1), "\n", ev(c2), "\n",
+                                              ev(c1 + c2), "\n"]))
     parts = list(tts_mod.synthesize_stream("你好", api_key="sk-x"))
     cond = parts == [c1, c2]
     print(f"  末尾整段汇总：{len(parts)} 个分片（期望 2，汇总片被丢弃）  {'OK' if cond else '✗'}")
@@ -734,7 +743,7 @@ def test_tts_streaming() -> bool:
     # ⑥ 流式一个分片都没给（只有心跳 / [DONE]）→ 退回整段，并留痕
     tts_mod.synthesize = lambda text, **kw: b"\x09" * 64
     try:
-        tts_mod._opener = FakeSseOpener(FakeSseResp([": ping\n", "data: [DONE]\n"]))
+        tts_mod._opener = FakeSseOpener(FakeSseResp([": ping\n", "data: [DONE]\n", "\n"]))
         parts, log = _capture(lambda: list(tts_mod.synthesize_stream("你好", api_key="sk-x")))
         cond = parts == [b"\x09" * 64] and "一个分片都没拿到" in log
         print(f"  零分片 → 整段兜底：{len(parts)} 块、"

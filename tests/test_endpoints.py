@@ -1,7 +1,7 @@
 """服务线路（千问云 / 千问云·海外版）出网端点派生的验收测试。
 
 本轮新增 `vlt/endpoints.py` 作为**地址的单一真相源**：`session.base_url` 说了算，
-另外两条 HTTP 端点（打字翻译 chat/completions、打字译音 multimodal）一律从它的
+另外两条 HTTP 端点（打字翻译 chat/completions、打字译音 TTS）一律从它的
 host 派生。这个脚本把「派生对不对、脏值会不会静默、密钥分槽互不干扰、老配置零变化」
 这几件事钉死 —— 全程离线（HTTP opener 与密钥目录都被替换成替身，不连服务端、不碰
 用户真实 `config.yaml`、不碰真实 `~/.vrchat-livetranslate`）。
@@ -116,9 +116,9 @@ def test_qianwen_endpoints() -> None:
     eq(endpoints.chat_url(base),
        "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions",
        "chat_url(qianwen)")
-    eq(endpoints.multimodal_url(base),
-       "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation",
-       "multimodal_url(qianwen)")
+    eq(endpoints.tts_url(base),
+       "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/SpeechSynthesizer",
+       "tts_url(qianwen)（Qwen-Audio-TTS，不是老的多模态生成路径）")
 
 
 # ---------------------------------------------------------------- 2) 千问云·海外版派生
@@ -132,9 +132,9 @@ def test_qwencloud_derivation() -> None:
     eq(endpoints.chat_url(base),
        "https://maas.qwencloudapi.com/compatible-mode/v1/chat/completions",
        "chat_url(qwencloud)")
-    eq(endpoints.multimodal_url(base),
-       "https://maas.qwencloudapi.com/api/v1/services/aigc/multimodal-generation/generation",
-       "multimodal_url(qwencloud)")
+    eq(endpoints.tts_url(base),
+       "https://maas.qwencloudapi.com/api/v1/services/audio/tts/SpeechSynthesizer",
+       "tts_url(qwencloud)")
     # 用户给的入口就是兼容模式那一串，钉住 host + 路径的拼接结果
     eq(endpoints.chat_url(base).rsplit("/chat/completions", 1)[0],
        "https://maas.qwencloudapi.com/compatible-mode/v1",
@@ -179,9 +179,9 @@ def test_custom_host_derivation() -> None:
     base = "wss://gateway.example.com/api-ws/v1/realtime"
     eq(endpoints.chat_url(base),
        "https://gateway.example.com/compatible-mode/v1/chat/completions", "chat_url(自定义 host)")
-    eq(endpoints.multimodal_url(base),
+    eq(endpoints.tts_url(base),
        "https://gateway.example.com"
-       "/api/v1/services/aigc/multimodal-generation/generation", "multimodal_url(自定义 host)")
+       "/api/v1/services/audio/tts/SpeechSynthesizer", "tts_url(自定义 host)")
     # 缺 scheme / 空串 → 抛 ValueError（绝不拼出 https:///compatible-mode/... 这种残废地址）
     for bad in ("", "没有 scheme 的串", "maas.qwencloudapi.com/api-ws/v1/realtime"):
         try:
@@ -457,8 +457,8 @@ def test_engine_derives_endpoints() -> None:
        "https://maas.qwencloudapi.com/compatible-mode/v1/chat/completions",
        "Engine._chat_endpoint 从 base_url 派生")
     eq(eng._tts_endpoint,
-       "https://maas.qwencloudapi.com/api/v1/services/aigc/multimodal-generation/generation",
-       "Engine._tts_endpoint 从 base_url 派生")
+       "https://maas.qwencloudapi.com/api/v1/services/audio/tts/SpeechSynthesizer",
+       "Engine._tts_endpoint 从 base_url 派生（Qwen-Audio-TTS 端点）")
 
     # 手写的 base_url 缺 scheme → 派生抛 ValueError：留痕 + 回落千问云默认端点，构造不崩
     buf = io.StringIO()
@@ -467,7 +467,7 @@ def test_engine_derives_endpoints() -> None:
                       sinks=set(), events=EngineEvents(), dry_run=True)
     dflt = endpoints.default_base_url("qianwen")
     eq(eng2._chat_endpoint, endpoints.chat_url(dflt), "派生失败 → chat 回落千问云默认")
-    eq(eng2._tts_endpoint, endpoints.multimodal_url(dflt), "派生失败 → tts 回落千问云默认")
+    eq(eng2._tts_endpoint, endpoints.tts_url(dflt), "派生失败 → tts 回落千问云默认")
     check("出网端点派生失败" in buf.getvalue(), "派生失败留痕（不静默）")
 
 

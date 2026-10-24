@@ -144,7 +144,7 @@ session:
 **실제로 어디에 연결할지를 정하는 것은 `base_url` 하나뿐입니다**. `provider` 는 화면 기본값과 key
 저장 위치를 정할 뿐입니다. 두 회선의 세 경로는 완전히 같으므로(`/api-ws/v1/realtime`,
 `/compatible-mode/v1/chat/completions`,
-`/api/v1/services/aigc/multimodal-generation/generation`), 회선 전환은 `base_url` 한 곳만 바꾸면
+`/api/v1/services/audio/tts/SpeechSynthesizer`), 회선 전환은 `base_url` 한 곳만 바꾸면
 됩니다.
 
 > 🔍 **문제 해결**: 로그의 `[net] 线路=… host=…` 가 실제로 연결하는 주소이고,
@@ -325,8 +325,9 @@ text_input:                   # 텍스트 입력(하단 입력칸, Enter로 전�
   timeout_s: 20               # 번역 1회 타임아웃(초)
   tts:                        # 타이핑도 소리 내기(번역문을 TTS로 합성 → 가상 사운드카드 → 상대가 들음)
     enabled: true             # "번역 음성 출력"이 켜져 있고 방향에 "나"가 포함되어야 합니다. 아니면 이 단계는 자동으로 건너뛰고 텍스트만 나갑니다
-    model: qwen3-tts-flash    # qwen3-tts-instruct-flash 도 가능
-    voice: Cherry             # 다국어 음색(중/영/일 모두 읽는 것 실측)
+    model: qwen-audio-3.1-tts-flash   # Qwen-Audio-TTS; 서비스 종료된 qwen3-tts-flash로 되돌리지 마세요
+    voice: longanfengyue_v3.1         # 3.1 다국어 음색(공식: zh/en/ja/ko/fr/de/pt/it/vi/id)
+    # 알려진 공백: ru/es/th 는 공식 목록에 없음 (합성은 되지만 발음 품질 미검증)
     timeout_s: 30
 
 merger:
@@ -597,7 +598,7 @@ vlt/
 ├── gui.py                Tkinter GUI(--self-test 헤드리스 검증 포함)
 ├── config.py             설정 로드; 자격 증명 해석 순서; 깨진 설정 자가 복구
 ├── textin.py             텍스트 입력: 텍스트 번역(실시간 모델이 텍스트 입력을 받지 않아 compatible-mode 경유)
-├── tts.py                타이핑 소리내기: 번역문을 qwen3-tts로 합성해 가상 사운드카드 쪽으로 전달
+├── tts.py                타이핑 소리내기: 번역문을 Qwen-Audio-TTS로 합성해 가상 사운드카드 쪽으로 전달
 ├── credentials.py        API key 저장 / 삭제 / 마스킹
 ├── devices.py            오디오 장치 열거와 "이름 → 인덱스" 해석
 ├── paths.py              쓰기 가능 디렉터리 결정(소스 / exe / 포터블) + 예전 파일 이전
@@ -698,7 +699,7 @@ build_exe.bat                                              :: 빌드 + 이후 �
 - WebSocket 경로에는 **에코 캔슬링도 노이즈 억제도 없습니다** → **헤드폰 착용이 필수**입니다(스피커로 하면 상대 목소리까지 잡혀 같은 문장이 두 번 인식됩니다)
 - 양방향 동시 번역 = WebSocket 세션 두 개이며, 예산도 양쪽에 계상됩니다
 - **타이핑 + 음성은 "번역 + TTS" 두 번의 요청**입니다. 텍스트는 거의 즉시 나오지만 음성은 TTS 합성을 기다려야 합니다(실측 엔드투엔드 약 2.6초).
-  그래서 말풍선에서 보고 1~2초 뒤에 상대방에게 들립니다. 목소리는 TTS 음색(기본 `Cherry`)이며 음성 경로의 실시간 모델 음색과 **같지 않습니다**.
+  그래서 말풍선에서 보고 1~2초 뒤에 상대방에게 들립니다. 목소리는 TTS 음색(기본 `longanfengyue_v3.1`)이며 음성 경로의 실시간 모델 음색과 **같지 않습니다**.
   조건은 세 번째 경로와 같습니다: "번역 음성 출력"이 켜져 있고 가상 사운드카드가 있어야 하며, 아니면 자동으로 건너뛰고 텍스트만 나갑니다
 - **타이핑은 마이크를 대체**합니다: 그래서 방향에 "나"가 포함될 때만 쓸 수 있고, "번역 시작"을 누른 뒤에만 동작합니다
 - **룸으로 전달되는 것은 자기 발화의 인식 원문이며 번역문이 아닙니다**. 게다가 **"번역 시작"을 먼저 눌러야** 보낼 수 있습니다.

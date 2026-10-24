@@ -2,7 +2,7 @@
 
 背景（本次改动）：项目里有**两条独立的出声音色** ——
 - 说话译音：实时模型直出，音色写 `session.voice`；
-- 打字译音：文本翻译后单独调 qwen3-tts-flash，音色写 `text_input.tts.voice`。
+- 打字译音：文本翻译后单独调 Qwen-Audio-TTS（`qwen-audio-3.1-tts-flash`），音色写 `text_input.tts.voice`。
 GUI 加了下拉之后，这两处必须能被**就地**写进 config.yaml（保住注释与键顺序），
 而且老配置里整段没有 `text_input` 时也要能落盘（否则设置永远存不下去，界面还显示「已保存」）。
 
@@ -114,14 +114,14 @@ def test_set_or_create_replaces_existing_leaf_value() -> None:
     """已存在的 tts.voice → 替换而不是追加第二个（重复键会让「改了没反应」）。"""
     text = ("text_input:\n"
             "  tts:\n"
-            "    model: qwen3-tts-flash\n"
-            "    voice: Cherry            # 多语言音色\n"
+            "    model: qwen-audio-3.1-tts-flash\n"
+            "    voice: longanfengyue_v3.1            # 多语言音色\n"
             "    timeout_s: 30\n")
     out = _yaml_set_or_create(text, ["text_input", "tts", "voice"], "Katerina")
     data = yaml.safe_load(out)
     assert data["text_input"]["tts"]["voice"] == "Katerina", f"没替换：{data!r}"
     assert out.count("voice:") == 1, f"多出一个 voice 键：\n{out}"
-    assert data["text_input"]["tts"]["model"] == "qwen3-tts-flash", "兄弟键被误删"
+    assert data["text_input"]["tts"]["model"] == "qwen-audio-3.1-tts-flash", "兄弟键被误删"
     assert data["text_input"]["tts"]["timeout_s"] == 30, "兄弟键被误删"
     assert "多语言音色" in out, "行尾注释丢了"
     print("  ✓ 已存在的 tts.voice：替换值并保住行尾注释，不产生重复键")
@@ -139,12 +139,12 @@ def test_set_or_create_handles_voice_with_space() -> None:
 
 
 def test_voice_catalogs_are_separate() -> None:
-    """两张表**不能**混为一谈：打字侧的 Cherry 不在实时侧，反之 Tina 不在 TTS 侧。
+    """两张表**不能**混为一谈：打字侧的 Qwen-Audio 音色不在实时侧，反之 Tina 不在 TTS 侧。
 
     这是这次调查的核心结论 —— 跨模型混用音色会被服务端拒（InvalidParameter），
     所以界面必须给两个下拉、各配各的表。哪天有人「顺手合并成一张」，这条会红。
     """
-    assert "Cherry" in TTS_VOICES and "Cherry" not in REALTIME_VOICES
+    assert "longanfengyue_v3.1" in TTS_VOICES and "longanfengyue_v3.1" not in REALTIME_VOICES
     assert "Tina" in REALTIME_VOICES and "Tina" not in TTS_VOICES
     assert len(set(REALTIME_VOICES)) == len(REALTIME_VOICES), "实时表里有重复音色"
     assert len(set(TTS_VOICES)) == len(TTS_VOICES), "TTS 表里有重复音色"
@@ -156,7 +156,7 @@ def test_voice_catalogs_are_separate() -> None:
 def test_voice_choices_keeps_custom_value() -> None:
     """当前值不在表里（手填/复刻音色）→ 排到候选最前，重新打开设置才看得到真正生效的值。"""
     assert voice_choices("MyClonedVoice", TTS_VOICES)[0] == "MyClonedVoice"
-    assert voice_choices("Cherry", TTS_VOICES) == list(TTS_VOICES), "表内的值不该被插到最前"
+    assert voice_choices("longanfengyue_v3.1", TTS_VOICES) == list(TTS_VOICES), "表内的值不该被插到最前"
     assert voice_choices("", TTS_VOICES) == list(TTS_VOICES)
     assert voice_choices(None, TTS_VOICES) == list(TTS_VOICES)
     print("  ✓ voice_choices：表外的值排最前，表内的值不重复插")
@@ -238,7 +238,7 @@ def _gui_with_config(body: str):
 
 @contextlib.contextmanager
 def _stubbed_tts(gui_mod, *, synth=None, raises=None, omni_raises=None):
-    """把两条合成路（打字 qwen3-tts-flash / 说话 Qwen-Omni）与本地播放都打桩：
+    """把两条合成路（打字 qwen-audio-3.1-tts-flash / 说话 Qwen-Omni）与本地播放都打桩：
     离线不联网、不出声，并分开记下哪条路被调了。"""
     import vlt.tts as tts_mod
 
@@ -281,11 +281,11 @@ def test_gui_voice_dropdowns_save() -> None:
     gui = None
     try:
         gui, gui_mod = _make_gui(cfg_path)
-        # 回显：模板里是 Tina / Cherry
+        # 回显：模板里是 Tina / longanfengyue_v3.1
         assert gui._speech_voice_var.get() == "Tina", gui._speech_voice_var.get()
-        assert gui._tts_voice_var.get() == "Cherry", gui._tts_voice_var.get()
+        assert gui._tts_voice_var.get() == "longanfengyue_v3.1", gui._tts_voice_var.get()
         assert "Tina" in gui._speech_voice_combo.cget("values")
-        assert "Cherry" in gui._tts_voice_combo.cget("values")
+        assert "longanfengyue_v3.1" in gui._tts_voice_combo.cget("values")
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -309,7 +309,7 @@ def test_gui_voice_dropdowns_save() -> None:
         gui = None
         cfg_path = _tmp_config(OLD_STYLE)
         gui, _ = _make_gui(cfg_path)
-        assert gui._tts_voice_var.get() == "Cherry", \
+        assert gui._tts_voice_var.get() == "longanfengyue_v3.1", \
             f"配置里没有 tts.voice 时应回显真正在生效的默认值：{gui._tts_voice_var.get()!r}"
         gui._tts_voice_var.set("Bella")
         gui._on_tts_voice_change()
@@ -409,24 +409,24 @@ def test_preview_worker_success_plays_and_reports() -> None:
     """合成成功→本地播放→状态栏报「试听完成」，忙标记复位。"""
     with _gui_with_config(_example_body()) as (gui, mod, _cfg):
         with _stubbed_tts(mod) as (calls, played):
-            gui._preview_worker("tts", "Cherry", "sk-fake")
+            gui._preview_worker("tts", "longanfengyue_v3.1", "sk-fake")
             _pv = _take_voice_preview(gui)
             assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
             kind, voice, err = _pv[1:]
-            assert (kind, voice, err) == ("tts", "Cherry", ""), f"回主线程的消息不对：{(kind, voice, err)!r}"
+            assert (kind, voice, err) == ("tts", "longanfengyue_v3.1", ""), f"回主线程的消息不对：{(kind, voice, err)!r}"
             assert played == [b"\x01\x00\x02\x00"], "没把合成音频交给本地播放"
-            assert calls["syn"][0]["voice"] == "Cherry"
-            assert calls["syn"][0]["model"] == "qwen3-tts-flash", "打字侧试听必须走 qwen3-tts-flash"
+            assert calls["syn"][0]["voice"] == "longanfengyue_v3.1"
+            assert calls["syn"][0]["model"] == "qwen-audio-3.1-tts-flash", "打字侧试听必须走 qwen-audio-3.1-tts-flash"
             assert calls["syn"][0]["api_key"] == "sk-fake"
             assert calls["omni"] == [], "打字侧不该碰 Omni 那条路"
             gui._on_voice_preview_done(kind, voice, err)
             assert "试听完成" in gui._status_label.cget("text")
             assert gui._preview_busy is False, "完成后必须解除忙标记"
-    print("  ✓ 打字侧试听成功：走 qwen3-tts-flash→本地播放→报「试听完成」，不碰 Omni")
+    print("  ✓ 打字侧试听成功：走 qwen-audio-3.1-tts-flash→本地播放→报「试听完成」，不碰 Omni")
 
 
 def test_preview_speech_uses_omni_model() -> None:
-    """说话侧（Tina 等实时音色）必须走非实时 Qwen-Omni 合成 —— qwen3-tts-flash 不认这些 id。"""
+    """说话侧（Tina 等实时音色）必须走非实时 Qwen-Omni 合成 —— qwen-audio-3.1-tts-flash 不认这些 id。"""
     with _gui_with_config(_example_body()) as (gui, mod, _cfg):
         with _stubbed_tts(mod) as (calls, played):
             gui._preview_worker("speech", "Tina", "sk-fake")
@@ -434,13 +434,13 @@ def test_preview_speech_uses_omni_model() -> None:
             assert _pv is not None, "没收到试听结果（队列里只有状态消息？）"
             kind, voice, err = _pv[1:]
             assert (kind, voice, err) == ("speech", "Tina", ""), f"{(kind, voice, err)!r}"
-            assert calls["syn"] == [], "说话侧不该走 qwen3-tts-flash（会 InvalidParameter）"
+            assert calls["syn"] == [], "说话侧不该走 qwen-audio-3.1-tts-flash（会 InvalidParameter）"
             assert len(calls["omni"]) == 1 and calls["omni"][0]["voice"] == "Tina", \
                 f"说话侧应走 Omni 并带上正确音色：{calls['omni']!r}"
             assert played == [b"\x01\x00\x02\x00"], "合成音频未交给本地播放"
             gui._on_voice_preview_done(kind, voice, err)
             assert "试听完成" in gui._status_label.cget("text")
-    print("  ✓ 说话侧试听：走 Qwen-Omni（不碰 qwen3-tts-flash），Tina 可正常试听")
+    print("  ✓ 说话侧试听：走 Qwen-Omni（不碰 qwen-audio-3.1-tts-flash），Tina 可正常试听")
 
 
 def test_preview_speech_unsupported_voice_reports_friendly() -> None:
@@ -469,7 +469,7 @@ def test_preview_speech_unsupported_voice_reports_friendly() -> None:
 def test_preview_generic_failure_reports_reason() -> None:
     """一般失败（网络）：状态栏报「试听失败」并带上原因。"""
     with _gui_with_config(_example_body()) as (gui, _mod, _cfg):
-        gui._on_voice_preview_done("tts", "Cherry", "网络不可达：timed out")
+        gui._on_voice_preview_done("tts", "longanfengyue_v3.1", "网络不可达：timed out")
         label = gui._status_label.cget("text")
         assert "试听失败" in label and "timed out" in label, label
     print("  ✓ 一般失败：报「试听失败」并带上原因")
@@ -483,7 +483,7 @@ def test_preview_voice_guards() -> None:
         assert "请先选择或填写音色" in gui._status_label.cget("text")
         assert gui._preview_busy is False and _take_voice_preview(gui) is None, "空音色不应起合成"
 
-        gui._tts_voice_var.set("Cherry")
+        gui._tts_voice_var.set("longanfengyue_v3.1")
         orig = gui._resolve_api_key_safe
         gui._resolve_api_key_safe = lambda: ""
         try:

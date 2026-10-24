@@ -845,7 +845,7 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
             gui._tts_preview_btn = btn  # 测试兼容别名
     gui._voice_ctx.speech_voice_var.set(gui._effective_speech_voice())
     gui._voice_ctx.tts_voice_var.set(
-        str((gui._cfg.text_input.get("tts") or {}).get("voice") or "Cherry"))
+        str((gui._cfg.text_input.get("tts") or {}).get("voice") or "longanfengyue_v3.1"))
     gui._voice_ctx.speech_voice_combo.bind("<<ComboboxSelected>>",
                                  lambda e: gui._on_speech_voice_change())
     gui._voice_ctx.speech_voice_combo.bind("<Return>",

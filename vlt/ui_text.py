@@ -22,10 +22,10 @@ from .i18n import t
 from .paths import BUNDLE_DIR
 
 # 音色试听：固定样例句 + 打字侧合成模型。两条腿各走各的模型（音色不通用）：
-#   打字侧 qwen3-tts-flash（一次性 HTTP）；说话侧走非实时 Qwen-Omni（见 tts.synthesize_omni，
-#   因为 Tina 等实时音色只有 Omni 认）。VOICE_PREVIEW_MODEL 只用于打字侧。
+#   打字侧 Qwen-Audio-TTS（一次性 HTTP，非流式、format=wav）；说话侧走非实时 Qwen-Omni
+#   （见 tts.synthesize_omni，因为 Tina 等实时音色只有 Omni 认）。VOICE_PREVIEW_MODEL 只用于打字侧。
 VOICE_PREVIEW_TEXT = "你好，这是我的音色试听。"
-VOICE_PREVIEW_MODEL = "qwen3-tts-flash"
+VOICE_PREVIEW_MODEL = "qwen-audio-3.1-tts-flash"
 
 
 def _provider_choices() -> tuple[tuple[str, str], ...]:
@@ -248,7 +248,7 @@ def _play_pcm_local(pcm_24k_mono: bytes) -> None:
 
 
 # 服务端拒收音色的典型报错标记：说话译音用的是实时模型（Qwen-Omni）音色，
-# 像默认的 Tina 根本不在 qwen3-tts-flash 的支持表里，合成会返回 InvalidParameter。
+# 像默认的 Tina 根本不在离线 TTS 家族（Qwen-Audio-TTS）的支持表里，合成会返回 InvalidParameter。
 _UNSUPPORTED_VOICE_MARKERS = ("invalidparameter", "not supported", "is not support",
                               "engine error")
 

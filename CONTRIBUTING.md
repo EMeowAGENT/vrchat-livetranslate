@@ -157,7 +157,9 @@ PR 描述请按仓库的 **[PR 模板](.github/pull_request_template.md)** 填�
   比让脚本变绿重要得多。
 
 **加一门新语言**远不止加一个词表文件，至少还要动 `vlt/gui.py` 的 `SOURCE_LANGS` / `TARGET_LANGS`
-（**两边都要加**）、`vlt/tts.py` 的 `LANG_NAMES`、其它 `locales/*.py` 里补上这门语言的译名，
+（**两边都要加**）、`vlt/tts.py` 的 `LANG_CODES`（TTS 请求体要送的短码；若该语言不在
+`TTS_SUPPORTED_LANGS` 里，还要在 `docs`/`config.example.yaml` 的已知缺口里注明）、
+其它 `locales/*.py` 里补上这门语言的译名，
 以及**字体覆盖**（很多 CJK 字体不含某些语言的字形，缺字体就是一排豆腐块）。动手前先开个 issue
 说一声，维护者会告诉你当前的口径。字体那一步的做法（以泰文/韩文为样板）：
 在 `vlt/output/overlay.py` 的 `_SCRIPTS` 里**登记一行**（该语言占的 Unicode 块 + 平台探测函数名 +

@@ -5,18 +5,40 @@
     它只回文本、不回音频 —— 不加这一步，打字内容就永远进不了虚拟声卡、对面听不到。
     语音那条腿的音频是实时模型直出的，这里补的是同格式的替代品。
 
-实测（2026-09）：
-- 模型 `qwen3-tts-flash`（也可用 `qwen3-tts-instruct-flash`），返回 `output.audio`
-  同时带 `data`(base64) 与 `url`；**优先用 data**，省一次下载且不受 URL 过期影响。
-- 音频是 24kHz 单声道 WAV，用 `miniaudio` 解成 **24k 单声道 s16le PCM** ——
-  与实时模型译音**同格式**，所以下游可以直接复用 `resample_24k_mono_to_48k_stereo`
-  和 `VirtualMic`，不需要任何新管线。
-- 音色 `Cherry` 中/英/日都能读（实测），故默认一个音色就够；要换按 config 改。
-- **流式**（`synthesize_stream`，请求头 `X-DashScope-SSE: enable`）：同一句 20~30 字实测
-  首包 **0.36~0.42s**、整段 1.6~1.7s；下游虚拟声卡是抖动缓冲（攒 300ms 起播），拿到前几个
-  分片就能开口 —— 打字腿「开口」从 ~1.7s 降到 **~0.5s**。
-  ⚠️ 服务端在流**末尾**还会补发一片「整段汇总」（实测与前面所有分片**逐字节相同**）：
-  必须丢弃，否则整句会被念两遍。
+## 当前后端：Qwen-Audio-TTS（2026-07-14 起千问云主推的离线 TTS 家族）
+
+- 端点 `/api/v1/services/audio/tts/SpeechSynthesizer`（**不是**老的
+  `.../aigc/multimodal-generation/generation`）—— 由 `endpoints.tts_url(base_url)` 按线路派生。
+- 模型 `qwen-audio-3.1-tts-flash`。为什么 3.1 而不是 3.0：3.0 只有中文/英语；
+  3.1 的四个**多语音色**覆盖 zh/en/ja/ko/fr/de/pt/it/vi/id（方言另算）。
+  首包实测 3.1 ≈780-800ms、3.0 ≈600ms —— 为多语言能力选 3.1。
+- 请求体：`{"model", "input": {"text", "voice", "format", "sample_rate", "language_hints"}}`
+  （`language_hints` 是**数组**，服务端只取第一个元素）。
+  `format`：**整段用 `wav`**（下游 `_decode_to_24k_mono` 走 miniaudio，需要容器格式；
+  响应 `output.audio.data` 可能为空而给 `url`，现有下载逻辑照旧可用）；
+  **流式用 `pcm`**（分片是裸 PCM，`_chunk_to_pcm` 直接过）。
+  `language` 是**短码**（zh/en/ja…，见 `LANG_CODES`），字段名不是老的 `language_type`。
+- 音频是 24kHz 单声道，与实时模型译音**同格式**，所以下游直接复用
+  `resample_24k_mono_to_48k_stereo` 和 `VirtualMic`，不需要任何新管线。
+
+## ⚠️ 已知语言缺口（不是 bug，不许掩盖）
+
+老 `qwen3-tts-flash` 的 Cherry 覆盖：中/英/法/德/**俄**/意/**西**/葡/日/韩。
+新 3.1 的四个多语音色官方列表：中/英/日/韩/法/德/葡/意/**越/印尼** ——
+**官方不含俄语/西班牙语/泰语**。实测新端点对 ru/es/th 文本仍返回音频（不报错），
+但官方没承诺发音质量。所以目标语言落在 `TTS_SUPPORTED_LANGS` 之外时：
+**照常合成**（不阻断功能），但每次进程每种语言留一行 WARN（见 `_note_lang_gap`），
+日志/`config.example.yaml` 里也写明这是已知缺口。
+
+## 流式（`synthesize_stream`）
+
+请求头 `X-DashScope-SSE: enable`。⚠️ 新端点的 SSE 是**多行 JSON**（一个事件的 JSON 被
+拆成多行、每行都以 `data:` 起头，**只在空行处才算一个完整事件**）：
+逐行 `json.loads` 的老写法在新端点上**一个分片都解析不出来**（每行都不是合法 JSON，
+全被吞掉 → 退化成「一个分片都没拿到 → 整段兜底」，首包退回 ~1.7s）。
+解析必须按 SSE 规范累积 data 行，见 `_iter_sse_events`。
+服务端在流**末尾**可能补发一片「整段汇总」（老端点实测与前面所有分片逐字节相同）：
+保留去重守卫，命中就丢，否则整句会被念两遍。
 """
 from __future__ import annotations
 
@@ -32,24 +54,80 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-ENDPOINT = "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation"
-DEFAULT_MODEL = "qwen3-tts-flash"
-DEFAULT_VOICE = "Cherry"
-DEFAULT_TIMEOUT_S = 30.0
+from .voices import DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 
-# 说话译音用的是 Qwen-Omni 系列音色（Tina/Cindy/…），qwen3-tts-flash **不认这些 id**
+# Qwen-Audio-TTS 端点（千问云·国内默认线路）。实际调用走 `endpoint=` 传入的
+# `endpoints.tts_url(base_url)`——那是唯一真相源；这里只是「不传时」的默认值。
+ENDPOINT = "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/SpeechSynthesizer"
+# 默认模型/音色从 `voices.py` 取（单一真相源，config 迁移也用同一份）。
+DEFAULT_MODEL = DEFAULT_TTS_MODEL
+DEFAULT_VOICE = DEFAULT_TTS_VOICE
+DEFAULT_TIMEOUT_S = 30.0
+#: 合成采样率（下游按 24k 单声道处理，改这里要同步 `resample_24k_mono_to_48k_stereo`）
+SAMPLE_RATE = 24000
+
+# 说话译音用的是 Qwen-Omni 系列音色（Tina/Cindy/…），离线 TTS 家族 **不认这些 id**
 # （会 InvalidParameter）。要试听它们只能走非实时 Qwen-Omni —— 同一个 compatible-mode
 # 端点（textin.py 已在用、同一把 key、无需 workspace），但音频输出**强制流式**。
 OMNI_ENDPOINT = "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions"
 DEFAULT_OMNI_MODEL = "qwen3.5-omni-flash"
 DEFAULT_OMNI_VOICE = "Tina"
 
-# 目标语言码 → DashScope 的 language_type（可选参数；拿不准就不传，服务端自己判）
-LANG_NAMES = {
-    "zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
-    "fr": "French", "de": "German", "es": "Spanish", "ru": "Russian",
-    "it": "Italian", "pt": "Portuguese", "th": "Thai",
-}
+# 请求体 `input.language_hints`（**数组**）认的**短码**（不是老的 `language_type` 英文名）。
+# 取 `lang.split("-")[0].lower()`；不在这个集合里就**不传**（让服务端自己判），
+# 绝不再退回 `language_type` —— 新端点不认那个字段。
+LANG_CODES = frozenset({
+    "zh", "en", "ja", "ko", "fr", "de", "es", "ru", "it", "pt", "th",
+    "id", "vi", "ms", "fil", "ar",
+})
+
+# 3.1 的四个多语音色**官方**覆盖集（中文/英语/日语/韩语/法语/德语/葡萄牙语/意大利语/
+# 越南语/印尼语）。不在这里的语言（ru/es/th…）仍会合成，但要留痕说明质量未验证。
+TTS_SUPPORTED_LANGS = frozenset({"zh", "en", "ja", "ko", "fr", "de", "pt", "it", "vi", "id"})
+
+# 语言缺口 WARN 的「每种语言每进程只打一次」去重表（别每句都刷）。
+_LANG_WARNED: set[str] = set()
+
+
+def _lang_code(language: str | None) -> str | None:
+    """目标语言 → `input.language_hints[0]` 的短码；不认识 / 没给 → None（该字段不传）。"""
+    code = (language or "").split("-")[0].strip().lower()
+    return code if code in LANG_CODES else None
+
+
+def _note_lang_gap(language: str | None) -> None:
+    """目标语言不在官方覆盖集里 → 留一行痕（**照常合成**，只是别让用户以为有保证）。
+
+    为什么必须留痕：迁移前 Cherry 覆盖俄语/西班牙语，迁移后官方列表里没有这两个 ——
+    对 ru/es 用户是**能力回退**。静默不管就成了「悄悄变差还查不到原因」；
+    也不能因此拒绝合成（实测新端点仍会出声），所以只警告、不阻断。
+    每种语言每进程只打一次（逐句合成会打很多次，刷屏等于没打）。
+    """
+    raw = (language or "").strip().lower()
+    if not raw:
+        return
+    code = raw.split("-")[0]
+    if code in TTS_SUPPORTED_LANGS or code in _LANG_WARNED:
+        return
+    _LANG_WARNED.add(code)
+    _note(f"⚠️ 目标语言 {code} 不在当前 TTS 音色官方覆盖内（发音质量未验证）")
+
+
+def _tts_payload(text: str, *, voice: str, model: str, language: str | None,
+                 fmt: str) -> dict:
+    """合成请求体（整段/流式共用一处口径，`fmt` 只是 `wav` / `pcm` 的差别）。"""
+    payload: dict = {"model": model or DEFAULT_MODEL,
+                     "input": {"text": text,
+                               "voice": voice or DEFAULT_VOICE,
+                               "format": fmt,
+                               "sample_rate": SAMPLE_RATE}}
+    code = _lang_code(language)
+    if code:
+        # ⚠️ 字段名是 `language_hints`（**数组**，当前版本只处理第一个元素），
+        #    不是 `language`/`language_type`。写错不会报错 —— 服务端会**静默忽略**，
+        #    合成照常出声但语言提示完全没生效（实测：用 `language` 也返回 200）。
+        payload["input"]["language_hints"] = [code]
+    return payload
 
 _opener = None
 _DEFAULT_OPENER = None        # 模块自建的那个 opener（被替换过就不走连接池，见 _pool_allowed）
@@ -248,6 +326,20 @@ class TtsStreamTruncated(TtsError):
     """
 
 
+class _Rejected(TtsError):
+    """服务端**明确**回了个 HTTP 状态码（不是网络问题）。
+
+    为什么要单独一个类型：流式那条路要按状态码决定「退回整段合成」（400/406/415
+    = 协议不认 SSE）还是「直接放弃」（401/403/429/5xx：再发一次同样会失败）。
+    普通 `TtsError` 把状态码糊进了文案里，没法可靠判定。
+    """
+
+    def __init__(self, code: int, detail: str) -> None:
+        self.code = int(code)
+        self.detail = detail or ""
+        super().__init__(f"HTTP {self.code}：{_http_reason_text(self.detail)}")
+
+
 def _note(msg: str) -> None:
     """兜底/降级路径的留痕（本仓库约定：**禁静默降级**，每一处降级都要能查）。
 
@@ -261,6 +353,55 @@ def _note(msg: str) -> None:
 
 # 「协议不认流式」这类码：退回整段还有意义。其余（401/403/429/5xx）再发一次也是白搭。
 _SSE_FALLBACK_CODES = frozenset({400, 406, 415})
+
+# ⚠️ 这里**故意没有**「主端点被拒 → 换旧域名重试」的回落：
+# 2026-10 千问云把离线 TTS 切到了 Qwen-Audio-TTS（新端点 + 新音色），旧
+# `qwen3-tts-flash` 在 maas 网关只回 `HTTP 400：{}`。维护者明确要求**不掩盖这个问题** ——
+# 就用新模型/新端点，失败就如实报错（带「线路是否支持该 TTS 模型」的人话），
+# 而不是偷偷换域名把问题藏起来。
+
+
+def _http_reason_text(detail: str) -> str:
+    """HTTP 错误里「原因」那一段：空 body 也要说人话。
+
+    实测千问云在拒收 TTS 请求时会回 **空 body**（就一个 `{}`）。直接拼成
+    「HTTP 400：{}」用户完全看不懂，还会以为是自己请求写错了；这里换成
+    「服务端拒收但未给原因 + 最可能的原因」，让人知道该查线路/模型。
+    """
+    d = (detail or "").strip()
+    if d in ("", "{}", "null", "[]"):
+        return "服务端拒收但未给原因（请确认线路是否支持该 TTS 模型）"
+    return d[:300]
+
+
+def _err_detail(exc: HTTPError) -> str:
+    """取 HTTP 错误响应体（最多 300 字）。拿不到就当空 body（文案见 `_http_reason_text`）。"""
+    try:
+        return exc.read().decode("utf-8", "replace")[:300]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _post_tts(url: str, payload: dict, api_key: str, timeout: float,
+              *, reuse_conn: bool) -> str:
+    """POST 一次**整段**合成请求，返回响应体文本。
+
+    HTTP 状态码 → `_Rejected`；网络/其它异常 → `TtsError`。
+    """
+    req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Authorization": f"Bearer {api_key}",
+                           "Content-Type": "application/json"}, method="POST")
+    try:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
+            return r.read().decode("utf-8", "replace")
+    except HTTPError as exc:
+        raise _Rejected(exc.code, _err_detail(exc)) from exc
+    except URLError as exc:
+        raise TtsError(f"网络不可达：{exc.reason}") from exc
+    except TtsError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise TtsError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def _cut_note(got: int, exc: BaseException) -> str:
@@ -333,10 +474,10 @@ def synthesize(
     """把一段文本合成为 24kHz 单声道 s16le PCM（与实时模型译音同格式）。
 
     同步函数（调用方丢线程池里跑）；`language` 是目标语言码（zh/en/ja…），
-    会映射成 service 的 `language_type`，拿不准就不传。
+    取短码塞进请求体的 `input.language_hints`（数组），不在 `LANG_CODES` 里就不传（服务端自己判）。
 
-    `endpoint`：多模态地址由**调用方**按当前线路从 base_url 的 host 派生后传入
-    （见 endpoints.multimodal_url）；不传则回落模块常量 ENDPOINT（千问云默认）。
+    `endpoint`：TTS 地址由**调用方**按当前线路从 base_url 的 host 派生后传入
+    （见 endpoints.tts_url）；不传则回落模块常量 ENDPOINT（千问云默认）。
     """
     text = (text or "").strip()
     if not text:
@@ -344,29 +485,12 @@ def synthesize(
     if not (api_key or "").strip():
         raise TtsError("还没配置 API key（见界面右上角「设置」）")
 
-    payload: dict = {"model": model or DEFAULT_MODEL,
-                     "input": {"text": text, "voice": voice or DEFAULT_VOICE}}
-    lang_name = LANG_NAMES.get((language or "").lower())
-    if lang_name:
-        payload["input"]["language_type"] = lang_name
-
-    req = Request(endpoint or ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                  headers={"Authorization": f"Bearer {api_key}",
-                           "Content-Type": "application/json"}, method="POST")
-    try:
-        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
-            body = r.read().decode("utf-8", "replace")
-    except HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:  # noqa: BLE001
-            pass
-        raise TtsError(f"HTTP {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise TtsError(f"网络不可达：{exc.reason}") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise TtsError(f"{type(exc).__name__}: {exc}") from exc
+    # 整段用 `format=wav`：下游 `_decode_to_24k_mono` 走 miniaudio，需要容器格式才能解；
+    # 响应里 `output.audio.data` 可能为空、只给 `url`，`_extract_audio` 会去下载（同一把 key）。
+    payload = _tts_payload(text, voice=voice, model=model, language=language, fmt="wav")
+    _note_lang_gap(language)          # 官方不覆盖的语言（ru/es/th…）留一行痕，照常合成
+    # 直连当前线路的 TTS 端点；**不做跨域回落**（见 `_SSE_FALLBACK_CODES` 上方的说明）。
+    body = _post_tts(endpoint or ENDPOINT, payload, api_key, timeout, reuse_conn=reuse_conn)
 
     try:
         resp = json.loads(body)
@@ -377,6 +501,150 @@ def synthesize(
     if not raw:
         raise TtsError("服务端没返回音频")
     return _decode_to_24k_mono(raw)
+
+
+#: SSE 的 data 行拼接符（规范里同一事件的多个 data 行之间保留换行，多行 JSON 靠它拼回文本）
+_SSE_NL = chr(10)
+
+
+def _json_event(text: str) -> dict | None:
+    """把一个已拼好的 data 文本解析成事件字典（解析不了 → None）。"""
+    if not text or text.strip() in ("[DONE]", "null", ""):
+        return None
+    try:
+        obj = json.loads(text)
+    except Exception:                                               # noqa: BLE001
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _iter_sse_events(resp) -> Iterator[dict]:                    # noqa: ANN001
+    """把一个 SSE 响应逐**事件**解析成 JSON 字典（按规范累积 `data:` 行，空行才算结束）。
+
+    ⚠️ 为什么不能「逐行 json.loads」：新端点（Qwen-Audio-TTS，
+    `/api/v1/services/audio/tts/SpeechSynthesizer`）回的是**多行 JSON** ——
+    一个事件的 JSON 被拆成多行、每行都以 `data:` 起头，**只有空行才代表一个事件结束**：
+
+        id:1
+        event:result
+        :HTTP_STATUS/200
+        data:{
+        data:  "output" : {
+        data:    "type" : "sentence-synthesis",
+        data:    "audio" : { "data" : "<base64 PCM>" }
+        data:  }
+        data:}
+
+    逐行解析时每一行都不是合法 JSON → 全被 `except: continue` 吞掉 → 一个分片都拿不到
+    → 退化成「整段兜底」，首包从 ~0.8s 退回 ~1.7s（**功能不报错、只是变慢**，最难查）。
+
+    所以这里**严格按 SSE 规范**：`data:` 行按出现顺序累积（多个 data 行之间保留换行），
+    遇空行才 `json.loads` 一次；`[DONE]` 丢弃。单行 JSON 的服务端同样适用 ——
+    它们的每个事件也以空行结尾，只是 data 行只有一行。
+
+    `event:` / `id:` / `retry:` / `:`（注释，如 `:HTTP_STATUS/200`）一律跳过。
+    流不以空行结尾时，残余内容也试解析一次（否则最后一片会丢）。
+    """
+    buf: list[str] = []
+    for raw in resp:
+        line = (raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray))
+                else str(raw)).rstrip()
+        if not line:
+            # 空行 = 一个事件结束（SSE 的边界只看空行，不看 JSON 是否凑巧能解析）
+            if buf:
+                obj = _json_event(_SSE_NL.join(buf))
+                buf.clear()
+                if obj is not None:
+                    yield obj
+            continue
+        if line.startswith(":"):
+            continue                                            # SSE 注释（:HTTP_STATUS/200 等）
+        field, _, value = line.partition(":")
+        if field == "data":
+            val = value[1:] if value.startswith(" ") else value
+            if val.strip() == "[DONE]":
+                buf.clear()
+                continue
+            buf.append(val)
+            continue
+        if field in ("event", "id", "retry"):
+            continue
+        # 非标准字段：个别网关会把裸 JSON 直接推过来 → 当 data 的一行攒着，别丢
+        buf.append(line)
+    if buf:
+        obj = _json_event(_SSE_NL.join(buf))
+        if obj is not None:
+            yield obj
+
+def _stream_once(url: str, payload: dict, api_key: str, timeout: float,
+                 *, reuse_conn: bool) -> Iterator[bytes]:
+    """对**一个**地址发起流式（SSE）合成，逐片 yield 24k 单声道 s16le PCM。
+
+    一次请求自成一个事务（末尾「整段汇总」去重也按本次累计），
+    上层据此决定「退回整段合成」还是「直接失败」。HTTP 状态码 → `_Rejected`（带 code）。
+    """
+    req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Authorization": f"Bearer {api_key}",
+                           "Content-Type": "application/json",
+                           # 实测：这两个头一起给，服务端才按 SSE 分片推
+                           "Accept": "text/event-stream",
+                           "X-DashScope-SSE": "enable"}, method="POST")
+    acc = bytearray()          # 本地址已发出的音频（用来识别末尾那片「整段汇总」）
+    try:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as resp:
+            ctype = str(resp.headers.get("Content-Type", "") or "")
+            if "event-stream" not in ctype:            # 服务端降级成了整段响应
+                # ⚠️ 不能就地 `_decode_to_24k_mono(raw)`：本请求带的是 `format=pcm`
+                # （裸 PCM、没有容器头），miniaudio 解不了；而且解失败会抛 TtsError，
+                # 外层 `got == 0` 会直接 re-raise，**走不到**调用方的整段兜底
+                # （离线复现：`音频解码失败：DecodeError ('failed to decode data', -1)`）。
+                # 正解：重新发一次整段请求（`format=wav`），解码交给 `synthesize()`。
+                _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 重新发一次整段合成（wav）")
+                inp = payload.get("input") or {}
+                hints = inp.get("language_hints") or []
+                # ⚠️ 必须 `yield` 整块，不能 `yield from`：`synthesize()` 返回的是 **bytes**，
+                #    `yield from bytes` 会把每个字节当成一个分片（int）吐出去。
+                yield synthesize(
+                    str(inp.get("text") or ""),
+                    voice=str(inp.get("voice") or ""),
+                    model=str(payload.get("model") or ""),
+                    api_key=api_key,
+                    language=str(hints[0]) if hints else None,
+                    timeout=timeout,
+                    endpoint=url,
+                    reuse_conn=reuse_conn,
+                )
+                return
+            # ⚠️ 新端点的 SSE 是**多行 JSON**：必须按规范累积 data 行到空行再解析
+            # （逐行 json.loads 会一个分片都拿不到，见 `_iter_sse_events` 的说明）。
+            for obj in _iter_sse_events(resp):
+                _raise_if_error(obj)
+                out = obj.get("output") or {}
+                if isinstance(out, dict) and out.get("type") == "sentence-begin":
+                    # 句子开头事件：`audio.data` 为空（实测），跳过即可 —— 它不是音频分片。
+                    continue
+                raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
+                if not raw:
+                    continue
+                pcm = _chunk_to_pcm(raw)
+                if not pcm:
+                    continue
+                # ⚠️ 服务端在流末尾可能补发一片「整段汇总」（老端点实测与前面所有分片逐字节相同）：
+                # 吃掉它，否则虚拟声卡会把整句念两遍。新端点是否也有，未定 —— 守卫留着无害。
+                # 判据是**经验性**的：实测中真分片不会与已累计音频等长且逐字节相同
+                # （要触发得正好等于此前所有分片之和 + 内容一致）—— 是经验保证，不是不变式。
+                if acc and len(pcm) == len(acc) and pcm == bytes(acc):
+                    continue
+                acc += pcm
+                yield pcm
+    except HTTPError as exc:                            # ⚠️ 必须排在 URLError 前面（HTTPError 是它的子类）
+        raise _Rejected(exc.code, _err_detail(exc)) from exc
+    except URLError as exc:
+        raise TtsError(f"网络不可达：{exc.reason}") from exc
+    except TtsError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise TtsError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def synthesize_stream(
@@ -392,9 +660,10 @@ def synthesize_stream(
 ) -> Iterator[bytes]:
     """流式合成（SSE）：边生成边 yield 24k 单声道 s16le 的 PCM 分片。
 
-    为什么值得：实测同一句 20~30 字，首包 0.36~0.42s、整段 1.6~1.7s；而下游虚拟声卡
-    是抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），拿到前几个分片就能开口 ——
-    打字腿的「开口」从 ~1.7s 降到 ~0.5s。
+    为什么值得：Qwen-Audio-TTS 3.1 实测同一句 20~30 字，首段音频 **~0.78~0.81s**、整段
+    ~1.9s（旧的 qwen3-tts-flash 是首包 0.36~0.42s，但那个模型在 maas 网关已停服）；
+    下游虚拟声卡是抖动缓冲（攒到 buffer_ms 起播 / 停更 0.35s 强制起播），
+    拿到第一个分片就能开口 —— 比整段合成（~1.9s 才给音频）早约 1s。
 
     `endpoint`：同 `synthesize`（由调用方按线路派生传入，不传回落 ENDPOINT）。
     ⚠️ 退回整段时要把 endpoint **一路透传**给 `synthesize`，否则兜底那条腿会悄悄
@@ -407,6 +676,8 @@ def synthesize_stream(
       （少半句，不整句丢；调用方据此给一条 warn 提示）。
     - 其余错误（401/403/429/5xx、网络不可达）直接抛：再发一次同样会失败，只会把
       失败延迟翻倍、白耗一次配额。
+    - **不做跨域回落**：千问云把离线 TTS 换到了 Qwen-Audio-TTS，旧模型在新网关上不可用；
+      维护者要求如实报错，不靠偷偷换域名掩盖（见 `_SSE_FALLBACK_CODES` 上方的说明）。
     """
     text = (text or "").strip()
     if not text:
@@ -414,103 +685,43 @@ def synthesize_stream(
     if not (api_key or "").strip():
         raise TtsError("还没配置 API key（见界面右上角「设置」）")
 
-    payload: dict = {"model": model or DEFAULT_MODEL,
-                     "input": {"text": text, "voice": voice or DEFAULT_VOICE}}
-    lang_name = LANG_NAMES.get((language or "").lower())
-    if lang_name:
-        payload["input"]["language_type"] = lang_name
-    req = Request(endpoint or ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                  headers={"Authorization": f"Bearer {api_key}",
-                           "Content-Type": "application/json",
-                           # 实测：这两个头一起给，服务端才按 SSE 分片推
-                           "Accept": "text/event-stream",
-                           "X-DashScope-SSE": "enable"}, method="POST")
+    # 流式用 `format=pcm`（分片就是裸 PCM，`_chunk_to_pcm` 直接过，不需要解容器）
+    payload = _tts_payload(text, voice=voice, model=model, language=language, fmt="pcm")
+    _note_lang_gap(language)          # 官方不覆盖的语言（ru/es/th…）留一行痕，照常合成
+    url = endpoint or ENDPOINT
     got = 0
-    acc = bytearray()          # 已发出的音频（用来识别末尾那片「整段汇总」）
     try:
-        with _open_response(req, timeout, reuse_conn=reuse_conn) as resp:
-            ctype = str(resp.headers.get("Content-Type", "") or "")
-            if "event-stream" not in ctype:            # 服务端降级成了整段响应
-                _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 退回整段合成")
-                try:
-                    obj = json.loads(resp.read().decode("utf-8", "replace"))
-                except Exception as exc:  # noqa: BLE001
-                    raise TtsError(f"响应解析失败：{exc}") from exc
-                _raise_if_error(obj)
-                raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
-                if raw:
-                    # ⚠️ 顺序不能反：**先解码成功、再算「已送出」**。曾经先 `got += 1` 再 yield，
-                    # 解码一失败就报「已保留 1 个分片（少半句、不整句丢）」—— 可实际上一个字
-                    # 都没送出去，调用方会把「这段音频根本解不开」误当成「流式只给了半句」，
-                    # 也不会再走「一个分片都没拿到 → 整段兜底」（实测复现）。
-                    pcm = _decode_to_24k_mono(raw)
-                    got += 1
-                    yield pcm
-            else:
-                for line in resp:
-                    line = line.strip()
-                    if not line.startswith(b"data:"):
-                        continue                            # 心跳 / 空行 / event: 行
-                    data = line[5:].strip()
-                    if not data or data == b"[DONE]":
-                        continue
-                    try:
-                        obj = json.loads(data)
-                    except Exception:                       # noqa: BLE001
-                        continue                            # 非 JSON 的分片直接跳过
-                    _raise_if_error(obj)
-                    raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
-                    if not raw:
-                        continue
-                    pcm = _chunk_to_pcm(raw)
-                    if not pcm:
-                        continue
-                    # ⚠️ 服务端在流末尾会补发一片「整段汇总」（实测与前面所有分片逐字节相同）：
-                    # 吃掉它，否则虚拟声卡会把整句念两遍。
-                    # 判据是**经验性**的：实测中真分片不会与已累计音频等长且逐字节相同
-                    # （要触发得正好等于此前所有分片之和 + 内容一致）—— 是经验保证，不是不变式。
-                    if acc and len(pcm) == len(acc) and pcm == bytes(acc):
-                        continue
-                    got += 1
-                    acc += pcm
-                    yield pcm
-    except TtsError as exc:
+        for pcm in _stream_once(url, payload, api_key, timeout, reuse_conn=reuse_conn):
+            got += 1
+            yield pcm
+    except _Rejected as exc:
         if got:                                             # 已唱出去的部分不撤
             raise TtsStreamTruncated(_cut_note(got, exc)) from exc
-        raise
-    except HTTPError as exc:
-        if got:
-            raise TtsStreamTruncated(_cut_note(got, exc)) from exc
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:  # noqa: BLE001
-            pass
-        err = TtsError(f"HTTP {exc.code}：{detail or exc.reason}")
         # 只有「协议不认流式」的码才值得退回整段：401/403/429/5xx 再发一次同样会失败，
         # 只会把失败延迟翻倍、白耗一次配额 → 直接抛。
         if exc.code not in _SSE_FALLBACK_CODES:
-            raise err from exc
+            raise
         _note(f"服务端不认流式（HTTP {exc.code}）→ 退回整段合成")
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                             language=language, timeout=timeout, endpoint=endpoint)
+                             language=language, timeout=timeout, endpoint=url)
         except TtsError:
-            raise err from exc
+            raise exc
         return
-    except URLError as exc:
+    except TtsError as exc:
         if got:
             raise TtsStreamTruncated(_cut_note(got, exc)) from exc
-        raise TtsError(f"网络不可达：{exc.reason}") from exc
+        raise
     except Exception as exc:  # noqa: BLE001
         if got:
             raise TtsStreamTruncated(_cut_note(got, exc)) from exc
         raise TtsError(f"{type(exc).__name__}: {exc}") from exc
-
-    if not got:                                             # 流式没给东西 → 整段兜底
-        _note("流式一个分片都没拿到 → 退回整段合成")
-        yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                         language=language, timeout=timeout, endpoint=endpoint)
+    if got:
+        return
+    # 流式没给东西 → 整段兜底（`endpoint=url` 透传当前地址，别让它悄悄读回模块常量）
+    _note("流式一个分片都没拿到 → 退回整段合成")
+    yield synthesize(text, voice=voice, model=model, api_key=api_key,
+                     language=language, timeout=timeout, endpoint=url)
 
 
 def synthesize_omni(
@@ -581,12 +792,7 @@ def synthesize_omni(
                 if aud.get("data"):
                     b64.append(aud["data"])
     except HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:  # noqa: BLE001
-            pass
-        raise TtsError(f"HTTP {exc.code}：{detail or exc.reason}") from exc
+        raise _Rejected(exc.code, _err_detail(exc)) from exc
     except URLError as exc:
         raise TtsError(f"网络不可达：{exc.reason}") from exc
     except TtsError:

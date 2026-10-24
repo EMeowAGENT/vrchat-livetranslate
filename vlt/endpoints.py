@@ -21,7 +21,7 @@
 但某条腿还连着老域名」这类最难查的漂移 —— 这正是 #12「同一件事写两遍漏一半」的翻版。
 
 所以这里定一条铁律：**`session.base_url` 是唯一的地址真相源**，另外两条 HTTP
-端点（chat / multimodal）一律从它的 **host 派生**（`chat_url` / `multimodal_url`），
+端点（chat / TTS）一律从它的 **host 派生**（`chat_url` / `tts_url`），
 禁止在别处再写第二份域名常量。`provider` 只负责界面默认值 / key 槽 / 校验 /
 日志摘要，**实际连接地址永远以 base_url 为准**。
 
@@ -29,12 +29,15 @@
 
     WebSocket 实时：  /api-ws/v1/realtime
     OpenAI 兼容：     /compatible-mode/v1/chat/completions
-    多模态（TTS）：    /api/v1/services/aigc/multimodal-generation/generation
+    TTS（Qwen-Audio）：/api/v1/services/audio/tts/SpeechSynthesizer
 
 千问云·海外版（docs.qwencloud.com）与国内千问云只有 **host 不同**，三条路径后缀完全一致
 （实时：`wss://maas.qwencloudapi.com/api-ws/v1/realtime`；OpenAI 兼容：
 `https://maas.qwencloudapi.com/compatible-mode/v1`；TTS 走
-`POST /api/v1/services/aigc/multimodal-generation/generation`）。
+`POST /api/v1/services/audio/tts/SpeechSynthesizer`）。
+⚠️ TTS 路径与老的多模态生成路径（`/api/v1/services/aigc/multimodal-generation/generation`）
+**不同**：老模型 `qwen3-tts-flash` 在 maas 网关上已不服务（400 空体），
+2026-07-14 起千问云主推 Qwen-Audio-TTS，打字译音已迁到新端点。
 正因同形，才可以「拿 base_url 的 host + 固定路径」拼出另外两条腿，
 换线路时用户只需要改一个 base_url，三条腿自动跟着走。
 
@@ -44,7 +47,7 @@
 ## 依赖纪律
 
 只依赖标准库（`urllib.parse`）。**绝不 import `vlt.engine`**：engine 反向依赖
-本模块（接线时调 `chat_url` / `multimodal_url` / `describe`），import 回去会成环。
+本模块（接线时调 `chat_url` / `tts_url` / `describe`），import 回去会成环。
 """
 from __future__ import annotations
 
@@ -76,6 +79,13 @@ RETIRED_PROVIDERS = {
 
 WS_PATH = "/api-ws/v1/realtime"
 CHAT_PATH = "/compatible-mode/v1/chat/completions"
+# 打字译音（Qwen-Audio-TTS，2026-07-14 起千问云主推的离线 TTS 家族）。
+# ⚠️ 与老的多模态生成路径 `/api/v1/services/aigc/multimodal-generation/generation`
+#    **不是同一条**：老模型 `qwen3-tts-flash` 在 maas 网关上已不服务（400 空体）。
+TTS_PATH = "/api/v1/services/audio/tts/SpeechSynthesizer"
+# 老多模态生成路径：**已不用于 TTS**。保留常量只为 `out/` 下两个历史测量脚本
+# （`measure_api_latency.py` / `measure_upstream_latency.py`，gitignore 里的临时件）
+# 还能跑；新代码一律走 `tts_url()`。
 MULTIMODAL_PATH = "/api/v1/services/aigc/multimodal-generation/generation"
 
 # ---------------------------------------------------------------- host
@@ -192,8 +202,21 @@ def chat_url(base_url: str) -> str:
     return f"https://{host_of(base_url)}{CHAT_PATH}"
 
 
+def tts_url(base_url: str) -> str:
+    """打字译音（Qwen-Audio-TTS `SpeechSynthesizer`）端点：从 base_url 的 host 派生。
+
+    两条线路（千问云 / 千问云·海外版）这条路径**同形**，只有 host 不同 —— 与
+    `chat_url` / `webSocket` 的派生口径完全一致，禁止在别处再写一份域名字面量。
+    """
+    return f"https://{host_of(base_url)}{TTS_PATH}"
+
+
 def multimodal_url(base_url: str) -> str:
-    """打字译音 TTS（多模态生成）端点：从 base_url 的 host 派生。"""
+    """**已不用于 TTS**：老的多模态生成端点（`qwen3-tts-flash` 时代）。
+
+    打字译音已迁到 `tts_url()`（Qwen-Audio-TTS）。这里保留函数只为 `out/` 下两个
+    gitignore 的历史测量脚本还能跑；**新代码不要再用它**。
+    """
     return f"https://{host_of(base_url)}{MULTIMODAL_PATH}"
 
 
