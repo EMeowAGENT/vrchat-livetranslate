@@ -295,7 +295,7 @@ session:
   model: qwen3.8-livetranslate-flash-realtime   # 也可换 qwen3.5-*（事件名按代次自动分派）
   base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
   voice: Tina                 # ⚠️ 必须显式指定，不填会报 Voice 'Chelsie' is not supported
-  turn_detection: null        # 留空 = 服务端默认
+  silence_duration_ms: 500    # 服务端静音断句阈值（ms，200~6000）；断句恒用 server_vad（turn_detection 已废弃）
   final_silence_s: 3.0        # ⚠️ 必须 > 服务端增量间隔（实测最大 2.3s），调小会让最终版在句子中间抢跑
   fast_final_silence_s: 1.1   # 快封句：上游也静了（没人说话了）时，文字静默这么久就封，省 ~1.8s；null = 关掉
   fast_final_user_quiet_s: 0.5  # 「没人说话」的判据 = **电平**；环境噪声长期高过阈值时快路径自动退化成上面那 3.0s
@@ -730,7 +730,7 @@ vlt/
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
                           + run_tests.py 测试运行器 + verify/ 真机验收脚本（需真桌面/真硬件，不进 CI）
-tests/                    101 个文件、785 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    110 个文件、833 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -798,7 +798,7 @@ build_exe.bat                                              :: 打包 + 打完自
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
+  .venv\Scripts\python.exe scripts/verify_release.py v0.12.1 "turn_detection_payload,silence_duration_ms,reopen_output,tts_model_mismatch,_starting_ws,_session_lock,TTS_SUPPORTED_LANGS,SpeechSynthesizer"
   ```
 
 ---

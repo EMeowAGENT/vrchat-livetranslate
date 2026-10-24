@@ -302,7 +302,7 @@ session:
   model: qwen3.8-livetranslate-flash-realtime   # qwen3.5-* も可（イベント名は世代ごとに自動で振り分け）
   base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
   voice: Tina                 # ⚠️ 必ず明示。未設定だと Voice 'Chelsie' is not supported で失敗
-  turn_detection: null        # 空 = サーバー既定
+  silence_duration_ms: 500    # サーバー側の無音判定しきい値（ms、200〜6000）。断句は常に server_vad（turn_detection は廃止）
   final_silence_s: 3.0        # ⚠️ サーバーの増分間隔（実測最大 2.3s）より大きくすること。小さくすると文の途中で確定版が飛びます
   fast_final_silence_s: 1.1   # 早めの確定：上流も静か（誰も話していない）なら、この文字無音で確定（約 1.8s 短縮）。null = 無効
   fast_final_user_quiet_s: 0.5  # 「誰も話していない」の判定は**レベル**。環境ノイズが閾値を超え続けると上の 3.0s に退化する
@@ -626,7 +626,7 @@ vlt/
 server/                   複数人ルームのサーバー（Cloudflare Worker + Durable Object、独立デプロイ）
 scripts/                  調査・デバッグ用ツール（probe_* / osc_listen / verify_release）
                           + run_tests.py（テスト実行器）+ verify/（実機検収スクリプト。実デスクトップ/実ハードが必要、CI では走らない）
-tests/                    101 ファイル・785 のテスト関数（オフラインで実行可、CI はファイル単位で
+tests/                    110 ファイル・833 のテスト関数（オフラインで実行可、CI はファイル単位で
                           実行。実際の API キーが必要な tests/test_engine.py は含みません）
 docs/                     P0.5 / P1 / P2 の実測結果（プロトコル、遅延、手首オーバーレイ）
 testdata/                 同梱のテスト音声（中国語 8.56 秒、英語 7.92 秒、16 kHz モノラル PCM）
@@ -693,7 +693,7 @@ build_exe.bat                                              :: ビルド + その
   （SHA256、`--self-test` の実実行、バージョン行、新機能の文字列をバイトコードから検索、アイコンのピクセル比較）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
+  .venv\Scripts\python.exe scripts/verify_release.py v0.12.1 "turn_detection_payload,silence_duration_ms,reopen_output,tts_model_mismatch,_starting_ws,_session_lock,TTS_SUPPORTED_LANGS,SpeechSynthesizer"
   ```
 
 ---

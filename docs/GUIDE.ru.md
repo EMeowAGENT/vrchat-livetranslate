@@ -305,7 +305,7 @@ session:
   model: qwen3.8-livetranslate-flash-realtime   # можно и qwen3.5-*（имена событий разводятся по поколению автоматически）
   base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
   voice: Tina                 # ⚠️ указывать обязательно, иначе Voice 'Chelsie' is not supported
-  turn_detection: null        # пусто = значение сервера по умолчанию
+  silence_duration_ms: 500    # порог тишины на сервере (мс, 200-6000); всегда server_vad (turn_detection устарел)
   final_silence_s: 3.0        # ⚠️ должно быть больше серверного интервала порций (на практике до 2.3 с), иначе финальная версия выскочит посреди фразы
   fast_final_silence_s: 1.1   # Быстрое завершение: если и источник молчит (никто не говорит) — финализировать после такой паузы текста (экономия ~1.8s); null = выключить
   fast_final_user_quiet_s: 0.5  # «Никто не говорит» определяется по **уровню**; в шумной обстановке быстрый путь деградирует до 3.0s выше
@@ -648,7 +648,7 @@ vlt/
 server/                   Сервер комнаты (Cloudflare Worker + Durable Object, разворачивается отдельно)
 scripts/                   Инструменты разведки и отладки (probe_* / osc_listen / verify_release / room_e2e_local)
                           + run_tests.py (запуск тестов) + verify/ (приёмочные скрипты на реальной машине; нужен рабочий стол/железо, в CI не идут)
-tests/                    101 файлов, 785 тестовых функций (работают офлайн; CI выполняет их по
+tests/                    110 файлов, 833 тестовых функций (работают офлайн; CI выполняет их по
                           файлам, без tests/test_engine.py — ему нужен настоящий ключ API)
 docs/                     Результаты измерений P0.5 / P1 / P2 (протокол, задержка, экран на запястье)
 testdata/                 Встроенный тестовый звук (китайский 8.56 с, английский 7.92 с, 16 кГц моно PCM)
@@ -716,7 +716,7 @@ build_exe.bat                                              :: сборка + п�
   (SHA256, реальный запуск `--self-test`, строка версии, поиск строк новых функций в байткоде, попиксельное сравнение иконки):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
+  .venv\Scripts\python.exe scripts/verify_release.py v0.12.1 "turn_detection_payload,silence_duration_ms,reopen_output,tts_model_mismatch,_starting_ws,_session_lock,TTS_SUPPORTED_LANGS,SpeechSynthesizer"
   ```
 
 ---
