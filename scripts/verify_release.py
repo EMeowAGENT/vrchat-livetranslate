@@ -1,15 +1,14 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.2 "audio.output.voice"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.3 "输出检查未通过,耳返开关在主界面"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **本版（v0.12.2：一处修复，无新增功能）的 needle 是一条「只出现在新代码里」的字面量**：
-`audio.output.voice` —— 修复把 3.8 的音色同时写进 `session.audio.output.voice`
-（`vlt/session/qwen38.py::_session_payload`），并把该字段名写进了模块 docstring。
-**docstring 会被编译进 pyc**（module code object 的 `co_consts`），所以它在字节码里搜得到；
-已用 `git grep audio.output v0.12.1 -- vlt/` 核对（0 命中）。
+⚠️ **本版（v0.12.3：两处修复，无新增功能）的 needle 是两条「只出现在新代码里」的字面量**：
+`输出检查未通过`（`vlt/gui_engine.py::start` 输出守卫被拦时的日志前缀）与
+`耳返开关在主界面`（`vlt/gui_settings.py` 音频页新增的提示行）。两条都是**字符串常量**，
+会进 module code object 的 `co_consts`；已用 `git grep <串> v0.12.2 -- vlt/` 核对（各自 0 命中）。
 ⚠️ **注释不会进 pyc** —— 别把改动只写在注释里、再拿那串文字当 needle，永远搜不到。
 
 """
