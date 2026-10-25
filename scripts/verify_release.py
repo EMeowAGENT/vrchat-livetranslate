@@ -1,22 +1,16 @@
 """独立复核线上 Release 附件（不依赖 CI 的自检结论）。
 
-用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.1 "turn_detection_payload,silence_duration_ms,reopen_output,tts_model_mismatch,_starting_ws,_session_lock,TTS_SUPPORTED_LANGS,SpeechSynthesizer"
+用法：.venv/Scripts/python.exe scripts/verify_release.py v0.12.2 "audio.output.voice"
 
 第二个参数 = 本版代码里必定出现的字符串，**可以用逗号给多个**（每个都要命中才算过）。
 判据是「在解包出来的字节码里搜得到」—— 不是搜 exe 原始字节（那是压缩过的 PYZ，永远搜不到）。
 
-⚠️ **本版（v0.12.1：五处修复，无新增功能）取新增符号名做 needle，一条一个、互不替代**：
-  ① 断句改 server_vad（#112）：`turn_detection_payload`（`vlt/session/qwen38.py` 新增的下发构造入口）
-     与 `silence_duration_ms`（新增配置键，`vlt/config.py` / `vlt/session/base.py`）—— v0.12.0 里都不存在；
-  ② 译音输出设备即时切换（#114）：`reopen_output`（`vlt/output/micproxy.py` 新增的输出流重开入口）；
-  ③ 复刻模型错配迁移（#115）：`tts_model_mismatch`（`vlt/config.py` 的统一判定，实现在 `vlt/voices.py`）；
-  ④ 会话重连竞态（#116）：`_starting_ws`（`vlt/session/qwen38.py` 里「发布前暂存连接」的字段）
-     与 `_session_lock`（`vlt/engine.py` 建会话串行化的锁）；
-  ⑤ TTS 迁 Qwen-Audio-TTS（#116）：`TTS_SUPPORTED_LANGS`（`vlt/tts.py` 的语言覆盖表）与
-     `SpeechSynthesizer`（`vlt/endpoints.py` 新端点路径里的固定段）。
-八串已用 `git grep <符号> v0.12.0 -- vlt/` 逐一核对（全部 0 命中）。
-⚠️ 本版也有**没有新符号可搜**的改动（打字输入的回调接线、状态栏与日志文案）——
-它们的证据是用例与故障注入，不是 needle。
+⚠️ **本版（v0.12.2：一处修复，无新增功能）的 needle 是一条「只出现在新代码里」的字面量**：
+`audio.output.voice` —— 修复把 3.8 的音色同时写进 `session.audio.output.voice`
+（`vlt/session/qwen38.py::_session_payload`），并把该字段名写进了模块 docstring。
+**docstring 会被编译进 pyc**（module code object 的 `co_consts`），所以它在字节码里搜得到；
+已用 `git grep audio.output v0.12.1 -- vlt/` 核对（0 命中）。
+⚠️ **注释不会进 pyc** —— 别把改动只写在注释里、再拿那串文字当 needle，永远搜不到。
 
 """
 from __future__ import annotations

@@ -204,18 +204,11 @@ jobs:
 
             **修复**
 
-            - 服务端断句改为 server_vad，静音阈值默认 500ms，「说完 → 最终译文」由约 4.0s 降至约 0.5s；新增 `session.silence_duration_ms`（200~6000ms），`turn_detection` 标记废弃 — #112 @nixi-agent
-            - 修复键盘打字输入不可用：回车与「发送」按钮统一入口，补齐引擎与状态回调参数 — #113 @nixi-agent
-            - 修复更换「译音输出」设备后麦克风代理仍使用旧端点：按新设备即时重开输出流，失败回退旧端点并留痕 — #114 @nixi-agent
-            - 打字译音迁移至 Qwen-Audio-TTS：新端点 SpeechSynthesizer、模型 qwen-audio-3.1-tts-flash 与四个多语音色，旧模型与旧音色配置自动迁移 — #116 @nixi-agent
-            - 修复会话重连竞态：会话更新下发后才发布连接，建会话串行化，消除 already started 报错与短命会话反复重连 — #116 @nixi-agent
-            - 修复开始翻译后打字仍不发送：引擎引用改为每轮刷新，开始与停止后立即同步 — #115 @EMeowAGENT
-            - 修复音色实验室复刻模型与内置音色错配导致合成失败：迁移顺序固定，设置页改音色时读取磁盘配置并落盘 — #115 @EMeowAGENT
+            - 修复「说话译音」音色不生效：qwen3.8 实时模型在千问云线路只读取 `audio.output.voice`，此前音色只写入顶层 `voice`，服务端回显但不参与合成，所有音色声音相同；现同时写入两处，千问云与旧域名两条线路均生效 — #117 @nixi-agent
 
             **其它**
 
-            - 每轮新增 `[turn]` 断句、首字、完成耗时日志，用于真机量化延迟 — #112 @nixi-agent
-            - 新 TTS 音色官方覆盖不含俄语、西班牙语、泰语：仍可合成，发音质量未验证，首次使用时日志告警 — #116 @nixi-agent
+            - 开发者文档补「换音色没反应」的症状判据，并新增字段位置守卫用例 — #117 @nixi-agent
 
           files: |
             dist/VRChatLiveTranslate.exe
