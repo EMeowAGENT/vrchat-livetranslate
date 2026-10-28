@@ -1,0 +1,10 @@
+# 分玩家语音（实验性，默认关闭）的**额外**依赖
+#
+# 只有跑 `scripts/probe_player_audio.py run` / 开启 players 模式时才需要；
+# 装法（仓库统一用 uv）：
+#   uv pip install --python .venv/bin/python -r requirements-players.txt
+#
+# 为什么单独一个文件而不是塞进 requirements-linux.txt：
+# 这是一个默认关闭的实验功能（要读游戏进程内存，ToS 灰区），不该让所有 Linux
+# 用户为它多装一个带编译产物的包。
+cryptography>=42.0.0     # AES-256-GCM 解 Photon 数据报（解包与验钥）

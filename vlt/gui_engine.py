@@ -131,6 +131,10 @@ def start(ctx: EngineCtx) -> bool:
     """
     if any(e.running for e in ctx.engines):
         return
+    # 分玩家模式只有 leg、没有 Engine，上一条守卫拦不住重复点击。
+    leg_now = getattr(ctx, "players_leg", None)
+    if leg_now is not None and getattr(leg_now, "running", False):
+        return
 
     # 防呆：key 可能在运行期被保存/清除/改环境，先重解再检查
     if ctx.refresh_api_key_fn:
@@ -189,6 +193,16 @@ def start(ctx: EngineCtx) -> bool:
         specs.append(("mine", "mine", "mic", a, b))
     if d in ("theirs", "dual"):
         specs.append(("theirs", "theirs", "loopback", b, a or "zh"))
+
+    # 分玩家模式（实验性，Linux）：用它**替换**「别人说」那条混音腿。
+    # 替换而不是并存：同一句话翻两遍会重复上屏，也会双倍烧配额。
+    players_cfg = ctx.cfg.players if isinstance(ctx.cfg.players, dict) else {}
+    players_on = str(players_cfg.get("mode") or "off").lower() == "decrypt"
+    start_players = False
+    if players_on and any(s_[1] == "theirs" for s_ in specs):
+        specs = [s_ for s_ in specs if s_[1] != "theirs"]
+        start_players = True
+        print("[gui] 分玩家模式：用「每玩家一条会话」替代混音腿", flush=True)
 
     # chatbox 只承载「我说的话」的译文（气泡在别人眼里代表我发言）。
     # 若本次方向不含「我说」，用户勾了 chatbox 也一条都发不出去 —— 必须像
@@ -272,6 +286,8 @@ def start(ctx: EngineCtx) -> bool:
                       "（保持原档位；主界面按钮仍可手动切）", flush=True)
     # 启动第一个引擎（后续引擎由 start_engine 错开 300ms 调度）
     start_engine(ctx, 0)
+    if start_players:
+        _start_players_leg(ctx, players_cfg)
 
     # 按钮态
     set_power_state(ctx, "running")
@@ -372,6 +388,46 @@ def start_engine(ctx: EngineCtx, index: int) -> None:
         # 两个引擎错开 300ms 启动，避免同时抢占音频设备
         ctx.start_job = ctx.root.after(300, lambda: start_engine(ctx, index + 1))
 
+def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
+    """启动分玩家翻译腿（把关卡/限流/名字都在 leg 里处理）。"""
+    existing = getattr(ctx, "players_leg", None)
+    if existing is not None and getattr(existing, "running", False):
+        return
+    from .players.leg import PlayerLeg
+
+    # 方向配置：specs 里的 theirs 已被替换掉，这里要自己兜一个（与 start() 同口径）
+    dd = ctx.cfg.directions.setdefault("theirs", Direction())
+    dd.source_lang = dd.source_lang or ""
+    dd.target_lang = dd.target_lang or (ctx.lang_pair.get("source") or "zh")
+    scfg = dd.to_session_config(ctx.cfg.session_base)
+    max_sessions = players_cfg.get("max_sessions", 3)
+    try:
+        max_sessions = max(1, min(8, int(max_sessions)))
+    except (TypeError, ValueError):
+        max_sessions = 3
+    try:
+        gate_db = float(players_cfg.get("gate_db", -55.0))
+    except (TypeError, ValueError):
+        gate_db = -55.0
+
+    leg = PlayerLeg(
+        scfg,
+        on_text=lambda actor, label, src, txt, final:
+            ctx.q.put(("players", actor, label, src, txt, final)),
+        on_status=lambda lvl, msg: on_engine_status(ctx.q, lvl, msg, "players"),
+        on_names=lambda fresh: print(
+            "[players] 名字：" + "、".join(f"actor{a}={n!r}" for a, _u, n in fresh),
+            flush=True),
+        max_sessions=max_sessions,
+        gate_db=gate_db,
+        pre_seconds=float(players_cfg.get("pre_seconds", 120.0)),
+        distance_mode=str(players_cfg.get("distance_mode") or "off"),
+        max_distance_m=float(players_cfg.get("max_distance_m") or 0.0),
+    )
+    ctx.players_leg = leg
+    leg.start()
+
+
 def on_engine_status(q, lvl: str, msg: str, who: str) -> None:
     """引擎状态既要进状态栏，也要进日志（stdout）。
 
@@ -401,6 +457,13 @@ def stop(ctx: EngineCtx) -> None:
         except Exception:
             pass
         ctx.start_job = None
+
+    # 分玩家腿：独立线程，异步收尾（join 最多 8s，不能卡界面）
+    leg = getattr(ctx, "players_leg", None)
+    if leg is not None:
+        ctx.players_leg = None
+        threading.Thread(target=leg.stop, daemon=True,
+                         name="vlt-players-stop").start()
 
     engines = list(ctx.engines)
     for eng in engines:

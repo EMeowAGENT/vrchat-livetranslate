@@ -655,6 +655,17 @@ def poll(ctx: ChatCtx, root: tk.Misc,
                             who=f"peer:{item[2]}", label=item[1])
                 if ctx.push_overlay_fn:
                     ctx.push_overlay_fn()
+            elif kind == "players":
+                # 分玩家语音：一条 = (actor, 名字, 原文, 译文, is_final)。
+                # 复用房间那条「peer:<id> + 昵称」的渲染路径：手腕屏/桌面字幕
+                # 会按 peer_id 稳定配色，同一人任何时候同色。
+                _actor, _name, _src, _txt, _final = item[1], item[2], item[3], item[4], item[5]
+                add_text_fn(_src, _txt, _final,
+                            who=f"peer:actor{_actor}", label=_name)
+                if ctx.push_overlay_fn:
+                    ctx.push_overlay_fn()
+                if ctx.push_desktop_fn:
+                    ctx.push_desktop_fn()
             elif kind == "room_status":
                 # 房间链路状态：按行首符号定状态栏颜色级别
                 txt = str(item[1])

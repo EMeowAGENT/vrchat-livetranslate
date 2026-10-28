@@ -84,7 +84,8 @@ class ConnectionBudget:
 class QwenLiveTranslateSession(LiveTranslateSession):
     """3.8 / 3.5 共用；差异通过 _map_event() 按代次分派。"""
 
-    def __init__(self, cfg: SessionConfig) -> None:
+    def __init__(self, cfg: SessionConfig, *,
+                 budget: "ConnectionBudget | None" = None) -> None:
         super().__init__(cfg)
         self._gen = "38" if cfg.model.lower().startswith("qwen3.8") else "35"
         self._ws: Any = None
@@ -108,7 +109,9 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         self._src_buf: list[str] = []
         self._last_text_at: float = 0.0    # 最近一次文本增量时间（静默兜底用）
         self._last_final_text = ""         # 最近一次已发出的最终版文本（允许再次终结）
-        self._budget = ConnectionBudget(cfg.max_new_sessions_per_minute)
+        # 分玩家模式要**多条会话共享一个 RPM 预算**（10 次/分钟是账号级的），
+        # 所以允许外部注入；单腿模式不传，行为与以前完全一致。
+        self._budget = budget or ConnectionBudget(cfg.max_new_sessions_per_minute)
         # 延迟埋点
         self._t_speech_start: float | None = None
         self._first_delta_ms: float | None = None

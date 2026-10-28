@@ -70,6 +70,7 @@ FORBIDDEN: dict[str, dict[str, list[str]]] = {
             "vlt.platform.x11",            # 原生 ARGB 桌面叠加窗（libX11）
             "vlt.output.openxr_overlay",   # 自建 OpenXR 手腕屏（pyopenxr + EGL/Wayland）
             "vlt.output.micproxy_linux",   # Linux 麦克风代理（pw-cat 管道 + 运行时声明虚拟麦）
+            "vlt.players",                 # 分玩家语音（/proc + process_vm_readv + AF_PACKET，仅 Linux）
             "xr",                          # pyopenxr 本体
         ],
         "strings": [

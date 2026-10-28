@@ -215,10 +215,10 @@ class LiveTranslateSession(abc.ABC):
         """优雅结束（发 session.finish 并断连）。"""
 
 
-def create_session(cfg: SessionConfig) -> LiveTranslateSession:
+def create_session(cfg: SessionConfig, *, budget=None) -> LiveTranslateSession:
     """按模型名前缀分发到对应代次的实现（可插拔点）。"""
     model = cfg.model.lower()
     if model.startswith("qwen3.8-livetranslate") or model.startswith("qwen3.5-livetranslate"):
         from .qwen38 import QwenLiveTranslateSession  # 3.5/3.8 共用一套写出逻辑，差异在事件映射
-        return QwenLiveTranslateSession(cfg)
+        return QwenLiveTranslateSession(cfg, budget=budget)
     raise ValueError(f"暂不支持的模型：{cfg.model}（在 create_session 里登记新代次实现）")

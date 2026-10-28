@@ -251,6 +251,12 @@ HIDDEN=(
     vlt.platform vlt.platform.audio vlt.platform.base vlt.platform.linux
     vlt.platform.wayland vlt.platform.x11 vlt.platform.overlay_pixels   # 桌面字幕原生窗（layer-shell / ARGB）+ 共用像素工具
     vlt.session vlt.session.base vlt.session.qwen38
+    # 分玩家语音（实验性，默认关）：PyInstaller 看不到函数内 import 的那几处，
+    # 整个包一并列上；`priv_helper` 是冻结后 `--priv-helper` 的入口。
+    vlt.players vlt.players.capture_linux vlt.players.collector vlt.players.gcm
+    vlt.players.guard vlt.players.helper vlt.players.key_linux vlt.players.leg
+    vlt.players.names vlt.players.opus vlt.players.payload vlt.players.photon
+    vlt.players.positions vlt.players.priv_helper vlt.players.procfs vlt.players.router
     # 第三方：按需导入 / 运行时加载（音频第三方只在 Windows 侧，见文件头「反向裁剪」）
     miniaudio _miniaudio pythonosc websockets yaml
     PIL PIL.Image PIL.ImageDraw PIL.ImageTk numpy xr
@@ -282,10 +288,24 @@ PYI_ARGS=(
     --add-data "${REPO}/config.example.yaml:."
     --add-data "${BUILDINFO}:."          # 版本溯源（git describe，见 vlt/version.py）
     --add-binary "${XFT_TK}:."          # 顶掉 PyInstaller 收到的解释器自带那份
+    # 分玩家语音的提权助手：AppImage 是 FUSE 挂载（root 读不到），所以运行时把它
+    # 拼成自包含脚本、经 stdin 交给 `pkexec python3 -`。这里带上源码（纯 stdlib）。
+    --add-data "${REPO}/scripts/vlt_priv_helper.py:scripts"
+    --add-data "${REPO}/vlt/__init__.py:vlt"
+    --add-data "${REPO}/vlt/players:vlt/players"
 )
 for h in "${HIDDEN[@]}";      do PYI_ARGS+=(--hidden-import "$h"); done
 for c in "${COLLECT_ALL[@]}"; do PYI_ARGS+=(--collect-all "$c"); done
 for e in "${EXCLUDES[@]}";    do PYI_ARGS+=(--exclude-module "$e"); done
+
+# 分玩家语音用到的 cryptography 是**懒加载**（gcm._aesgcm 里 import），静态分析可能收不到；
+# 构建机装了才加 —— 没装时 AppImage 里该功能会提示缺依赖，其它功能不受影响。
+if "$VENV_PY" -c "import cryptography" >/dev/null 2>&1; then
+    PYI_ARGS+=(--hidden-import cryptography
+               --hidden-import cryptography.hazmat.primitives.ciphers.aead)
+else
+    echo "    ⚠️ 构建机没装 cryptography → 分玩家模式在 AppImage 里会提示缺依赖（其它功能不受影响）"
+fi
 
 PYI_LOG="${WORK}/pyinstaller.log"
 echo "    （日志：${PYI_LOG}）"
