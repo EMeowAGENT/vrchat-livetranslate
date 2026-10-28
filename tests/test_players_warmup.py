@@ -19,7 +19,6 @@ import hashlib
 import os
 import struct
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -27,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vlt.players import gcm, names, photon, procfs, warmup  # noqa: E402
+from vlt.players import gcm, procfs, warmup  # noqa: E402
 from vlt.players_settings import PlayersSettings  # noqa: E402
 
 FAILS: list[str] = []
