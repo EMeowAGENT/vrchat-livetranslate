@@ -130,6 +130,20 @@ def _open_with(aead, pkt: bytes, layout: str) -> bytes | None:
         return None
 
 
+def opener(key: bytes, layout: str = LAYOUTS[0]):
+    """返回一个「复用同一把 AEAD」的解密函数（预热/长跑时用）。
+
+    `try_open` 每个包都 `AESGCM(key)` 构造一次，密钥调度比重放解密还贵；
+    预热要连续解几分钟的流量，所以把 AEAD 缓存起来。
+    """
+    aead = _aesgcm(key)
+
+    def _open(pkt: bytes) -> bytes | None:
+        return _open_with(aead, pkt, layout)
+
+    return _open
+
+
 def try_open(key: bytes, pkt: bytes, layout: str = LAYOUTS[0]) -> bytes | None:
     """用一把候选密钥解一个包；解不开返回 None（**不许抛**，扫描要靠它快速筛）。"""
     return _open_with(_aesgcm(key), pkt, layout)

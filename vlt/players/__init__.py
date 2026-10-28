@@ -37,6 +37,7 @@ VRChat 的应用流）拿到的是**混音**：既分不出是谁，也没法按
 | `names.py` | 玩家记录：`actor → usr_id → displayName`，含 `output_log` 兜底 |
 | `world.py` | 从 `output_log` 读「世界加载完成/正在加载」，给取钥做闸门 |
 | `pending.py` | 取钥期间的密文缓冲：密钥晚到也不丢名单和开头语音（回放） |
+| `warmup.py` | 预热：没开始翻译也抓包、取钥、只解玩家名（翻译腿借用它） |
 | `positions.py` | 位置（Event 12）→ 距离；支持 `order`/`gate` 两种用法 |
 | `router.py` | 每玩家一条翻译会话（共享 RPM 预算、LRU/距离淘汰） |
 | `leg.py` | 分玩家腿：抓包→取钥→解码→路由器（GUI 用它） |

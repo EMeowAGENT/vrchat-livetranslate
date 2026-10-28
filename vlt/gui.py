@@ -118,6 +118,11 @@ class TranslationGUI(ProxyMethods):
             self._build_ui()
             # 代理与翻译解耦：程序一起来就工作（见 micproxy 模块头「生命周期」）
             self._start_proxy()
+            # 预热同理：分玩家模式开着时，程序一起来就等 VRChat 进程、抓包记名字
+            # （检测到游戏才弹 pkexec；没开游戏时零开销）。
+            self._engine_ctx.cfg = self._cfg
+            self._engine_ctx.set_status_fn = self._set_status
+            gui_engine.ensure_players_warmup(self._engine_ctx)
             # 按钮默认态是 NORMAL，不刷一次的话「无代理」时它看起来还能点
             self._refresh_voice_mode_btn()
     def __getattr__(self, name):

@@ -252,3 +252,32 @@ def _recv_json(conn: socket.socket | None, *, want_fd: bool = False,
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"助手回复不是 JSON：{data[:200]!r}") from exc
 
+
+
+# ---------------------------------------------------------------- 一次性助手
+#
+# 预热要在**没有翻译**的时候也抓包：socket 需要 root 来开，但助手没必要常驻 ——
+# 下面两个函数各起一个**短命**助手，干完就退（与现有承诺一致）：
+#   * `open_capture_once`：只开 socket，把 fd 交回主进程后助手退出；
+#   * `scan_once`：只扫内存，把候选交回后助手退出。
+# socket 的 fd 已经在本进程里，助手退出不影响继续收包；游戏重启/换密钥时再起一次即可。
+
+
+def open_capture_once(host: procfs.ProcInfo, *, port: int = 27002,
+                      filter_mode: str = "strict") -> socket.socket:
+    """起一个短命助手，只做「开抓包 socket」；返回的 socket 归调用方所有。"""
+    with HelperSession(host, port=port, lifetime_s=60.0) as sess:
+        sess.start_capture(filter_mode=filter_mode)
+        sock = sess.packet_socket
+        if sock is None:
+            raise RuntimeError("助手没有交回抓包 fd")
+        # 交给调用方：`__exit__` 不许把它关掉（fd 是同一个内核对象）
+        sess.packet_socket = None
+        return sock
+
+
+def scan_once(host: procfs.ProcInfo, *, needle: str = "q",
+              deadline_s: float = 40.0, port: int = 27002) -> dict:
+    """起一个短命助手，只做一次「扫内存找候选密钥」；返回助手原始回包。"""
+    with HelperSession(host, port=port, lifetime_s=max(60.0, deadline_s + 30.0)) as sess:
+        return sess.scan(deadline_s=deadline_s, needle=needle)

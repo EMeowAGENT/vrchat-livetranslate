@@ -38,6 +38,14 @@ from .engine import (
     input_gate_settings,
 )
 from .i18n import t
+from .players_settings import (
+    MODE_DECRYPT,
+    MODE_OFF,
+    PREWARM_AUTO,
+    PREWARM_OFF,
+    PlayersSettings,
+    parse_players,
+)
 from .gui_audio import loopback_mode_label
 from .paths import APP_DIR
 from .ui_state import current_key_slot, provider
@@ -143,6 +151,8 @@ def build_settings_dialog(gui) -> None:
     # 且没有任何提示）。见 issue #89。
     win.bind("<Destroy>",
              lambda e: gui._cancel_level_tick() if e.widget is win else None, add="+")
+    win.bind("<Destroy>",
+             lambda e: cancel_players_status(gui) if e.widget is win else None, add="+")
     for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
         win.bind(seq, lambda e: on_settings_wheel(gui, e))
     gui._settings_win = win
@@ -162,6 +172,7 @@ def build_settings_dialog(gui) -> None:
     build_settings_desktop(gui, settings_page(ctx, gui, t("桌面字幕")))
     build_settings_glossary(gui, settings_page(ctx, gui, t("词库")))
     build_settings_room(gui, settings_page(ctx, gui, t("房间")))
+    build_settings_players(gui, settings_page(ctx, gui, t("分玩家")))
     build_settings_about(gui, settings_page(ctx, gui, t("关于")))
 
     gui._settings_pages = ctx.pages
@@ -965,6 +976,279 @@ def build_settings_room(gui, body: ttk.Frame) -> None:
               wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(4, 0))
 
 
+# ================================================================ 分玩家页
+#
+# 这一页**只写配置**（`players` 段）：默认值/范围校验都在 `vlt/players_settings.py`，
+# 预热器本身在 `vlt/players/warmup.py`（Linux 独占）。本页通过 `getattr` 取预热器，
+# 不 import 它 —— Windows 产物里没有那个包，import 级引用会直接炸。
+
+_PLAYERS_MODES = ((MODE_OFF, "关闭"), (MODE_DECRYPT, "解密分玩家"))
+_PLAYERS_PREWARM = ((PREWARM_OFF, "关"), (PREWARM_AUTO, "自动（检测到 VRChat 就抓包记名字）"))
+_PLAYERS_DISTANCE = (
+    ("off", "不用"),
+    ("order", "按距离排序（推荐）"),
+    ("gate", "距离门限"),
+    ("both", "先门限再排序"),
+)
+
+
+def _players_warmup(gui):
+    ctx = getattr(gui, "_engine_ctx", None)
+    return getattr(ctx, "players_warmup", None) if ctx is not None else None
+
+
+def _players_choices(options, *, translate: bool = True):
+    return [(key, t(label) if translate else label) for key, label in options]
+
+
+def save_players_setting(gui, key: str, value) -> None:
+    """把一个 `players.<key>` 就地写回 config.yaml，并让预热器立刻按新值工作。"""
+    p = _config_mod.DEFAULT_CONFIG
+    if not p.exists():
+        msg = f"找不到 {p.name}"
+        gui._set_status("error", t("❌ 没保存：{msg}", msg=msg))
+        print(f"[gui] ❌ 分玩家设置没保存：{msg}", flush=True)
+        return
+    repr_value = f"{value:g}" if isinstance(value, float) else str(value)
+    try:
+        text = p.read_text(encoding="utf-8")
+        if not re.search(r"^players:", text, re.M):
+            text = text.rstrip("\n") + "\n\n# 分玩家语音（见 docs/分玩家语音.md）\nplayers:\n"
+        text = _yaml_set_or_create(text, ["players", key], repr_value)
+        _write_config_text(p, text)
+    except Exception as exc:                        # noqa: BLE001
+        gui._set_status("error", t("❌ 没保存：{msg}", msg=exc))
+        print(f"[gui] ❌ 保存 players.{key} 失败（配置未改动）：{exc}", flush=True)
+        return
+    players = dict(getattr(gui._cfg, "players", None) or {})
+    players[key] = value
+    gui._cfg.players = players
+    # 预热/模式改动即时生效；其余“下次开始翻译”生效（腿是开始翻译时按配置建的）
+    ctx = getattr(gui, "_engine_ctx", None)
+    if ctx is not None:
+        try:
+            from . import gui_engine as _ge
+            _ge.ensure_players_warmup(ctx)
+        except Exception as exc:                    # noqa: BLE001 - 不能因为预热失败挡保存
+            print(f"[gui] ⚠️ 应用预热设置失败（配置已保存）：{exc}", flush=True)
+    gui._set_status("info", t("已保存（{key} = {value}）；停止并重新开始翻译后生效",
+                              key=key, value=repr_value))
+    print(f"[gui] 分玩家设置已保存：players.{key}={repr_value}", flush=True)
+
+
+def _players_spin(gui, row, key: str, value, low: float, high: float,
+                  *, step: float = 1, integer: bool = True) -> None:
+    var = tk.StringVar(value=f"{float(value):g}")
+    # 留个引用给用例/调试（也方便以后做「恢复默认值」）
+    getattr(gui, "_players_spin_vars", None) or setattr(gui, "_players_spin_vars", {})
+    gui._players_spin_vars[key] = var
+    spin = ttk.Spinbox(row, from_=low, to=high, increment=step,
+                       textvariable=var, width=8)
+    spin.pack(side=tk.LEFT, padx=(8, 0))
+
+    def _commit(_event=None) -> None:
+        raw = (var.get() or "").strip()
+        try:
+            number = float(raw)
+        except ValueError:
+            gui._set_status("error", t("❌ 没保存：{msg}", msg=f"{key}={raw}"))
+            return
+        if integer:
+            number = float(int(round(number)))
+        save_players_setting(gui, key, int(number) if integer else number)
+
+    spin.bind("<Return>", _commit)
+    spin.bind("<FocusOut>", _commit)
+
+
+def _players_row(parent, label: str, *, width: int = 18):
+    row = ttk.Frame(parent)
+    row.pack(fill=tk.X, pady=3)
+    ttk.Label(row, text=label, style="Dim.TLabel", width=width,
+              anchor="w").pack(side=tk.LEFT)
+    return row
+
+
+def _players_label_width(*labels: str) -> int:
+    """本页所有标签的**同一**固定宽度（按当前语言里最长那条算）。
+
+    ⚠️ 必须用 `_char_width_for`（字体真实 measure）而不是 `len()`：俄语
+    「Буфер шифртекста предпрогрева (МБ):」有 37 个字符，而中文标签只有 8 个字
+    （Tk 的 width 单位是平均字符宽，汉字占两倍）—— 两边都得装得下，否则真机裁字，
+    `tests/test_i18n.py` 的固定宽度守卫也会红。
+    """
+    return max(_char_width_for(text, _ui_tk.FONT_UI, minimum=18) for text in labels)
+
+
+def build_settings_players(gui, body: ttk.Frame) -> None:
+    """「设置 → 分玩家」：模式 / 预热 / 名额 / 音量 / 距离 / 状态。"""
+    ps: PlayersSettings = parse_players(getattr(gui._cfg, "players", None) or {})
+    row_width = _players_label_width(
+        t("模式:"), t("预热:"), t("同时翻译人数:"), t("静音门限:"), t("门限滞回:"),
+        t("距离策略:"), t("距离门限（米）:"), t("等流量最长秒数:"),
+        t("预热密文缓冲（MB）:"))
+
+    ttk.Label(body, text=t("分玩家语音（实验性，仅 Linux）"),
+              style="Section.TLabel").pack(anchor=tk.W)
+    ttk.Label(body,
+              text=t("⚠️ 需要读取游戏进程内存（VRChat ToS 灰区），建议先用小号验证。"),
+              style="Muted.TLabel", justify=tk.LEFT,
+              wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(4, 10))
+
+    # ---- 基本 ----
+    modes = _players_choices(_PLAYERS_MODES)
+    row = _players_row(body, t("模式:"), width=row_width)
+    gui._players_mode_var = tk.StringVar(value=dict(modes)[ps.mode])
+    mode_box = ttk.Combobox(row, textvariable=gui._players_mode_var, state="readonly",
+                            width=24, values=[label for _k, label in modes])
+    mode_box.pack(side=tk.LEFT, padx=(8, 0))
+    mode_box.bind("<<ComboboxSelected>>", lambda _e: save_players_setting(
+        gui, "mode", next(k for k, label in modes if label == gui._players_mode_var.get())))
+
+    prewarms = _players_choices(_PLAYERS_PREWARM)
+    row = _players_row(body, t("预热:"), width=row_width)
+    gui._players_prewarm_var = tk.StringVar(value=dict(prewarms)[ps.prewarm])
+    prewarm_box = ttk.Combobox(row, textvariable=gui._players_prewarm_var, state="readonly",
+                               width=24, values=[label for _k, label in prewarms])
+    prewarm_box.pack(side=tk.LEFT, padx=(8, 0))
+    prewarm_box.bind("<<ComboboxSelected>>", lambda _e: save_players_setting(
+        gui, "prewarm",
+        next(k for k, label in prewarms if label == gui._players_prewarm_var.get())))
+    ttk.Label(body,
+              text=t("预热会在检测到 VRChat 进程时弹一次授权；未开始翻译时也会持续"
+                     "记录玩家名（不解码语音）。"),
+              style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP
+              ).pack(anchor=tk.W, pady=(4, 6))
+
+    # ---- 名额 + 音量 ----
+    ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+    row = _players_row(body, t("同时翻译人数:"), width=row_width)
+    _players_spin(gui, row, "max_sessions", ps.max_sessions, 1, 8)
+    ttk.Label(body,
+              text=t("名额满了只回收 15 秒没说话的人；都在说话时后来者会被丢弃并在"
+                     "状态栏警告。"),
+              style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP
+              ).pack(anchor=tk.W, pady=(2, 6))
+
+    row = _players_row(body, t("静音门限:"), width=row_width)
+    _players_spin(gui, row, "gate_db", ps.gate_db, -70, -30, integer=False)
+    ttk.Label(body, text=t("低于门限的音频不上送。说话小声的人被切碎时调低它。"),
+              style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP
+              ).pack(anchor=tk.W, pady=(2, 6))
+
+    row = _players_row(body, t("门限滞回:"), width=row_width)
+    _players_spin(gui, row, "gate_hysteresis_db", ps.gate_hysteresis_db, 0, 12,
+                  integer=False)
+    ttk.Label(body, text=t("开闸后要再低这么多才关闸；治轻声/断续被切成好几轮。"),
+              style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP
+              ).pack(anchor=tk.W, pady=(2, 6))
+
+    # ---- 距离 ----
+    ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+    dists = _players_choices(_PLAYERS_DISTANCE)
+    row = _players_row(body, t("距离策略:"), width=row_width)
+    gui._players_distance_var = tk.StringVar(value=dict(dists)[ps.distance_mode])
+    dist_box = ttk.Combobox(row, textvariable=gui._players_distance_var, state="readonly",
+                            width=24, values=[label for _k, label in dists])
+    dist_box.pack(side=tk.LEFT, padx=(8, 0))
+    dist_box.bind("<<ComboboxSelected>>", lambda _e: save_players_setting(
+        gui, "distance_mode",
+        next(k for k, label in dists if label == gui._players_distance_var.get())))
+    row = _players_row(body, t("距离门限（米）:"), width=row_width)
+    _players_spin(gui, row, "max_distance_m", ps.max_distance_m, 0, 30, integer=False)
+
+    # ---- 高级 ----
+    ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+    row = _players_row(body, t("等流量最长秒数:"), width=row_width)
+    _players_spin(gui, row, "pre_seconds", ps.pre_seconds, 10, 300)
+    row = _players_row(body, t("预热密文缓冲（MB）:"), width=row_width)
+    _players_spin(gui, row, "prewarm_buffer_mb", ps.prewarm_buffer_mb, 4, 64)
+
+    # ---- 状态（只读）----
+    ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+    ttk.Label(body, text=t("预热状态"), style="Section.TLabel").pack(anchor=tk.W)
+    gui._players_status_lbl = ttk.Label(body, text="—", style="Dim.TLabel",
+                                        justify=tk.LEFT, wraplength=SETTINGS_WRAP)
+    gui._players_status_lbl.pack(anchor=tk.W, pady=(4, 6))
+    ttk.Button(body, text=t("重新授权"),
+               command=lambda: _players_retry(gui)).pack(anchor=tk.W)
+    ttk.Label(body, text=t("改动即时保存。"), style="Muted.TLabel",
+              justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(8, 0))
+
+
+def _players_retry(gui) -> None:
+    warmup = _players_warmup(gui)
+    if warmup is None:
+        gui._set_status("warn", t("预热未启用"))
+        return
+    try:
+        warmup.retry()
+        gui._set_status("info", t("已请求重新授权（注意看系统的密码弹窗）"))
+    except Exception as exc:                        # noqa: BLE001
+        gui._set_status("error", t("❌ 没保存：{msg}", msg=exc))
+
+
+def _players_status_line(gui) -> str:
+    warmup = _players_warmup(gui)
+    if warmup is None:
+        return t("未启用")
+    try:
+        status = warmup.status()
+    except Exception as exc:                        # noqa: BLE001
+        return t("不可用：{detail}", detail=exc)
+    phase = str(status.get("phase") or "")
+    detail = str(status.get("detail") or "")
+    if phase == "recording":
+        base = t("记录中：已识别 {n} 位玩家（{events} 条名字事件）",
+                 n=status.get("players", 0), events=status.get("name_events", 0))
+    elif phase == "capturing":
+        base = t("已抓包，等待密钥…")
+    elif phase == "waiting_game":
+        base = t("等待 VRChat 进程…")
+    elif phase == "unauthorized":
+        base = t("未授权（可点「重新授权」）")
+    elif phase == "blocked":
+        base = t("不可用：{detail}", detail=detail or "EAC")
+    elif phase in ("failed",):
+        base = t("不可用：{detail}", detail=detail or phase)
+    elif phase == "off":
+        base = t("未启用")
+    else:
+        base = detail or phase
+    fingerprint = str(status.get("key") or "")
+    key_line = t("密钥：{fp}", fp=fingerprint) if fingerprint else t("密钥：未获取")
+    return f"{base}\n{key_line}"
+
+
+def refresh_players_status(gui) -> None:
+    """每秒刷新一次预热状态（只在设置窗可见时续期；关窗/销毁即停）。"""
+    gui._players_status_job = None
+    label = getattr(gui, "_players_status_lbl", None)
+    win = getattr(gui, "_settings_win", None)
+    if label is None or win is None:
+        return
+    try:
+        if not label.winfo_exists() or not win.winfo_exists() or not win.winfo_viewable():
+            return
+    except Exception:                               # noqa: BLE001 - 收尾竞态
+        return
+    try:
+        label.configure(text=_players_status_line(gui))
+    except Exception:                               # noqa: BLE001
+        return
+    gui._players_status_job = gui._root.after(1000, lambda: refresh_players_status(gui))
+
+
+def cancel_players_status(gui) -> None:
+    job = getattr(gui, "_players_status_job", None)
+    gui._players_status_job = None
+    if job is not None:
+        try:
+            gui._root.after_cancel(job)
+        except Exception:                           # noqa: BLE001
+            pass
+
+
 # ================================================================ 关于页
 
 def build_settings_about(gui, body: ttk.Frame) -> None:
@@ -1172,10 +1456,12 @@ def open_settings(gui, page: str | None = None) -> None:
     sync_settings_pages(gui)
     gui._sync_gate_level_probe()
     gui._refresh_level_readout()      # 起「译音音量」实时读数的 500ms tick（可见时才续期）
+    refresh_players_status(gui)       # 预热状态：每秒刷新（关窗即停）
 
 
 def close_settings(gui) -> None:
     """关闭设置弹窗。"""
+    cancel_players_status(gui)
     gui._settings_win.withdraw()
     gui._sync_gate_level_probe()
     gui._refresh_level_readout()      # 窗口已不可见 → 取消挂起的 tick 且不再续期

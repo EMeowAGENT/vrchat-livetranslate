@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from typing import Any
 
 from .gui_engine_context import EngineCtx as EngineCtx
 from .gui_sinks import (start_overlay, push_overlay as push_overlay, desktop_cfg as desktop_cfg,
@@ -287,6 +288,9 @@ def start(ctx: EngineCtx) -> bool:
     # 启动第一个引擎（后续引擎由 start_engine 错开 300ms 调度）
     start_engine(ctx, 0)
     if start_players:
+        # 预热器可能还没起（程序启动时没开游戏 / 配置刚改）：先确保它在跑，
+        # 翻译腿才能借用 socket + 密钥 + 名字表。
+        ensure_players_warmup(ctx)
         _start_players_leg(ctx, players_cfg)
 
     # 按钮态
@@ -388,6 +392,66 @@ def start_engine(ctx: EngineCtx, index: int) -> None:
         # 两个引擎错开 300ms 启动，避免同时抢占音频设备
         ctx.start_job = ctx.root.after(300, lambda: start_engine(ctx, index + 1))
 
+def _players_status_text(phase: str, detail: str) -> tuple[str, str]:
+    """预热器内部 phase → (状态栏级别, 人话)。"""
+    if phase == "recording":
+        return "info", "预热：正在记录玩家名（未开始翻译）"
+    if phase == "capturing":
+        return "info", "预热：已开始抓包，等待密钥/流量"
+    if phase in ("waiting_game",):
+        return "info", "预热：等待 VRChat 进程"
+    if phase in ("unauthorized", "blocked", "failed"):
+        return "warn", f"预热不可用：{detail}"
+    return "info", f"预热：{detail or phase}"
+
+
+def ensure_players_warmup(ctx: EngineCtx) -> Any:
+    """按配置启动/复用预热器（App 级；没有预热需求时什么都不做）。
+
+    检测到 VRChat 进程后由预热器自己弹一次 pkexec（开 socket）+ 扫一次内存取钥，
+    之后持续只解析玩家名；点开始翻译时翻译腿直接借用它的 socket/密钥/名字表。
+    """
+    from .players_settings import MODE_DECRYPT, PREWARM_AUTO, parse_players
+
+    ps = parse_players(getattr(ctx.cfg, "players", None) or {})
+    if ps.mode != MODE_DECRYPT or ps.prewarm != PREWARM_AUTO:
+        # 关掉预热：之前可能已经启动过（设置页刚改的），不能留着 socket 继续跑
+        stop_players_warmup(ctx)
+        return None
+    warmup = getattr(ctx, "players_warmup", None)
+    if warmup is None:
+        from .players.warmup import PlayerWarmup
+
+        def _on_status(phase: str, detail: str) -> None:
+            level, message = _players_status_text(phase, detail)
+            print(f"[warmup][{level}] {message}" + (f"（{detail}）" if detail else ""),
+                  flush=True)
+            # ⚠️ 这个回调来自**预热线程**：Tk 只能在主线程碰 → 一律走界面队列
+            #    （与 `on_engine_status` 同口径），没有队列时才退回直接调用。
+            if getattr(ctx, "q", None) is not None:
+                ctx.q.put(("status", level, message))
+            elif ctx.set_status_fn:
+                ctx.set_status_fn(level, message)
+
+        warmup = PlayerWarmup(ps, on_status=_on_status)
+        ctx.players_warmup = warmup
+        warmup.start()
+    else:
+        warmup.reconfigure(ps)
+    return warmup
+
+
+def stop_players_warmup(ctx: EngineCtx) -> None:
+    warmup = getattr(ctx, "players_warmup", None)
+    if warmup is None:
+        return
+    ctx.players_warmup = None
+    try:
+        warmup.close()
+    except Exception as exc:                        # noqa: BLE001 - 收尾不抛
+        print(f"[warmup] ⚠️ 关闭预热器失败（忽略）：{exc}", flush=True)
+
+
 def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
     """启动分玩家翻译腿（把关卡/限流/名字都在 leg 里处理）。"""
     existing = getattr(ctx, "players_leg", None)
@@ -400,19 +464,10 @@ def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
     dd.source_lang = dd.source_lang or ""
     dd.target_lang = dd.target_lang or (ctx.lang_pair.get("source") or "zh")
     scfg = dd.to_session_config(ctx.cfg.session_base)
-    max_sessions = players_cfg.get("max_sessions", 4)
-    try:
-        max_sessions = max(1, min(8, int(max_sessions)))
-    except (TypeError, ValueError):
-        max_sessions = 3
-    try:
-        gate_db = float(players_cfg.get("gate_db", -55.0))
-    except (TypeError, ValueError):
-        gate_db = -55.0
-    try:
-        gate_hysteresis_db = float(players_cfg.get("gate_hysteresis_db", 6.0))
-    except (TypeError, ValueError):
-        gate_hysteresis_db = 6.0
+    # 默认值/范围校验只有一处：vlt/players/settings.py。界面与这里共用同一份。
+    from .players_settings import parse_players
+
+    ps = parse_players(players_cfg)
 
     leg = PlayerLeg(
         scfg,
@@ -422,12 +477,13 @@ def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
         on_names=lambda fresh: print(
             "[players] 名字：" + "、".join(f"actor{a}={n!r}" for a, _u, n in fresh),
             flush=True),
-        max_sessions=max_sessions,
-        gate_db=gate_db,
-        gate_hysteresis_db=gate_hysteresis_db,
-        pre_seconds=float(players_cfg.get("pre_seconds", 120.0)),
-        distance_mode=str(players_cfg.get("distance_mode") or "off"),
-        max_distance_m=float(players_cfg.get("max_distance_m") or 0.0),
+        warmup=getattr(ctx, "players_warmup", None),
+        max_sessions=ps.max_sessions,
+        gate_db=ps.gate_db,
+        gate_hysteresis_db=ps.gate_hysteresis_db,
+        pre_seconds=ps.pre_seconds,
+        distance_mode=ps.distance_mode,
+        max_distance_m=ps.max_distance_m,
     )
     ctx.players_leg = leg
     leg.start()
@@ -546,6 +602,7 @@ def on_close(ctx: EngineCtx) -> None:
     Tk 事件循环上，界面看起来就是"卡死后闪退"。
     """
     ctx.closing = True
+    stop_players_warmup(ctx)
     # 先取消 poll 循环，防止窗口销毁后 after 回调仍在事件队列里
     if ctx.cancel_poll_fn:
         try:

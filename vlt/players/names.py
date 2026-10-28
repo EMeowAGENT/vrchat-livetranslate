@@ -581,6 +581,13 @@ class NameTable:
         if self._by_actor.pop(actor, None) is not None:
             self.version += 1
 
+    def copy(self) -> "NameTable":
+        """一份独立副本（预热线程与翻译腿各自持有，互不影响）。"""
+        clone = NameTable(dict(self._log_names))
+        clone._by_actor = dict(self._by_actor)
+        clone.version = self.version
+        return clone
+
     def clear(self) -> None:
         """换世界时整表清空：actor 号只对「这个房间的这次加入」有意义。
 

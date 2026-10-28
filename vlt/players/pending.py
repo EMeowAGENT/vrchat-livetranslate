@@ -101,6 +101,16 @@ class PreKeyBuffer:
             out.append(dg)
         return out
 
+    def snapshot_recent(self, since_ts: float) -> list[Datagram]:
+        """返回不早于 `since_ts` 的数据报（**不消费**缓冲，按时间序）。
+
+        预热交接到翻译腿时只回放最近几秒的语音：名字早就解析进表里了，
+        把十几分钟的语音一次性灌进新会话只会制造一大段延迟。
+        """
+        merged = [dg for dg in (*self._prefix, *self._main) if dg.ts >= since_ts]
+        merged.sort(key=lambda dg: dg.ts)
+        return merged
+
     # ------------------------------------------------------------ 诊断
 
     @property

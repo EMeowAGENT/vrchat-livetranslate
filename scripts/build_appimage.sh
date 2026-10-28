@@ -257,6 +257,7 @@ HIDDEN=(
     vlt.players.guard vlt.players.helper vlt.players.key_linux vlt.players.leg
     vlt.players.names vlt.players.opus vlt.players.payload vlt.players.photon
     vlt.players.positions vlt.players.priv_helper vlt.players.procfs vlt.players.router
+    vlt.players.warmup vlt.players_settings
     # 第三方：按需导入 / 运行时加载（音频第三方只在 Windows 侧，见文件头「反向裁剪」）
     miniaudio _miniaudio pythonosc websockets yaml
     PIL PIL.Image PIL.ImageDraw PIL.ImageTk numpy xr

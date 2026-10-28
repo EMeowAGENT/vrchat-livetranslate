@@ -25,7 +25,7 @@ class VoiceCollector:
 
     def __init__(self, report: dict, *, fill_gaps: bool = False,
                  log_names: dict[str, str] | None = None,
-                 pcm_sink=None, positions=None) -> None:
+                 pcm_sink=None, positions=None, initial_names=None) -> None:
         from vlt.players import opus  # 延迟导入
 
         if not opus.available():
@@ -46,7 +46,8 @@ class VoiceCollector:
         self.prefix_offsets: Counter = Counter()   # 消息在 payload 里的起点（0/4/2/8…）
         # 名字：actor → (usr_id, displayName)。记录只在 42/253/255 里广播，
         # 所以中途启动抓包时可能只认识一部分人（会在进度里显示 X/Y）。
-        self.names = names.NameTable(log_names)
+        # 预热期间已经攒好的名字表可以直接注入（独立副本，两边互不影响）
+        self.names = initial_names.copy() if initial_names is not None else names.NameTable(log_names)
         self.name_code_hits: Counter = Counter()   # 42/253/255 各来多少条
         self.name_records = 0                      # 解出多少个 (actor, usr, 名字)
         self.name_with_display = 0
