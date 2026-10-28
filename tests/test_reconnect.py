@@ -286,6 +286,35 @@ def test_is_fatal_server_error_classification() -> None:
     print("  is_fatal_server_error 分类矩阵 OK（致命 4 例 / 非致命 7 例）")
 
 
+def test_is_throttle_error_classification() -> None:
+    """限流类错误要能认出来：它们不是「致命」，但也**不能继续用**。
+
+    分玩家模式最容易撞这一类（账号级新建连接上限），以前只打印一行就接着用，
+    结果是同一个错误刷满日志、连接还占着名额。
+    """
+    from vlt.session.qwen38 import is_fatal_server_error, is_throttle_error
+
+    throttled = [
+        {"error": {"code": "Throttling.RateQuota", "message": "Requests rate limit exceeded"}},
+        {"error": {"code": "429", "message": "Too Many Requests"}},
+        {"error": {"message": "Requests rate limit exceeded, please try again later."}},
+        {"error": {"code": "LimitExceeded", "message": "concurrent session count exceed"}},
+        {"error": {"code": "QuotaExceeded"}},
+        {"code": "THROTTLING", "message": "slow down"},                 # 扁平 payload
+    ]
+    for p in throttled:
+        assert is_throttle_error(p), f"限流信号没判出来：{p}"
+        assert not is_fatal_server_error(p), f"限流不该被判成致命（会跳过错峰）：{p}"
+    not_throttled = [
+        {"type": "response.done"},
+        {"error": {"code": "INVALID_VALUE", "message": "参数错误"}},
+        {"error": {"code": "COMMON_ERROR", "message": "model repeat output happened"}},
+    ]
+    for p in not_throttled:
+        assert not is_throttle_error(p), f"非限流被误判：{p}"
+    print("  is_throttle_error 分类矩阵 OK（限流 6 例 / 非限流 3 例）")
+
+
 def test_fatal_server_error_aborts_session() -> None:
     """★ 收到致命 error → 立刻主动放弃会话（不等 1011）：is_alive=False + fail_reason 留因。"""
     import contextlib
@@ -317,7 +346,7 @@ def test_fatal_server_error_aborts_session() -> None:
                              "error": {"code": "COMMON_ERROR",
                                        "message": "model repeat output happened"}})
         out = buf.getvalue()
-        assert "主动重建会话" in out, f"主动放弃必须留痕：{out!r}"
+        assert "主动重建" in out, f"主动放弃必须留痕：{out!r}"
         assert s.fatal_reason, "fatal_reason 没记下来"
         assert not s.is_alive, "致命 error 后会话必须标记为不健康（看门狗才能接手）"
         assert s.fail_reason == s.fatal_reason, "fail_reason 必须优先返回 fatal_reason"
@@ -348,7 +377,7 @@ def test_abort_on_fatal_works_outside_event_loop() -> None:
     with contextlib.redirect_stdout(buf):
         s._abort_on_fatal("离线直调")                   # 同步上下文：get_running_loop 会抛 RuntimeError
     assert s.fatal_reason == "离线直调" and s._closing
-    assert "主动重建会话" in buf.getvalue()
+    assert "主动重建" in buf.getvalue()
     # fail_reason 优先级：即便接收循环带异常结束，也先报 fatal_reason
     async def _boom() -> None:
         raise ConnectionResetError("1011")
@@ -374,6 +403,7 @@ if __name__ == "__main__":
     test_black_box_dump_on_disconnect()
     test_send_failure_does_not_kill_leg()
     test_is_fatal_server_error_classification()
+    test_is_throttle_error_classification()
     test_fatal_server_error_aborts_session()
     test_abort_on_fatal_works_outside_event_loop()
     print("ALL PASSED")

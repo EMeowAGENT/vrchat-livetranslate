@@ -41,6 +41,14 @@ CLOSE_WAIT_S = 2.0
 FINISH_WAIT_S = 1.0
 
 
+#: 服务端限流类错误的识别标记（见 `is_throttle_error`）。判定偏宽：
+#: 误判只多重连一次（有退避 + 预算兜着），漏判会一直白烧。
+THROTTLE_MARKERS = (
+    "throttl", "ratequota", "rate_quota", "ratelimit", "rate limit",
+    "too many requests", "concurrent", "quota", "exceed", "429",
+)
+
+
 def is_fatal_server_error(payload: dict) -> bool:
     """服务端 `error` 事件是否属于**已判定的致命类**（纯函数，离线可测）。
 
@@ -61,23 +69,65 @@ def is_fatal_server_error(payload: dict) -> bool:
     return code == "COMMON_ERROR"
 
 
-class ConnectionBudget:
-    """RPM 预算：滑动窗口内限制新建连接数（实测 RPM 10 会被快速重连撞掉）。"""
+def is_throttle_error(payload: dict) -> bool:
+    """服务端 `error` 是否属于**限流类**（可重试，但必须带退避）。
 
-    def __init__(self, max_per_minute: int) -> None:
+    实测与文档口径：百炼/Qwen 的实时同传对**账号级**新建连接有频率与并发上限，
+    撞上时返回 `Throttling` / `RateQuota` / `429` / `concurrent ... exceed` 这类
+    错误。这类连接基本已经废了 —— 继续往上送音频只会把同一个错误刷成日志洪水，
+    所以判定出来后走「主动断连 + 退避重建」，而不是只打印一行继续用。
+
+    判定故意**偏宽**：误判的代价只是多重连一次（本就有退避与预算），
+    漏判的代价是限流期间一直白烧。
+    """
+    err = payload.get("error") or payload
+    if not isinstance(err, dict):
+        err = {"message": str(err)}
+    haystack = f"{err.get('message') or ''} {err.get('code') or ''}".lower()
+    return any(marker in haystack for marker in THROTTLE_MARKERS)
+
+
+class ConnectionBudget:
+    """RPM 预算：滑动窗口内限制新建连接数（实测 RPM 10 会被快速重连撞掉）。
+
+    `min_interval_s` 是**相邻两次建连的最小间隔**：只卡条数不够 —— 实测把新连接
+    摊到 6 秒左右一次才稳（VRCS 用 6.1s）。两者都要，因为它们防的是不同的东西：
+    条数防「一分钟内炸十几次」，间隔防「同一秒里连开三条」。
+    """
+
+    def __init__(self, max_per_minute: int, *, min_interval_s: float = 0.0) -> None:
         self.max_per_minute = max(1, max_per_minute)
+        self.min_interval_s = max(0.0, float(min_interval_s))
         self._stamps: deque[float] = deque()
+        #: 排队等过几次 / 真正拿到预算几次（状态栏与诊断用）
+        self.waits = 0
+        self.acquired = 0
 
     async def acquire(self) -> None:
+        announced = False
         while True:
             now = time.monotonic()
             while self._stamps and now - self._stamps[0] > 60.0:
                 self._stamps.popleft()
-            if len(self._stamps) < self.max_per_minute:
+            wait = 0.0
+            reason = ""
+            if len(self._stamps) >= self.max_per_minute:
+                wait = 60.0 - (now - self._stamps[0]) + 0.05
+                reason = f"连接预算已满（{self.max_per_minute} 次/分钟）"
+            elif self.min_interval_s and self._stamps:
+                gap = self.min_interval_s - (now - self._stamps[-1])
+                if gap > 0:
+                    wait = gap
+                    reason = f"相邻建连间隔不足（< {self.min_interval_s:g}s）"
+            if wait <= 0:
                 self._stamps.append(now)
+                self.acquired += 1
                 return
-            wait = 60.0 - (now - self._stamps[0]) + 0.05
-            print(f"[session] 连接预算已满（{self.max_per_minute}/min），等待 {wait:.1f}s")
+            if not announced:
+                # 只打一次：每个 acquire 只等一轮，别把日志刷成洪水
+                announced = True
+                self.waits += 1
+                print(f"[session] {reason}，等待 {wait:.1f}s 再建连", flush=True)
             await asyncio.sleep(wait)
 
 
@@ -368,15 +418,15 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             print(f"[session] 等 session.finished 期间连接断开（{ms:.0f}ms）→ 直接断连", flush=True)
 
     def _abort_on_fatal(self, reason: str) -> None:
-        """服务端判定致命错误 → 主动放弃本会话（不许静默：必须留痕）。
+        """服务端判定本会话不可用 → 主动放弃（不许静默：必须留痕）。
 
         只做三件幂等的事：记原因 → 置 _closing（is_alive=False）→ 关 ws。
         不发 session.finish（服务端已经坏了，发了也是白等超时）；
-        重连交给引擎看门狗的既有路径（带退避 + RPM 预算，不会更凶）。
+        重连交给引擎看门狗 / 分玩家路由器的既有路径（带退避 + RPM 预算，不会更凶）。
         """
         if not self.fatal_reason:
             self.fatal_reason = reason
-            print(f"[session] ⚠️ 服务端判定致命错误 → 主动重建会话（不再干等 1011）：{reason}",
+            print(f"[session] ⚠️ 会话不可用 → 主动重建（不再干等 1011）：{reason}",
                   flush=True)
         self._closing = True
         if self._ws is None:
@@ -445,6 +495,11 @@ class QwenLiveTranslateSession(LiveTranslateSession):
                 # 不如立刻主动断连 —— is_alive=False → 看门狗 0.3s 内走既有重连路径。
                 self._abort_on_fatal(
                     f"服务端致命错误：{json.dumps(ev.get('error') or ev, ensure_ascii=False)[:200]}")
+            elif is_throttle_error(ev):
+                # 限流/并发超限：这条连接已经不可用。继续用只会把同一个错误刷成
+                # 日志洪水，还会一直占着账号名额 → 主动断连，交给带退避的重建。
+                self._abort_on_fatal(
+                    f"服务端限流：{json.dumps(ev.get('error') or ev, ensure_ascii=False)[:200]}")
             return
         if etype == "input_audio_buffer.speech_started":
             self._t_speech_start = time.perf_counter()
