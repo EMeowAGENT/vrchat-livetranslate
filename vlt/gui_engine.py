@@ -426,12 +426,13 @@ def ensure_players_warmup(ctx: EngineCtx) -> Any:
             level, message = _players_status_text(phase, detail)
             print(f"[warmup][{level}] {message}" + (f"（{detail}）" if detail else ""),
                   flush=True)
-            # ⚠️ 这个回调来自**预热线程**：Tk 只能在主线程碰 → 一律走界面队列
-            #    （与 `on_engine_status` 同口径），没有队列时才退回直接调用。
-            if getattr(ctx, "q", None) is not None:
-                ctx.q.put(("status", level, message))
-            elif ctx.set_status_fn:
-                ctx.set_status_fn(level, message)
+            # ⚠️ 这个回调来自**预热线程**：Tk 只能在主线程碰。所以**只走界面队列**，
+            #    绝不在没有队列时退回 `set_status_fn` —— 那会在后台线程里碰 Tk，
+            #    Linux 上直接 segfault（真机踩过：AppImage 启动瞬间崩）。
+            q = getattr(ctx, "q", None)
+            if q is not None:
+                q.put(("status", level, message))
+            # 队列还没接好（极早期）就只留日志，等界面轮询起来后状态页会显示
 
         warmup = PlayerWarmup(ps, on_status=_on_status)
         ctx.players_warmup = warmup

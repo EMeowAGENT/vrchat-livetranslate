@@ -175,6 +175,23 @@ def test_warmup_wiring() -> None:
     finally:
         gui_engine.stop_players_warmup(ctx)
 
+    # 队列没接上时**绝不能**在后台线程调用状态栏回调（Tk 只能主线程碰）——
+    # 真机症状就是 AppImage 启动瞬间 segfault。
+    touched: list[int] = []
+    ctx2 = SimpleNamespace(
+        cfg=SimpleNamespace(players={"mode": "decrypt", "prewarm": "auto"}),
+        players_warmup=None,
+        set_status_fn=lambda *_a: touched.append(1),
+        q=None,
+    )
+    try:
+        gui_engine.ensure_players_warmup(ctx2)
+        import time as _time
+        _time.sleep(0.4)          # 给预热线程一次状态变化的机会
+        check("没有队列时不碰状态栏（防 Tk 跨线程崩溃）", touched == [], str(touched))
+    finally:
+        gui_engine.stop_players_warmup(ctx2)
+
 
 def main() -> int:
     test_defaults()

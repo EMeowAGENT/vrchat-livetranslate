@@ -122,6 +122,8 @@ class TranslationGUI(ProxyMethods):
             # （检测到游戏才弹 pkexec；没开游戏时零开销）。
             self._engine_ctx.cfg = self._cfg
             self._engine_ctx.set_status_fn = self._set_status
+            # 预热线程的状态回调必须走队列（Tk 只能主线程碰）——启动阶段就要把队列接上
+            self._engine_ctx.q = self._q
             gui_engine.ensure_players_warmup(self._engine_ctx)
             # 按钮默认态是 NORMAL，不刷一次的话「无代理」时它看起来还能点
             self._refresh_voice_mode_btn()
