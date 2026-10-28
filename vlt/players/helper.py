@@ -16,7 +16,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import payload as payload_mod, procfs
+from dataclasses import dataclass, field
+
+from . import capture_linux, gcm, payload as payload_mod, procfs
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 HELPER = ROOT / "scripts" / "vlt_priv_helper.py"
@@ -281,3 +283,100 @@ def scan_once(host: procfs.ProcInfo, *, needle: str = "q",
     """起一个短命助手，只做一次「扫内存找候选密钥」；返回助手原始回包。"""
     with HelperSession(host, port=port, lifetime_s=max(60.0, deadline_s + 30.0)) as sess:
         return sess.scan(deadline_s=deadline_s, needle=needle)
+
+
+# ---------------------------------------------------------------- 一次授权做完「抓包 + 取钥」
+#
+# 为什么合并：开抓包与扫内存各起一个助手 = 各弹一次 pkexec（polkit 不保证跨进程缓存），
+# 实测用户就是被连着要了两次密码。这两件事本来能在**同一个**助手进程里做完：
+#   助手开 socket → 把 fd 交回主程序 → 主程序用这个 fd 采 2~6 秒样本 →
+#   同一个助手扫两种 needle → 交回候选 → 助手退出。
+# 全程几秒（仍然「用完即退」），但**整局游戏只弹一次授权**。
+
+SAMPLE_TARGET = 40
+SAMPLE_SECONDS = 6.0
+
+
+class KeyBlocked(RuntimeError):
+    """读内存被拒（EAC v2 等）——再试也没用，调用方要按「不可用」处理。"""
+
+
+@dataclass
+class Bootstrap:
+    """一次 bootstrap 的结果（socket 归调用方所有）。"""
+
+    socket: socket.socket | None = None
+    packets: list = field(default_factory=list)      # 采样期间收到的 Datagram（含名单）
+    samples: list = field(default_factory=list)      # (Flow, payload)，验钥用
+    key: gcm.KeyHit | None = None
+    detail: str = ""
+    blocked: bool = False
+
+
+def collect_samples(sock: socket.socket, *, port: int = 27002,
+                    seconds: float = SAMPLE_SECONDS,
+                    want: int = SAMPLE_TARGET) -> tuple[list, list]:
+    """在已经拿到的抓包 socket 上采一小段样本。返回 (packets, samples)。"""
+    packets: list = []
+    samples: list = []
+    deadline = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < deadline and len(samples) < want:
+        for _ts, raw in capture_linux.drain(sock, timeout=0.2):
+            dg = capture_linux.parse_frame(raw, port=port)
+            if dg is None or not dg.is_encrypted:
+                continue
+            packets.append(dg)
+            if len(samples) < want:
+                samples.append((gcm.Flow.of(dg.src, dg.dst), dg.payload))
+    return packets, samples
+
+
+def scan_key_on(sess: "HelperSession", samples: list, *, needles=("q", "i"),
+                deadline_s: float = 40.0, on_status=None) -> gcm.KeyHit | None:
+    """在**已有**的助手会话里扫两种 needle 并验钥（leg 与 bootstrap 共用）。"""
+    for needle in needles:
+        reply = sess.scan(deadline_s=deadline_s, needle=needle)
+        if not reply.get("ok"):
+            message = str(reply.get("error") or "未知原因")
+            if reply.get("blocked"):
+                raise KeyBlocked(f"读内存被拒绝：{message}")
+            continue
+        candidates = [bytes.fromhex(h) for h in reply.get("candidates", [])]
+        if on_status is not None:
+            try:
+                on_status(needle, reply, len(candidates))
+            except Exception:                            # noqa: BLE001 - 状态回调不影响取钥
+                pass
+        hit = gcm.validate_candidates(candidates, samples)
+        if hit is not None:
+            return hit
+    return None
+
+
+def bootstrap(host: procfs.ProcInfo, *, port: int = 27002,
+              sample_s: float = SAMPLE_SECONDS, want: int = SAMPLE_TARGET,
+              needles=("q", "i"), deadline_s: float = 40.0,
+              on_status=None) -> Bootstrap:
+    """**一次授权**做完：开抓包 → 采样 → 扫内存取钥 → 交回 (socket, 候选)。
+
+    助手在整个过程里只起一次，做完就退；socket 的 fd 已经在本进程里，
+    采样与之后的持续收包都不需要再提权。
+    """
+    lifetime = max(60.0, sample_s + deadline_s * max(1, len(needles)) + 60.0)
+    with HelperSession(host, port=port, lifetime_s=lifetime) as sess:
+        sess.start_capture(filter_mode="strict")
+        sock = sess.packet_socket
+        if sock is None:
+            return Bootstrap(None, detail="助手没有交回抓包 fd")
+        sess.packet_socket = None          # 归调用方；会话退出时不许关
+        packets, samples = collect_samples(sock, port=port, seconds=sample_s, want=want)
+        if len(samples) < 2:
+            return Bootstrap(sock, packets, samples,
+                             detail="还没抓到足够的加密流量（进世界后再试）")
+        try:
+            hit = scan_key_on(sess, samples, needles=needles,
+                              deadline_s=deadline_s, on_status=on_status)
+        except KeyBlocked as exc:
+            return Bootstrap(sock, packets, samples, detail=str(exc), blocked=True)
+        return Bootstrap(sock, packets, samples, key=hit,
+                         detail="" if hit is not None else "没找到能通过 GCM 认证的密钥")

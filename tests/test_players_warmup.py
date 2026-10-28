@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vlt.players import gcm, procfs, warmup  # noqa: E402
+from vlt.players.helper import Bootstrap  # noqa: E402
 from vlt.players_settings import PlayersSettings  # noqa: E402
 
 FAILS: list[str] = []
@@ -149,18 +150,25 @@ class Harness:
         self.frames: list[tuple[float, bytes]] = list(frames or [])
         self.scan_reply = scan_reply or {"ok": True, "candidates": [KEY_A.hex()]}
         self.scan_calls: list[str] = []
+        self.bootstrap_calls = 0
         self.open_calls = 0
         self.drains = 0
         self.sockets: list[_FakeSocket] = []
         self.warmup = warmup.PlayerWarmup(
             PlayersSettings(prewarm="auto"),
             find_host=lambda: self.host,
+            bootstrap=self._bootstrap,
             open_capture=self._open,
             scan=self._scan,
             guard_check=lambda: _Verdict(),
             drain_fn=self._drain,
             poll_s=poll_s,
         )
+
+    def _bootstrap(self, host) -> Bootstrap:   # noqa: ANN001
+        """假 bootstrap：只开 socket、不采样本也不取钥（交给主循环的假扫描）。"""
+        self.bootstrap_calls += 1
+        return Bootstrap(self._open(host), [], [], None, "")
 
     def _open(self, host) -> _FakeSocket:      # noqa: ANN001
         self.open_calls += 1
@@ -239,6 +247,53 @@ def test_pre_key_buffer_replayed() -> None:
         snapshot = h.warmup.names_copy().snapshot()
         check("取钥前的包也被解出名字",
               "补解测试" in {r.display_name for r in snapshot.values()}, str(snapshot))
+    finally:
+        h.warmup.close()
+        gcm._aesgcm = real
+
+
+def test_single_bootstrap() -> None:
+    """检测到进程时只走**一次** bootstrap（不是「开抓包 + 扫描」两个助手）。"""
+    print("[warmup] 一次授权（bootstrap）")
+    h = Harness(host=_host())
+    real = gcm._aesgcm
+    gcm._aesgcm = lambda k: _FakeAead(k)       # noqa: SLF001
+    try:
+        h.feed(_name_frame(7, "x"), _name_frame(8, "y"))
+        h.warmup.start()
+        h.wait_phase(warmup.PHASE_RECORDING)
+        check("bootstrap 只调用一次", h.bootstrap_calls == 1, str(h.bootstrap_calls))
+        check("没有额外的 open_capture", h.open_calls == 1, str(h.open_calls))
+    finally:
+        h.warmup.close()
+        gcm._aesgcm = real
+
+
+def test_lease_status_bridge() -> None:
+    """借用期间：状态页用翻译腿的实时计数；归还时把名字交还预热器。"""
+    print("[warmup] 借用期间的状态桥接")
+    h = Harness(host=_host())
+    real = gcm._aesgcm
+    gcm._aesgcm = lambda k: _FakeAead(k)       # noqa: SLF001
+    try:
+        h.feed(_name_frame(7, "预热名字"), _name_frame(8, "第二"))
+        h.warmup.start()
+        h.wait_phase(warmup.PHASE_RECORDING)
+        lease = h.warmup.lease()
+        check("拿到租借", lease is not None)
+        lease.bind_status(lambda: {"players": 9, "name_events": 42, "decrypted": 100})
+        status = h.warmup.status()
+        check("状态用腿的实时计数",
+              status["players"] == 9 and status["name_events"] == 42,
+              str(status))
+        # 归还时交还名字表（模拟翻译腿攒到 3 人）
+        table = h.warmup.names_copy()
+        table.feed(_name_message(9, "腿里的名字", code=42), code=42)
+        lease.adopt(table)
+        lease.release()
+        check("归还后名字表保留腿里的记录",
+              "腿里的名字" in {r.display_name for r in h.warmup.names_copy().snapshot().values()},
+              str(h.warmup.names_copy().snapshot()))
     finally:
         h.warmup.close()
         gcm._aesgcm = real
@@ -352,6 +407,8 @@ def main() -> int:
         return 0
     test_names_only()
     test_pre_key_buffer_replayed()
+    test_single_bootstrap()
+    test_lease_status_bridge()
     test_lease_pauses_reader()
     test_key_rotation_rescan()
     test_host_change()

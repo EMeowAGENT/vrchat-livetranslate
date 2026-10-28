@@ -32,7 +32,7 @@ from pathlib import Path
 from ..session.base import SessionConfig
 from . import capture_linux, gcm, guard, names, procfs, world
 from .collector import VoiceCollector
-from .helper import HelperSession
+from .helper import HelperSession, KeyBlocked, scan_key_on
 from .pending import PreKeyBuffer
 from .positions import PositionTable, format_distance
 from .router import PlayerRouter
@@ -73,26 +73,23 @@ class _HelperCapture:
     def recent_cipher(self):
         return None
 
+    def bind_status(self, _provider) -> None:
+        return None
+
+    def adopt_names(self, _table) -> None:
+        return None
+
     def acquire_key(self, samples):
-        leg = self._leg
-        for needle in ("q", "i"):
-            try:
-                reply = self._sess.scan(deadline_s=40.0, needle=needle)
-            except Exception as exc:                     # noqa: BLE001 - 原样回给调用方
-                raise _KeyUnavailable(f"扫描失败：{exc}") from exc
-            if not reply.get("ok"):
-                message = str(reply.get("error") or "未知原因")
-                if reply.get("blocked"):
-                    raise _KeyUnavailable(f"读内存被拒绝：{message}", fatal=True)
-                raise _KeyUnavailable(message)
-            candidates = [bytes.fromhex(h) for h in reply.get("candidates", [])]
-            leg.on_status("info", f"扫内存（needle={needle}）："
-                                  f"{reply['scanned_bytes'] / 2**30:.1f} GiB，"
-                                  f"候选 {len(candidates)}")
-            hit = gcm.validate_candidates(candidates, samples)
-            if hit is not None:
-                return hit
-        raise _KeyUnavailable("没找到能通过 GCM 认证的密钥")
+        # needle 扫描只有一份实现（`helper.scan_key_on`）：预热、leg、探针共用
+        try:
+            hit = scan_key_on(self._sess, samples, on_status=self._leg._scan_status)
+        except KeyBlocked as exc:
+            raise _KeyUnavailable(str(exc), fatal=True) from exc
+        except Exception as exc:                         # noqa: BLE001 - 原样回给调用方
+            raise _KeyUnavailable(f"扫描失败：{exc}") from exc
+        if hit is None:
+            raise _KeyUnavailable("没找到能通过 GCM 认证的密钥")
+        return hit
 
 
 class _WarmupCapture:
@@ -114,6 +111,12 @@ class _WarmupCapture:
 
     def recent_cipher(self):
         return self._lease.recent_cipher()
+
+    def bind_status(self, provider) -> None:
+        self._lease.bind_status(provider)
+
+    def adopt_names(self, table) -> None:
+        self._lease.adopt(table)
 
     def acquire_key(self, samples):
         hit = self._lease.ensure_key(samples)
@@ -406,6 +409,10 @@ class PlayerLeg:
                                    positions=self.positions,
                                    initial_names=cap.initial_names())
         self._collector = collector
+        # 翻译期间预热线程暂停读包 → 它的计数会冻结；状态页改看这条腿的实时计数
+        cap.bind_status(lambda: {"players": len(collector.names),
+                                 "name_events": collector.name_events,
+                                 "decrypted": collector.decrypted})
         # ① 回放：预热期间的名字早已在表里；语音只补最近几秒（避免一次灌十几分钟）。
         #    取钥期间自己攒的包（pre_key）按时间序补一遍。
         buffered = pre_key.summary()
@@ -420,59 +427,69 @@ class PlayerLeg:
                 f"名字事件 {collector.name_events}，语音消息 "
                 f"{sum(collector.audio_hits.values())}")
 
-        loop = self._loop
-        next_stat = time.monotonic() + 10.0
-        next_ports = time.monotonic() + ENDPOINT_REFRESH_S
-        while not self._stop.is_set():
-            for _ts, raw in cap.drain(0.2):
-                dg = capture_linux.parse_frame(raw, port=self.port,
-                                               local_ports=local_ports)
-                if dg is None:
-                    continue
-                self._ingest(collector, dg, hit)
-            if loop is None:
-                break
-            # 端点表跟着重连走：VRChat 换本地端口后，方向判定不能还认旧的。
-            now = time.monotonic()
-            if now >= next_ports:
-                next_ports = now + ENDPOINT_REFRESH_S
-                fresh = procfs.udp_ports(host.pid) or None
-                if fresh and fresh != local_ports:
-                    local_ports = fresh
-                    self.on_status("info", f"游戏 UDP 端点更新：{sorted(fresh)}")
-            # 每 10 秒报一次"到底有没有在解出语音/建会话" —— 这一条能直接区分
-            # 「没人说话」「门限挡住了」「会话没建起来」三种情况。
-            if time.monotonic() >= next_stat:
-                next_stat = time.monotonic() + 10.0
-                stats = self.router.stats() if self.router is not None else {}
-                known = len(collector.names)
-                self.on_status(
-                    "info",
-                    f"解码：音频消息 {sum(collector.audio_hits.values())}，"
-                    f"帧 {sum(collector.frames.values())}，"
-                    f"丢弃 {stats.get('gated_blocks', 0) + stats.get('distance_dropped', 0)}"
-                    f"，会话 {stats.get('sessions', 0)}/{stats.get('max_sessions', 0)}"
-                    f"（建连 {stats.get('sessions_created', 0)}"
-                    f" / 失败 {stats.get('create_failures', 0)}"
-                    f" / 预算排队 {stats.get('budget_waits', 0)}"
-                    f" / 排队 {stats.get('queued', 0)}"
-                    f" / 溢出丢弃 {stats.get('overflow_dropped', 0)}），"
-                    f"已发块 {stats.get('sent_chunks', 0)}，"
-                    f"文本 {stats.get('text_events', 0)}，名字 {known}，"
-                    f"换世界 {collector.world_changes}，"
-                    f"名字事件 {collector.name_events}"
-                    f"({dict(collector.name_code_hits)})，"
-                    f"分片 {sum(f.completed for f in collector.fragmenters.values())}/"
-                    f"丢 {sum(f.dropped + f.rejected for f in collector.fragmenters.values())}")
-                # 一个名字都没有 = 启动太晚（记录只在加入/属性变更时广播）。
-                if known == 0 and not self._warned_names:
-                    self._warned_names = True
+        try:
+            loop = self._loop
+            next_stat = time.monotonic() + 10.0
+            next_ports = time.monotonic() + ENDPOINT_REFRESH_S
+            while not self._stop.is_set():
+                for _ts, raw in cap.drain(0.2):
+                    dg = capture_linux.parse_frame(raw, port=self.port,
+                                                   local_ports=local_ports)
+                    if dg is None:
+                        continue
+                    self._ingest(collector, dg, hit)
+                if loop is None:
+                    break
+                # 端点表跟着重连走：VRChat 换本地端口后，方向判定不能还认旧的。
+                now = time.monotonic()
+                if now >= next_ports:
+                    next_ports = now + ENDPOINT_REFRESH_S
+                    fresh = procfs.udp_ports(host.pid) or None
+                    if fresh and fresh != local_ports:
+                        local_ports = fresh
+                        self.on_status("info", f"游戏 UDP 端点更新：{sorted(fresh)}")
+                # 每 10 秒报一次"到底有没有在解出语音/建会话" —— 这一条能直接区分
+                # 「没人说话」「门限挡住了」「会话没建起来」三种情况。
+                if time.monotonic() >= next_stat:
+                    next_stat = time.monotonic() + 10.0
+                    stats = self.router.stats() if self.router is not None else {}
+                    known = len(collector.names)
                     self.on_status(
-                        "warn",
-                        "还没拿到任何玩家名：玩家记录只在「加入 / 属性变更」时广播。"
-                        "保持本工具运行，**离开并重新进入世界**（或换世界再回来）即可拿到全员名字")
-                elif known > 0:
-                    self._warned_names = True
+                        "info",
+                        f"解码：音频消息 {sum(collector.audio_hits.values())}，"
+                        f"帧 {sum(collector.frames.values())}，"
+                        f"丢弃 {stats.get('gated_blocks', 0) + stats.get('distance_dropped', 0)}"
+                        f"，会话 {stats.get('sessions', 0)}/{stats.get('max_sessions', 0)}"
+                        f"（建连 {stats.get('sessions_created', 0)}"
+                        f" / 失败 {stats.get('create_failures', 0)}"
+                        f" / 预算排队 {stats.get('budget_waits', 0)}"
+                        f" / 排队 {stats.get('queued', 0)}"
+                        f" / 溢出丢弃 {stats.get('overflow_dropped', 0)}），"
+                        f"已发块 {stats.get('sent_chunks', 0)}，"
+                        f"文本 {stats.get('text_events', 0)}，名字 {known}，"
+                        f"换世界 {collector.world_changes}，"
+                        f"名字事件 {collector.name_events}"
+                        f"({dict(collector.name_code_hits)})，"
+                        f"分片 {sum(f.completed for f in collector.fragmenters.values())}/"
+                        f"丢 {sum(f.dropped + f.rejected for f in collector.fragmenters.values())}")
+                    # 一个名字都没有 = 启动太晚（记录只在加入/属性变更时广播）。
+                    if known == 0 and not self._warned_names:
+                        self._warned_names = True
+                        self.on_status(
+                            "warn",
+                            "还没拿到任何玩家名：玩家记录只在「加入 / 属性变更」时广播。"
+                            "保持本工具运行，**离开并重新进入世界**（或换世界再回来）即可拿到全员名字")
+                    elif known > 0:
+                        self._warned_names = True
+
+        finally:
+            # 停止翻译/异常退出：把名字表交还预热器，状态页才不会突然变成 0 人
+            cap.adopt_names(collector.names)
+
+    def _scan_status(self, needle: str, reply: dict, candidates: int) -> None:
+        self.on_status("info", f"扫内存（needle={needle}）："
+                               f"{reply['scanned_bytes'] / 2**30:.1f} GiB，"
+                               f"候选 {candidates}")
 
     def _ingest(self, collector: VoiceCollector, dg: capture_linux.Datagram, hit) -> None:
         """喂一个数据报给采集器；名字表变了才推给界面。

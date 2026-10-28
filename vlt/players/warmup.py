@@ -82,6 +82,14 @@ class WarmupLease:
     def recent_cipher(self, seconds: float = VOICE_REPLAY_S) -> list[capture_linux.Datagram]:
         return self._warmup.recent_cipher(seconds)
 
+    def bind_status(self, provider) -> None:
+        """翻译腿接管后，状态页用**腿的实时计数**（预热自己的计数会冻结）。"""
+        self._warmup.bind_leased_status(provider)
+
+    def adopt(self, table: names.NameTable) -> None:
+        """停止翻译时把腿的名字表交还预热器（否则状态页会显示成 0 人）。"""
+        self._warmup.adopt_names(table)
+
     def release(self) -> None:
         self._warmup.release()
 
@@ -92,6 +100,7 @@ class PlayerWarmup:
     def __init__(self, settings: PlayersSettings, *, port: int = 27002,
                  on_status: Callable[[str, str], None] | None = None,
                  find_host: Callable[[], procfs.ProcInfo | None] | None = None,
+                 bootstrap: Callable[[procfs.ProcInfo], object] | None = None,
                  open_capture: Callable[[procfs.ProcInfo], object] | None = None,
                  scan: Callable[[procfs.ProcInfo, str], dict] | None = None,
                  guard_check: Callable[[], object] | None = None,
@@ -101,6 +110,8 @@ class PlayerWarmup:
         self._port = port
         self._on_status = on_status or (lambda *_a: None)
         self._find_host = find_host or (lambda: procfs.pick_host(procfs.find_vrchat()))
+        self._bootstrap = bootstrap or self._default_bootstrap
+        # 下面两个只用于「密钥失效后的重扫」（那时 socket 已经在本进程里）
         self._open_capture = open_capture or self._default_open
         self._scan = scan or self._default_scan
         self._guard = guard_check or (lambda: guard.assess(guard.collect()))
@@ -138,6 +149,8 @@ class PlayerWarmup:
 
         self._phase = PHASE_OFF
         self._detail = ""
+        # 翻译腿借用期间由它提供实时计数（预热线程此时暂停读包，自己的计数会冻结）
+        self._leased_status = None
         # 统计（状态页/日志用；名字本身不打印）
         self.name_events = 0
         self.packets = 0
@@ -206,13 +219,26 @@ class PlayerWarmup:
             return self._names.copy()
 
     def status(self) -> dict:
+        players = len(self._names)
+        name_events = self.name_events
+        decrypted = self.decrypted
+        # 借出期间：用翻译腿的实时计数（否则状态页会停在「借用前的数字」）
+        provider = self._leased_status
+        if provider is not None:
+            try:
+                live = provider() or {}
+            except Exception:                       # noqa: BLE001 - 状态查询不该影响抓包
+                live = {}
+            players = int(live.get("players", players))
+            name_events = int(live.get("name_events", name_events))
+            decrypted = int(live.get("decrypted", decrypted))
         return {
             "phase": self._phase,
             "detail": self._detail,
-            "players": len(self._names),
-            "name_events": self.name_events,
+            "players": players,
+            "name_events": name_events,
             "packets": self.packets,
-            "decrypted": self.decrypted,
+            "decrypted": decrypted,
             "rescans": self.rescans,
             "key": self._key.fingerprint if self._key else "",
             "host_pid": self._host.pid if self._host else 0,
@@ -230,6 +256,15 @@ class PlayerWarmup:
     def release(self) -> None:
         with self._lock:
             self._leased = False
+
+    def bind_leased_status(self, provider) -> None:
+        self._leased_status = provider
+
+    def adopt_names(self, table: names.NameTable) -> None:
+        if table is None:
+            return
+        with self._names_lock:
+            self._names = table.copy()
 
     def drain(self, timeout: float = 0.2) -> list[tuple[float, bytes]]:
         with self._lock:
@@ -365,16 +400,35 @@ class PlayerWarmup:
             reasons = "；".join(getattr(verdict, "reasons", []) or [])
             self._set_phase(PHASE_BLOCKED, f"EAC 闸门拒绝：{reasons}")
             return
+        # **一次授权**做完：开抓包 + 采样 + 扫内存（同一个短命助手）。
+        # 以前是「开抓包一个助手 + 扫内存一个助手」→ 用户被连着要两次密码。
         try:
-            sock = self._open_capture(host)
+            result = self._bootstrap(host)
         except Exception as exc:                          # noqa: BLE001
             self._auth_failed = True
-            self._set_phase(PHASE_UNAUTHORIZED, f"开抓包被拒：{exc}")
+            self._set_phase(PHASE_UNAUTHORIZED, f"授权失败：{exc}")
             return
         with self._lock:
-            self._socket = sock
+            self._socket = result.socket
+        if result.socket is None:
+            self._auth_failed = True
+            self._set_phase(PHASE_UNAUTHORIZED, result.detail or "没有拿到抓包 fd")
+            return
         self._auth_failed = False
-        self._set_phase(PHASE_CAPTURING, "已开始抓包，等待加密流量…")
+        self._samples = list(getattr(result, "samples", []) or [])[:SAMPLE_TARGET]
+        # bootstrap 采到的包要留着：里面就有加入世界的名单（装好密钥后补解）
+        for dg in getattr(result, "packets", []) or []:
+            self._buffer.add(dg)
+            if len(self._pre_key) < 4096:
+                self._pre_key.append(dg)
+        key = getattr(result, "key", None)
+        if key is not None:
+            self._install_key(key)
+        elif getattr(result, "blocked", False):
+            self._set_phase(PHASE_FAILED, result.detail or "读内存被拒绝")
+        else:
+            self._set_phase(PHASE_CAPTURING,
+                            result.detail or "已开始抓包，等待加密流量…")
 
     def _drop_capture(self) -> None:
         with self._lock:
@@ -477,6 +531,10 @@ class PlayerWarmup:
             pass
 
     # ------------------------------------------------------------ 默认实现
+
+    def _default_bootstrap(self, host: procfs.ProcInfo):
+        from . import helper
+        return helper.bootstrap(host, port=self._port)
 
     def _default_open(self, host: procfs.ProcInfo):
         from . import helper
