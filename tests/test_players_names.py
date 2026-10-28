@@ -119,6 +119,92 @@ def test_dict_records() -> None:
     check("actor 1476 的名字", recs.get(1476) == "燃え尽きない星", str(recs))
 
 
+def _typed_map(pairs: list[tuple[str, bytes]]) -> bytes:
+    """map 的**值**：`<count>` + 每项 `07 <len> key` + 已编码的 value（不含 0x15）。"""
+    out = bytes([len(pairs)])
+    for key, value in pairs:
+        raw = key.encode()
+        out += b"\x07" + bytes([len(raw)]) + raw + value
+    return out
+
+
+def _typed_string(value: str) -> bytes:
+    raw = value.encode()
+    length = b""
+    left = len(raw)
+    while True:
+        byte = left & 0x7F
+        left >>= 7
+        length += bytes([byte | (0x80 if left else 0)])
+        if not left:
+            break
+    return b"\x07" + length + raw
+
+
+def test_real_2026_layout() -> None:
+    """2026-10 真机日志里的形状（旧实现全部 `记录=0`）。
+
+    日志头部：`f3 04 2a 02 f5 15 0d 07 0e "showSocialRank" 1c ...`
+    —— 属性表是 `0x15`(map)，值是 `0x1c`(无负载) / `0x0d`(short) 等类型，
+    而且 `displayName` 可能出现在 `id` **之前**。这里把两种都钉住。
+    """
+    print("[names] 2026-10 真机布局（结构化解析）")
+    usr = _usr(7).decode()
+    name = "伤感身法绝活哥"
+    user_map = _typed_map([
+        ("displayName", _typed_string(name)),      # 先 displayName
+        ("id", _typed_string(usr)),                # 后 id
+    ])
+    props = _typed_map([
+        ("showSocialRank", b"\x1c"),               # 无负载类型
+        ("avatarEyeHeight", b"\x0d\x4c\x05"),      # short
+        ("user", b"\x15" + user_map),
+    ])
+    p42 = (b"\xf3\x04\x2a\x02" + b"\xf5\x15" + props
+           + b"\xfe\x0d" + (1527).to_bytes(2, "little"))
+    parsed, diag = names.parse_records_ex(p42)
+    check("Event 42 结构化解析成功", len(parsed) == 1 and parsed[0].actor == 1527,
+          str(parsed))
+    check("字段顺序无关（displayName 在前）",
+          bool(parsed) and parsed[0].display_name == name,
+          parsed[0].display_name if parsed else "?")
+    check("usr id 严格校验通过",
+          bool(parsed) and parsed[0].user_id == usr, str(parsed))
+    check("诊断里带字段名序列（不含值）",
+          diag.get("fields") == ["showSocialRank", "avatarEyeHeight", "user"],
+          str(diag.get("fields")))
+    check("标记为结构化解析（不是兜底）",
+          diag.get("typed") is True and diag.get("fallback") is None, str(diag))
+
+    # 255：`fc 49 00`（空数组）+ `fe 0b`（byte 类型 actor）+ `f9 15`
+    p255 = (b"\xf3\x04\xff\x03" + b"\xfc\x49\x00" + b"\xfe\x0b" + bytes([27])
+            + b"\xf9\x15" + props)
+    recs255, _ = names.parse_records_ex(p255)
+    check("Event 255 的 byte 类型 actor 也能解",
+          len(recs255) == 1 and recs255[0].actor == 27, str(recs255))
+    check("Event 255 的名字正确",
+          bool(recs255) and recs255[0].display_name == name, str(recs255))
+
+    # 253：`{actor: props}` 字典（类型 0x15 + 数字 key）
+    entry = (b"\x0d" + (1509).to_bytes(2, "little")
+             + b"\x15" + _typed_map([("user", b"\x15" + user_map)]))
+    p253 = (b"\xf3\x04\xfd\x02" + b"\xfb\x15" + bytes([1]) + entry
+            + b"\xfe\x0d" + (1509).to_bytes(2, "little"))
+    recs253, _ = names.parse_records_ex(p253)
+    check("Event 253 的 actor→属性 字典解出记录",
+          len(recs253) == 1 and recs253[0].actor == 1509, str(recs253))
+
+    # 离开：`fe 0b`（byte）而不是 `fe 0d`
+    p254 = b"\xf3\x04\xfe\x01" + b"\xfe\x0b" + bytes([27])
+    check("离开事件按类型解出 actor", names.parse_leave(p254) == 27,
+          str(names.parse_leave(p254)))
+
+    # 畸形/截断不许抛，且要退回启发式或空
+    for payload in (p42, p255, p253):
+        for cut in range(len(payload)):
+            names.parse_records(payload[:cut])
+
+
 def test_name_table() -> None:
     print("[names] NameTable：更新 / 离开 / 回落")
     table = names.NameTable()
@@ -192,6 +278,7 @@ def test_output_log_and_filename() -> None:
 
 def main() -> int:
     test_parse_records()
+    test_real_2026_layout()
     test_dict_records()
     test_name_table()
     test_output_log_and_filename()

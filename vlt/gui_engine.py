@@ -400,7 +400,7 @@ def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
     dd.source_lang = dd.source_lang or ""
     dd.target_lang = dd.target_lang or (ctx.lang_pair.get("source") or "zh")
     scfg = dd.to_session_config(ctx.cfg.session_base)
-    max_sessions = players_cfg.get("max_sessions", 3)
+    max_sessions = players_cfg.get("max_sessions", 4)
     try:
         max_sessions = max(1, min(8, int(max_sessions)))
     except (TypeError, ValueError):

@@ -5,16 +5,35 @@
 云端实时同传是**单路音频**模型：把两个玩家的声音混着喂进去，它只会吐出一段
 混杂的译文，谁也认不出是谁。要「按人出字幕」，只能一人一条会话。
 
-## 这条路由解决的四个现实问题
+## 这条路由解决的五个现实问题
 
 1. **RPM 是账号级的**（实测 ~10 次/分钟），N 条腿必须**共享**一个
-   `ConnectionBudget`，否则第三个人一开口就会撞限流；
+   `ConnectionBudget`；新建连接还要摊到 ≥6.1s 一次才稳；
 2. **说话是稀疏的**：某人在整场里可能只讲 5 秒。所以会话**按需创建**，并限制
-   同时活跃的数量（默认 3），超出时踢掉最久没说话的（LRU）；
-3. **静音块不该上送**：opus 解码出来会有整段 0（VAD 停顿），按峰值门限挡掉，
+   同时活跃的数量（默认 4），超出时只回收**真的空闲**的人；
+3. **建连必须串行**：一次只说一句话的房间里，6 个人同时开口会想建 6 条连接，
+   而账号一分钟只允许 ~10 条。串行 + 愿望清单把「谁先建」变成时间问题，
+   而不是「谁的协程先跑到」（否则就是实测过的建连风暴 + 互相踢）；
+4. **静音块不该上送**：opus 解码出来会有整段 0（VAD 停顿），按 RMS 门限挡掉，
    省带宽也省计费；
-4. **增量要节流**：每条会话自己一个 `Merger`（首条立即、之后 2s 快照、句末必发），
+5. **增量要节流**：每条会话自己一个 `Merger`（首条立即、之后 2s 快照、句末必发），
    与主线的节流口径一致。
+
+## 名额策略（2026-10 真机日志逼出来的）
+
+实测事故：6 个人同时说话、`max_sessions=3` 时，每个新开口的人都要建会话，而建连
+要排队 6 秒；排队期间「正在建」也被算成占名额，于是**唯一一条真实会话**被反复踢掉
+（日志：`会话 0（建连 21 / 预算排队 22）`，90% 语音被丢，10 分钟只出 8 条字幕）。
+
+现在：
+
+* 名额**只算真实会话**，排队中的建连不占名额；
+* 只有「有空位」或「存在 >15s 没音频的空闲会话」才建；全都还在说话就**不踢人**，
+  新人的音频丢弃并按 30s 频率警告（`overflow_dropped`）——宁可不翻译一个人，
+  也不要把正在说话的三个人一起打断；
+* 愿望清单按最近说话时间排序，3s 没再说话自动作废；拿到预算后**二次确认**
+  他还在说，否则放弃这次建连（不白烧一次连接）；
+* 排队期间保留最近 **2 秒**音频，会话一就绪立刻补发（句首不丢）。
 
 ## 线程/事件循环
 
@@ -25,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 from ..audio_gate import LevelGate
@@ -41,15 +60,48 @@ from ..session.qwen38 import ConnectionBudget
 DEFAULT_GATE_DB = -55.0
 DEFAULT_HOLD_MS = 500.0          # 越阈值后回落仍继续送（句中的停顿不切碎）
 DEFAULT_PREROLL_MS = 250         # 开闸补发阈值之前的一小段（句首辅音不丢）
-IDLE_CLOSE_S = 180.0             # 这么久没说话就回收（省连接数）
+#: 这么多秒没音频才算「空闲、可以回收」。低于它一律算「正在说话」，绝不踢。
+HOT_SILENCE_S = 15.0
+#: 这么久没说话就回收会话。**必须小于服务端的 60s 响应流超时** ——
+#: 实测保留 180s 时，玩家静下来一分钟就会收到
+#: `Response stream timeout (timeout_seconds=60)`，等于白报一次错 + 白重建一次。
+IDLE_CLOSE_S = 45.0
 TICK_S = 0.3
 CLOSE_TIMEOUT_S = 5.0            # 关一条会话的上限（关不掉就放弃，别拖住 tick）
+#: 排队等建连时保留多少块音频（20ms/块 → 100 块 = 2s，句首不丢）
+PREROLL_BLOCKS = 100
+#: 愿望有效期：这么久没再说话就不再为他排队
+WANT_TTL_S = 3.0
+#: 同一玩家「名额满、暂不翻译」的警告间隔（不然每块 20ms 都要报一次）
+OVERFLOW_WARN_S = 30.0
+#: 距离排序时的滞回：新来的必须比被踢的近这么多米才值得换人（防来回抖动）
+DISTANCE_HYSTERESIS_M = 1.0
 #: 账号级建连预算：实测 ~10 次/分钟会被服务端撞掉，9 留一点余量；
 #: 再加「相邻 ≥6.1s」（VRCS 实测口径），防同一秒里连开三条。
 PLAYER_SESSIONS_PER_MINUTE = 9
 PLAYER_MIN_INTERVAL_S = 6.1
 #: 建会话失败的退避阶梯（同 VRCS：5/10/15，最后封顶 30s）
 RETRY_BACKOFF_S = (5.0, 10.0, 15.0, 30.0)
+#: 同时最多几条活跃会话（config `players.max_sessions` 覆盖）
+DEFAULT_MAX_SESSIONS = 4
+
+
+class _GrantedBudget:
+    """已经付过预算的占位对象。
+
+    `QwenLiveTranslateSession.start()` 里会 `await budget.acquire()`。本路由器
+    自己先 acquire 过一次（为了在等预算的 6 秒里还能二次确认「他还在说话」），
+    所以传给会话的必须是一个**不再计费**的对象。
+    """
+
+    waits = 0
+    acquired = 0
+
+    async def acquire(self) -> None:
+        return
+
+
+_GRANTED = _GrantedBudget()
 
 
 @dataclass
@@ -67,7 +119,8 @@ class PlayerSession:
 class PlayerRouter:
     """actor → 会话。对外只暴露 `feed()` 与两个回调。"""
 
-    def __init__(self, cfg: SessionConfig, *, max_sessions: int = 3,
+    def __init__(self, cfg: SessionConfig, *,
+                 max_sessions: int = DEFAULT_MAX_SESSIONS,
                  gate_db: float = DEFAULT_GATE_DB,
                  hold_ms: float = DEFAULT_HOLD_MS,
                  preroll_ms: int = DEFAULT_PREROLL_MS,
@@ -101,53 +154,64 @@ class PlayerRouter:
         if "gate" in self.distance_mode and self.max_distance_m <= 0:
             self.on_status("warn", "距离门限模式但没有配 max_distance_m → 门限不生效")
             self.distance_mode = self.distance_mode.replace("gate", "").strip() or "off"
+
         self.sessions: "OrderedDict[int, PlayerSession]" = OrderedDict()
-        # 正在建连的 actor → 那个建连任务。**同一个 actor 同时只许有一个在飞** ——
-        # 这是修「每 20ms 一块、每块都建一条会话」的根本：
-        # feed() 是每块一个独立协程，而 sessions[actor] 要等 start() 握手完才登记，
-        # 中间那 0.3~3 秒里每一块都会各自建一条，把 RPM 预算吃光并留下泄漏连接。
-        self._starting: dict[int, "asyncio.Task[PlayerSession | None]"] = {}
+        # 愿望清单：actor → 最近一次「有音频但还没有会话」的时刻（monotonic）。
+        # 建连是串行的，所以「谁先建」由这个时间排序决定，而不是谁先抢到协程。
+        self._wanted: "OrderedDict[int, float]" = OrderedDict()
+        # 排队期间的音频（每人最近 2s）：会话一就绪立刻补发，句首不丢。
+        self._pre: dict[int, deque[bytes]] = {}
         # 失败退避：actor → 最早可以再试的时刻 / 连续失败次数
         self._retry_at: dict[int, float] = {}
         self._attempts: dict[int, int] = {}
+        # 「名额满、暂不翻译」的限频警告时刻
+        self._overflow_warned: dict[int, float] = {}
+        self._wake: asyncio.Event | None = None
+        self._creator: asyncio.Task | None = None
         self._ticker: asyncio.Task | None = None
+        self._busy = False
         self._closed = False
         self.dropped_chunks = 0
         self.sent_chunks = 0
         self.text_events = 0
         self.distance_dropped = 0
-        # 诊断：建连次数 / 失败次数 / 预算排队次数（状态栏与 stats 用）
+        # 诊断：建连次数 / 失败次数 / 溢出丢弃块数（状态栏与 stats 用）
         self.sessions_created = 0
         self.create_failures = 0
+        self.overflow_dropped = 0
 
     # ------------------------------------------------------------ 生命周期
 
     async def start(self) -> None:
+        if self._wake is None:
+            self._wake = asyncio.Event()
         if self._ticker is None:
             self._ticker = asyncio.create_task(self._tick_loop(), name="vlt-players-tick")
+        if self._creator is None:
+            self._creator = asyncio.create_task(self._creator_loop(),
+                                                name="vlt-players-create")
 
     async def close(self) -> None:
         self._closed = True
-        if self._ticker is not None:
-            self._ticker.cancel()
+        for task in (self._ticker, self._creator):
+            if task is not None:
+                task.cancel()
+        for task in (self._ticker, self._creator):
+            if task is None:
+                continue
             try:
-                await self._ticker
+                await task
             except (asyncio.CancelledError, Exception):   # noqa: BLE001 - 收尾不抛
                 pass
-            self._ticker = None
-        # 取消在飞的建连：否则「停止翻译」后还会有一条连接在后台悄悄建起来
-        pending = list(self._starting.values())
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._starting.clear()
+        self._ticker = self._creator = None
         for st in list(self.sessions.values()):
             try:
                 await asyncio.wait_for(st.session.close(), timeout=CLOSE_TIMEOUT_S)
             except Exception:                            # noqa: BLE001
                 pass
         self.sessions.clear()
+        self._wanted.clear()
+        self._pre.clear()
 
     # ------------------------------------------------------------ 主入口
 
@@ -167,26 +231,18 @@ class PlayerRouter:
         st = self.sessions.get(actor)
         if st is not None:
             self.sessions.move_to_end(actor)
-        else:
-            # 建连中 / 退避中：这一块**直接丢**，不排队等网络。
-            # （排队等会让「说第一句」卡在预算窗口里几十秒，还会堆出成千上万个等待协程。）
-            if actor in self._starting or time.monotonic() < self._retry_at.get(actor, 0.0):
-                self.dropped_chunks += len(blocks)
-                return
-            st = await self._ensure(actor)
-            if st is None:
-                return
-        st.last_audio = time.monotonic()
-        try:
-            for block in blocks:
-                await st.session.send_audio(block)
-                self.sent_chunks += 1
-        except Exception as exc:                         # noqa: BLE001
-            st.failures += 1
-            self.on_status("warn", f"玩家 {self.label_of(actor)} 送音频失败：{exc}")
-            if st.failures >= 3:
-                await self._drop(actor, reason="连续发送失败")
-                self._schedule_retry(actor, "连续发送失败")
+            await self._send(actor, st, blocks)
+            return
+        now = time.monotonic()
+        if now < self._retry_at.get(actor, 0.0):
+            # 退避中：直接丢，别排队（否则又是 20ms 一个等待协程）
+            self.dropped_chunks += len(blocks)
+            return
+        # 没有会话：登记愿望 + 缓冲最近 2s（句首不丢），交给建连循环
+        self._wanted[actor] = now
+        self._wanted.move_to_end(actor)
+        self._buffer(actor, blocks)
+        self._kick()
 
     def _gate_for(self, actor: int) -> LevelGate:
         gate = self._gates.get(actor)
@@ -196,41 +252,88 @@ class PlayerRouter:
             self._gates[actor] = gate
         return gate
 
-    # ------------------------------------------------------------ 会话管理
+    def _buffer(self, actor: int, blocks: list[bytes]) -> None:
+        pre = self._pre.get(actor)
+        if pre is None:
+            pre = deque(maxlen=PREROLL_BLOCKS)
+            self._pre[actor] = pre
+        pre.extend(blocks)
 
-    async def _ensure(self, actor: int) -> PlayerSession | None:
-        """确保这个 actor 有会话；**并发调用只会建一条**。
+    async def _send(self, actor: int, st: PlayerSession, blocks) -> None:
+        st.last_audio = time.monotonic()
+        try:
+            for block in blocks:
+                await st.session.send_audio(block)
+                self.sent_chunks += 1
+            st.failures = 0
+        except Exception as exc:                         # noqa: BLE001
+            st.failures += 1
+            self.on_status("warn", f"玩家 {self.label_of(actor)} 送音频失败：{exc}")
+            if st.failures >= 3:
+                await self._drop(actor, reason="连续发送失败")
+                self._schedule_retry(actor, "连续发送失败")
 
-        调用方（第一个）等建连完成；其余调用方在 `feed` 里就按「建连中」丢块了，
-        不会走到这儿。返回 None = 这次没建成（退避中 / 被距离门限拒绝 / 建连失败）。
-        """
-        st = self.sessions.get(actor)
-        if st is not None:
-            self.sessions.move_to_end(actor)
-            return st
-        if actor in self._starting:
-            return None
-        if time.monotonic() < self._retry_at.get(actor, 0.0):
-            return None
-        task = asyncio.create_task(self._create(actor))
-        self._starting[actor] = task
+    # ------------------------------------------------------------ 建连循环
 
-        def _done(t: asyncio.Task, a: int = actor) -> None:
-            if self._starting.get(a) is t:
-                self._starting.pop(a, None)
+    def _kick(self) -> None:
+        if self._wake is not None and not self._closed:
+            self._wake.set()
 
-        task.add_done_callback(_done)
-        return await asyncio.shield(task)
+    async def _creator_loop(self) -> None:
+        """唯一的建连者：串行、可合并、可取消。"""
+        assert self._wake is not None
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            # 合并同一波音频的连续唤醒（每 20ms 一块，别一块跑一次）
+            await asyncio.sleep(0.2)
+            self._wake.clear()
+            if self._closed:
+                return
+            try:
+                await self._create_next()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                     # noqa: BLE001 - 循环不能死
+                self.on_status("warn", f"建会话循环异常：{type(exc).__name__}: {exc}")
 
-    async def _create(self, actor: int) -> PlayerSession | None:
-        """真正建一条会话（同一次只会有这一个在飞）。"""
-        if not await self._make_room(actor):
-            return None
+    async def _create_next(self) -> None:
+        """为「最近的说话者」建一条会话（如果名额/预算允许）。"""
+        now = time.monotonic()
+        self._prune_wanted(now)
+        if not self._wanted or self._busy:
+            return
+        actor = next(reversed(self._wanted))
+        if now < self._retry_at.get(actor, 0.0):
+            self._drop_wish(actor)
+            return
+        if not await self._ensure_room(actor, now):
+            self._warn_overflow(actor, now)
+            return
+
+        self._busy = True
+        try:
+            # 先自己拿预算：等 6.1s 的这段时间里他可能已经说完了，
+            # 那时就**不要**建（白烧一次连接，还会占一个名额）。
+            await self.budget.acquire()
+            spoken = self._wanted.get(actor)
+            if spoken is None or time.monotonic() - spoken > WANT_TTL_S:
+                self._drop_wish(actor)
+                return
+            self._wanted.pop(actor, None)
+            await self._start_session(actor)
+        finally:
+            self._busy = False
+            # 还有人在等就再跑一轮（下一轮会重新排队预算）
+            if self._wanted and not self._closed:
+                self._kick()
+
+    async def _start_session(self, actor: int) -> None:
         merger = Merger(lambda text, final, a=actor: self._emit(a, text, final),
                         interval_s=self.merger_interval_s)
         session = None
         try:
-            session = create_session(self.cfg, budget=self.budget)
+            session = create_session(self.cfg, budget=_GRANTED)
             await session.start(on_text=lambda d, a=actor: self._on_delta(a, d),
                                 on_audio=None, on_usage=None)
         except Exception as exc:                         # noqa: BLE001
@@ -241,44 +344,64 @@ class PlayerRouter:
                     await asyncio.wait_for(session.close(), timeout=CLOSE_TIMEOUT_S)
                 except Exception:                        # noqa: BLE001
                     pass
+            self._drop_wish(actor, counted=False)
             self._schedule_retry(actor, exc)
-            return None
+            return
         st = PlayerSession(actor=actor, session=session, merger=merger, started=True)
         self.sessions[actor] = st
         self.sessions_created += 1
         self._attempts.pop(actor, None)
         self._retry_at.pop(actor, None)
+        self._overflow_warned.pop(actor, None)
         self.on_status("info", f"已为 {self.label_of(actor)} 建立翻译会话"
                                f"（{len(self.sessions)}/{self.max_sessions}）")
-        return st
+        # 补发排队期间的音频（含句首 2s），这一段播放完就进入实时
+        pre = self._pre.pop(actor, None)
+        if pre:
+            await self._send(actor, st, list(pre))
 
-    async def _make_room(self, actor: int) -> bool:
-        """腾一个名额出来；腾不了（或不该腾）返回 False。"""
-        # 在飞的建连也占名额 —— 否则三个人同时开口会各自看到「还没满」，一起冲爆上限。
-        # 减 1 是扣掉 `_create` 自己这一条。
-        in_flight = max(0, len(self._starting) - 1)
-        if len(self.sessions) + in_flight < self.max_sessions:
+    async def _ensure_room(self, actor: int, now: float) -> bool:
+        """判断/腾出一个名额。腾不了返回 False（调用方按"溢出"处理）。"""
+        if len(self.sessions) < self.max_sessions:
             return True
-        if not self.sessions:
-            return False                 # 名额全被正在建的占着：这次先不建
+        idle = [a for a, st in self.sessions.items()
+                if now - max(st.last_audio, st.last_text or 0.0) > HOT_SILENCE_S]
+        if not idle:
+            return False                     # 全都在说话：不踢人，宁可暂时不翻
         if "order" in self.distance_mode:
-            # 先按"谁更远"淘汰；距离相同再按"谁更久没说话"。
-            # 新人如果比所有人都远，就不值得踢人 —— 直接不给他建会话。
+            victim = max(idle, key=lambda a: (self.distance_of(a) or 0.0,
+                                              -self.sessions[a].last_audio))
             new_d = self.distance_of(actor)
-            far_actor = max(
-                self.sessions,
-                key=lambda a: ((self.distance_of(a) or 0.0),
-                               -self.sessions[a].last_audio))
-            far_d = self.distance_of(far_actor) or 0.0
-            if new_d is not None and new_d > far_d:
-                return False
-            await self._drop(far_actor,
-                             reason=f"距离排序：{self.label_of(far_actor)} 更远"
-                                    f"（{max_distance_label(far_d)}）")
+            far_d = self.distance_of(victim) or 0.0
+            if new_d is not None and new_d + DISTANCE_HYSTERESIS_M >= far_d:
+                return False                 # 不比被踢的近，不值得换人
         else:
-            victim = min(self.sessions, key=lambda a: self.sessions[a].last_audio)
-            await self._drop(victim, reason=f"超过 {self.max_sessions} 条活跃会话")
+            victim = min(idle, key=lambda a: self.sessions[a].last_audio)
+        await self._drop(victim, reason=f"名额已满，回收空闲的 {self.label_of(victim)}")
         return True
+
+    def _prune_wanted(self, now: float) -> None:
+        for a in [a for a, t in self._wanted.items() if now - t > WANT_TTL_S]:
+            self._drop_wish(a)
+        for a in [a for a in self._wanted if a in self.sessions]:
+            self._wanted.pop(a, None)
+
+    def _drop_wish(self, actor: int, *, counted: bool = True) -> None:
+        """放弃为这个玩家排队；排队期缓冲的音频算「溢出丢弃」。"""
+        self._wanted.pop(actor, None)
+        pre = self._pre.pop(actor, None)
+        if counted and pre:
+            self.overflow_dropped += len(pre)
+
+    def _warn_overflow(self, actor: int, now: float) -> None:
+        last = self._overflow_warned.get(actor, 0.0)
+        if now - last < OVERFLOW_WARN_S:
+            return
+        self._overflow_warned[actor] = now
+        self.on_status(
+            "warn",
+            f"{self.label_of(actor)} 的语音暂不翻译：{self.max_sessions} 条会话都在被人"
+            f"使用（可调大 config 的 players.max_sessions；未翻的块会累计在「溢出丢弃」）")
 
     def _schedule_retry(self, actor: int, reason: object) -> None:
         """记一次失败并按 5/10/15/30s 退避；期间 feed 直接丢块，不再试。"""
@@ -294,12 +417,15 @@ class PlayerRouter:
         st = self.sessions.pop(actor, None)
         if st is None:
             return
+        self._pre.pop(actor, None)
+        self._wanted.pop(actor, None)
         try:
             await asyncio.wait_for(st.session.close(), timeout=CLOSE_TIMEOUT_S)
         except Exception:                                # noqa: BLE001
             pass
         if reason:
             self.on_status("info", f"关闭 {self.label_of(actor)} 的会话：{reason}")
+        self._kick()          # 空出来的名额立刻给排队的人
 
     # ------------------------------------------------------------ 文本
 
@@ -333,26 +459,33 @@ class PlayerRouter:
             except Exception:                            # noqa: BLE001
                 pass
             # 会话被服务端掐掉（限流/1011/网络）时**立刻**重建，别继续往死连接送音频。
-            # 之前没人查 is_alive，于是要等连发失败 3 次才丢 —— 期间每次 feed 都在
-            # 报「送音频失败」，正是"一直在刷错"的另一半。
             if not bool(getattr(st.session, "is_alive", True)):
                 await self._drop(actor, reason="连接已断开")
                 self._schedule_retry(actor, "连接已断开")
                 continue
-            # 长时间没说话：回收，给下一位腾连接预算
-            if now - max(st.last_audio, st.last_text) > IDLE_CLOSE_S:
+            # 长时间没说话：回收，给下一位腾名额（也是**赶在服务端 60s 超时之前**）
+            if now - max(st.last_audio, st.last_text or 0.0) > IDLE_CLOSE_S:
                 await self._drop(actor, reason=f"静默 {IDLE_CLOSE_S:.0f}s")
-        # 退避表只留还在起作用的：玩家走了别把 dict 撑大
+        self._prune_wanted(now)
+        if self._wanted and not self._busy:
+            self._kick()
+        # 诊断用的 dict 别无限长
         if len(self._retry_at) > 64:
             for actor, at in list(self._retry_at.items()):
                 if at < now and actor not in self.sessions:
                     self._retry_at.pop(actor, None)
                     self._attempts.pop(actor, None)
+        if len(self._overflow_warned) > 64:
+            for actor, at in list(self._overflow_warned.items()):
+                if now - at > 300 and actor not in self.sessions:
+                    self._overflow_warned.pop(actor, None)
 
     def stats(self) -> dict:
         return {
             "sessions": len(self.sessions),
-            "starting": len(self._starting),
+            "max_sessions": self.max_sessions,
+            "creating": int(self._busy),
+            "queued": len(self._wanted),
             "actors": list(self.sessions),
             "sent_chunks": self.sent_chunks,
             "dropped_chunks": self.dropped_chunks,
@@ -363,11 +496,6 @@ class PlayerRouter:
             "max_distance_m": self.max_distance_m,
             "sessions_created": self.sessions_created,
             "create_failures": self.create_failures,
+            "overflow_dropped": self.overflow_dropped,
             "budget_waits": self.budget.waits,
         }
-
-
-def max_distance_label(meters: float) -> str:
-    """路由器日志里的距离文案（与 positions.format_distance 保持同一口径）。"""
-    from .positions import format_distance
-    return format_distance(meters) or "未知"

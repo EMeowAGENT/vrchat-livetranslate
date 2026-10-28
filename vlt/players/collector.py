@@ -148,17 +148,27 @@ class VoiceCollector:
                                               or msg.code == names.LEAVE_EVENT):
             self.name_events += 1
             self.name_code_hits[str(msg.code)] += 1
-            parsed = names.parse_records(msg.payload) if msg.code != names.LEAVE_EVENT else []
+            parsed, diag = ([], {})
+            if msg.code != names.LEAVE_EVENT:
+                parsed, diag = names.parse_records_ex(msg.payload)
             self.name_records += len(parsed)
             self.name_with_display += sum(1 for r in parsed if r.display_name)
-            # 前 6 条留痕：能一眼看出「事件来了但解不出记录」还是「根本没事件」
+            # 前 6 条留痕：能一眼看出「事件来了但解不出记录」还是「根本没事件」。
+            # 解不出时把**字段名序列**打出来（只有 key，没有值/人名）——
+            # 2026-10 那次「12 条事件全部记录=0」就是靠这个定位到字段顺序变了。
             if self._name_logs < 6 and msg.code != names.LEAVE_EVENT:
                 self._name_logs += 1
+                extra = ""
+                if not parsed:
+                    fields = diag.get("fields") or []
+                    extra = (f" 字段={fields}" if fields
+                             else f" 诊断={diag.get('error') or '无 user 字段'}")
                 print(f"[players] 名字事件 code={msg.code} len={len(msg.payload)} "
                       f"记录={len(parsed)} 带名={sum(1 for r in parsed if r.display_name)}"
+                      + extra
                       + ("" if parsed else f" head={msg.payload[:48].hex()}"),
                       flush=True)
-            changed = self.names.feed(msg.payload, code=msg.code)
+            changed = self.names.feed(msg.payload, code=msg.code, records=parsed)
             for record in changed[:4]:
                 print(f"[p0b] 玩家名：actor {record.actor} → {record.display_name!r}"
                       f"（{record.user_id}）", flush=True)
