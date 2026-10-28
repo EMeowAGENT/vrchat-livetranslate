@@ -47,7 +47,7 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
-from ..audio_gate import LevelGate
+from ..audio_gate import VOICE_PEAK, LevelGate, peak_of
 from ..output.merger import Merger
 from ..session.base import SessionConfig, TextDelta, create_session
 from ..session.qwen38 import ConnectionBudget
@@ -76,6 +76,8 @@ WANT_TTL_S = 3.0
 OVERFLOW_WARN_S = 30.0
 #: 距离排序时的滞回：新来的必须比被踢的近这么多米才值得换人（防来回抖动）
 DISTANCE_HYSTERESIS_M = 1.0
+#: 每玩家保留多少块电平样本用于「p50/p90 画像」（20ms/块 → 600 ≈ 12 秒语音）
+LEVEL_SAMPLES = 600
 #: 账号级建连预算：实测 ~10 次/分钟会被服务端撞掉，9 留一点余量；
 #: 再加「相邻 ≥6.1s」（VRCS 实测口径），防同一秒里连开三条。
 PLAYER_SESSIONS_PER_MINUTE = 9
@@ -114,6 +116,8 @@ class PlayerSession:
     last_source: str = ""
     started: bool = False
     failures: int = 0
+    #: 开闸期间的电平样本（dBFS）：用来给人看「这个人是不是被门限切了」
+    levels: deque = field(default_factory=lambda: deque(maxlen=LEVEL_SAMPLES))
 
 
 class PlayerRouter:
@@ -126,6 +130,7 @@ class PlayerRouter:
                  preroll_ms: int = DEFAULT_PREROLL_MS,
                  on_text=None, on_status=None, label_of=None,
                  budget: ConnectionBudget | None = None,
+                 gate_hysteresis_db: float = 6.0,
                  merger_interval_s: float = 2.0,
                  distance_of=None, distance_mode: str = "off",
                  max_distance_m: float = 0.0) -> None:
@@ -134,7 +139,8 @@ class PlayerRouter:
         self.gate_db = float(gate_db)
         self.hold_ms = float(hold_ms)
         self.preroll_ms = int(preroll_ms)
-        # 每位玩家一个门限实例（hold/preroll 有自己的时间轴）
+        self.gate_hysteresis_db = max(0.0, float(gate_hysteresis_db))
+        # 每位玩家一个门限实例（hold/preroll/滞回有自己的时间轴）
         self._gates: dict[int, LevelGate] = {}
         self.on_text = on_text or (lambda *_a: None)
         self.on_status = on_status or (lambda *_a: None)
@@ -159,13 +165,16 @@ class PlayerRouter:
         # 愿望清单：actor → 最近一次「有音频但还没有会话」的时刻（monotonic）。
         # 建连是串行的，所以「谁先建」由这个时间排序决定，而不是谁先抢到协程。
         self._wanted: "OrderedDict[int, float]" = OrderedDict()
-        # 排队期间的音频（每人最近 2s）：会话一就绪立刻补发，句首不丢。
-        self._pre: dict[int, deque[bytes]] = {}
+        # 每人最近 2s 的**原始**音频（门限之前的 pcm）。会话一就绪立刻补发，
+        # 这样"轻声的句首/第一个字"也不会被门限吃掉。没有会话的人才保留。
+        self._ring: dict[int, deque[bytes]] = {}
         # 失败退避：actor → 最早可以再试的时刻 / 连续失败次数
         self._retry_at: dict[int, float] = {}
         self._attempts: dict[int, int] = {}
         # 「名额满、暂不翻译」的限频警告时刻
         self._overflow_warned: dict[int, float] = {}
+        # 「超出距离、不建会话」的限频警告时刻
+        self._distance_warned: dict[int, float] = {}
         self._wake: asyncio.Event | None = None
         self._creator: asyncio.Task | None = None
         self._ticker: asyncio.Task | None = None
@@ -204,14 +213,15 @@ class PlayerRouter:
             except (asyncio.CancelledError, Exception):   # noqa: BLE001 - 收尾不抛
                 pass
         self._ticker = self._creator = None
-        for st in list(self.sessions.values()):
+        for actor, st in list(self.sessions.items()):
+            self._level_note(actor, st)
             try:
                 await asyncio.wait_for(st.session.close(), timeout=CLOSE_TIMEOUT_S)
             except Exception:                            # noqa: BLE001
                 pass
         self.sessions.clear()
         self._wanted.clear()
-        self._pre.clear()
+        self._ring.clear()
 
     # ------------------------------------------------------------ 主入口
 
@@ -219,16 +229,20 @@ class PlayerRouter:
         """喂一个 20ms 的 16k 单声道块。门限以下直接丢（不建会话）。"""
         if self._closed or not pcm:
             return
+        # 先记原始音频（**在门限之前**）：句首比门限还轻的时候，它只存在于这里。
+        if actor not in self.sessions:
+            ring = self._ring.get(actor)
+            if ring is None:
+                ring = deque(maxlen=PREROLL_BLOCKS)
+                self._ring[actor] = ring
+            ring.append(pcm)
         gate = self._gate_for(actor)
         blocks = gate.feed(pcm, now=time.monotonic())
-        if "gate" in self.distance_mode and self.max_distance_m > 0:
-            distance = self.distance_of(actor)
-            if distance is not None and distance > self.max_distance_m:
-                self.distance_dropped += 1
-                return
         if not blocks:
             return
         st = self.sessions.get(actor)
+        if st is not None and gate.is_open:
+            st.levels.append(gate.level_db)
         if st is not None:
             self.sessions.move_to_end(actor)
             await self._send(actor, st, blocks)
@@ -238,31 +252,30 @@ class PlayerRouter:
             # 退避中：直接丢，别排队（否则又是 20ms 一个等待协程）
             self.dropped_chunks += len(blocks)
             return
-        # 没有会话：登记愿望 + 缓冲最近 2s（句首不丢），交给建连循环
+        # 没有会话：登记愿望（音频已经在 _ring 里了），交给建连循环
         self._wanted[actor] = now
         self._wanted.move_to_end(actor)
-        self._buffer(actor, blocks)
         self._kick()
 
     def _gate_for(self, actor: int) -> LevelGate:
         gate = self._gates.get(actor)
         if gate is None:
             gate = LevelGate(True, self.gate_db, hold_ms=self.hold_ms,
-                             preroll_ms=self.preroll_ms, verbose=False)
+                             preroll_ms=self.preroll_ms, verbose=False,
+                             hysteresis_db=self.gate_hysteresis_db)
             self._gates[actor] = gate
         return gate
 
-    def _buffer(self, actor: int, blocks: list[bytes]) -> None:
-        pre = self._pre.get(actor)
-        if pre is None:
-            pre = deque(maxlen=PREROLL_BLOCKS)
-            self._pre[actor] = pre
-        pre.extend(blocks)
-
     async def _send(self, actor: int, st: PlayerSession, blocks) -> None:
         st.last_audio = time.monotonic()
+        note_voice = getattr(st.session, "note_voice", None)
         try:
             for block in blocks:
+                # 与主线 `_SessionProxy` 同一口径：这一块有人在说 → 告诉会话。
+                # 分玩家腿以前**从没**调过它，于是 `should_finalize()` 的快路径
+                # （上游已静 + 文字静默 1.1s）永远不触发，每句白等 ~1.9s。
+                if note_voice is not None and peak_of(block) >= VOICE_PEAK:
+                    note_voice()
                 await st.session.send_audio(block)
                 self.sent_chunks += 1
             st.failures = 0
@@ -307,6 +320,11 @@ class PlayerRouter:
         if now < self._retry_at.get(actor, 0.0):
             self._drop_wish(actor)
             return
+        if not self._within_distance_gate(actor):
+            self.distance_dropped += 1
+            self._warn_distance(actor, now)
+            self._drop_wish(actor)
+            return
         if not await self._ensure_room(actor, now):
             self._warn_overflow(actor, now)
             return
@@ -336,6 +354,11 @@ class PlayerRouter:
             session = create_session(self.cfg, budget=_GRANTED)
             await session.start(on_text=lambda d, a=actor: self._on_delta(a, d),
                                 on_audio=None, on_usage=None)
+            # 让会话自己打的 [turn] 日志能对上人
+            try:
+                session.label = self.label_of(actor)
+            except Exception:                        # noqa: BLE001 - 测试替身没有也不该炸
+                pass
         except Exception as exc:                         # noqa: BLE001
             # 半成品必须自己关掉：不关就是「没人持引用、也没人关」的泄漏连接，
             # 它还会一直占着账号的并发名额。
@@ -355,8 +378,9 @@ class PlayerRouter:
         self._overflow_warned.pop(actor, None)
         self.on_status("info", f"已为 {self.label_of(actor)} 建立翻译会话"
                                f"（{len(self.sessions)}/{self.max_sessions}）")
-        # 补发排队期间的音频（含句首 2s），这一段播放完就进入实时
-        pre = self._pre.pop(actor, None)
+        # 补发排队期间的音频（含句首 2s 原始音频，含门限以下的轻声），
+        # 这一段播放完就进入实时
+        pre = self._ring.pop(actor, None)
         if pre:
             await self._send(actor, st, list(pre))
 
@@ -389,9 +413,33 @@ class PlayerRouter:
     def _drop_wish(self, actor: int, *, counted: bool = True) -> None:
         """放弃为这个玩家排队；排队期缓冲的音频算「溢出丢弃」。"""
         self._wanted.pop(actor, None)
-        pre = self._pre.pop(actor, None)
-        if counted and pre:
-            self.overflow_dropped += len(pre)
+        ring = self._ring.pop(actor, None)
+        if counted and ring:
+            self.overflow_dropped += len(ring)
+
+    def _within_distance_gate(self, actor: int) -> bool:
+        """`gate` 模式：**只在建会话时**判一次距离。
+
+        以前是每 20ms 块判一次 —— 站在 6m 边界的人一半块被丢、一半上送，
+        一句话被切成碎片；静坐玩家坐标更新很稀（缓存 30s），一次判远就整段不翻。
+        建好之后中途**永不因距离丢块**（要"越走越远就不翻"请用 order + 空闲回收）。
+        """
+        if "gate" not in self.distance_mode or self.max_distance_m <= 0:
+            return True
+        distance = self.distance_of(actor)
+        if distance is None:
+            return True                       # 坐标未知：不拦（宁可不省这一次）
+        return distance <= self.max_distance_m
+
+    def _warn_distance(self, actor: int, now: float) -> None:
+        last = self._distance_warned.get(actor, 0.0)
+        if now - last < OVERFLOW_WARN_S:
+            return
+        self._distance_warned[actor] = now
+        self.on_status(
+            "warn",
+            f"{self.label_of(actor)} 超出距离门限（{self.max_distance_m:g}m），"
+            f"不建翻译会话（distance_mode=gate；想无损请改 order）")
 
     def _warn_overflow(self, actor: int, now: float) -> None:
         last = self._overflow_warned.get(actor, 0.0)
@@ -402,6 +450,13 @@ class PlayerRouter:
             "warn",
             f"{self.label_of(actor)} 的语音暂不翻译：{self.max_sessions} 条会话都在被人"
             f"使用（可调大 config 的 players.max_sessions；未翻的块会累计在「溢出丢弃」）")
+
+    def _level_note(self, actor: int, st: PlayerSession) -> None:
+        """会话结束时报一次电平画像（只电平、不含内容），方便判断是不是门限切太狠。"""
+        summary = level_summary(st.levels)
+        if summary:
+            self.on_status("info", f"{self.label_of(actor)} 语音电平 {summary}"
+                                   f"（门限 {self.gate_db:g} dBFS）")
 
     def _schedule_retry(self, actor: int, reason: object) -> None:
         """记一次失败并按 5/10/15/30s 退避；期间 feed 直接丢块，不再试。"""
@@ -417,7 +472,8 @@ class PlayerRouter:
         st = self.sessions.pop(actor, None)
         if st is None:
             return
-        self._pre.pop(actor, None)
+        self._level_note(actor, st)
+        self._ring.pop(actor, None)
         self._wanted.pop(actor, None)
         try:
             await asyncio.wait_for(st.session.close(), timeout=CLOSE_TIMEOUT_S)
@@ -469,16 +525,22 @@ class PlayerRouter:
         self._prune_wanted(now)
         if self._wanted and not self._busy:
             self._kick()
+        # 原始音频环形缓冲：只保留「还在排队/有会话」的人（跨世界会不断出现新 actor）
+        if len(self._ring) > 64:
+            for a in [a for a in self._ring
+                      if a not in self.sessions and a not in self._wanted]:
+                self._ring.pop(a, None)
         # 诊断用的 dict 别无限长
         if len(self._retry_at) > 64:
             for actor, at in list(self._retry_at.items()):
                 if at < now and actor not in self.sessions:
                     self._retry_at.pop(actor, None)
                     self._attempts.pop(actor, None)
-        if len(self._overflow_warned) > 64:
-            for actor, at in list(self._overflow_warned.items()):
-                if now - at > 300 and actor not in self.sessions:
-                    self._overflow_warned.pop(actor, None)
+        for table in (self._overflow_warned, self._distance_warned):
+            if len(table) > 64:
+                for actor, at in list(table.items()):
+                    if now - at > 300 and actor not in self.sessions:
+                        table.pop(actor, None)
 
     def stats(self) -> dict:
         return {
@@ -499,3 +561,17 @@ class PlayerRouter:
             "overflow_dropped": self.overflow_dropped,
             "budget_waits": self.budget.waits,
         }
+
+
+def level_summary(samples) -> str:
+    """电平样本 → `p50=-42 p90=-28`（样本太少返回空串）。
+
+    只看**过门限的块**，所以它回答的是「他说话时有多响」；如果 p90 贴着门限，
+    说明这个人基本是靠个别尖峰才勉强过线 —— 调低 `gate_db` 或加大滞回。
+    """
+    values = sorted(float(v) for v in samples)
+    if len(values) < 20:
+        return ""
+    p50 = values[len(values) // 2]
+    p90 = values[min(len(values) - 1, int(len(values) * 0.9))]
+    return f"p50={p50:.0f} p90={p90:.0f}"

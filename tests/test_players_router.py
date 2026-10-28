@@ -51,6 +51,7 @@ class FakeSession:
         self.on_text = None
         self.budget = None
         self.alive = True
+        self.voice_notes = 0
 
     @property
     def is_alive(self) -> bool:
@@ -58,6 +59,9 @@ class FakeSession:
 
     async def start(self, on_text, on_audio=None, on_usage=None) -> None:
         self.on_text = on_text
+
+    def note_voice(self) -> None:
+        self.voice_notes += 1
 
     async def send_audio(self, pcm: bytes) -> None:
         if not self.alive:
@@ -316,6 +320,96 @@ async def _case_dead_session() -> None:
         router_mod.create_session = original
 
 
+async def _case_voice_signal() -> None:
+    """响块要上报 `note_voice()`，静音 tail 不能报（否则快封句会被静音骗开）。"""
+    created: list[FakeSession] = []
+    original = _install(created)
+    try:
+        print("[router] 有人说话 → note_voice（快封句依赖它）")
+        router = _make(max_sessions=1, budget=ConnectionBudget(100))
+        await router.start()
+        await router.feed(1, LOUD)
+        await _settle()
+        check("响块上报了 note_voice", created[0].voice_notes > 0,
+              str(created[0].voice_notes))
+        before = created[0].voice_notes
+        quiet = (3).to_bytes(2, "little", signed=True) * 320     # ≈ -80 dBFS
+        for _ in range(5):
+            await router.feed(1, quiet)
+        await _settle(0.05)
+        check("静音块不上报", created[0].voice_notes == before,
+              f"{created[0].voice_notes} vs {before}")
+        await router.close()
+    finally:
+        router_mod.create_session = original
+
+
+async def _case_distance_scope() -> None:
+    """距离只在建会话时判一次：建好之后走到 50m 也不许中途丢块。"""
+    created: list[FakeSession] = []
+    original = _install(created)
+    try:
+        print("[router] 距离只在建会话时判（中途不丢）")
+        dists = {1: 5.0}
+        router = _make(max_sessions=1, distance_mode="gate", max_distance_m=6.0,
+                       distance_of=lambda a: dists.get(a),
+                       budget=ConnectionBudget(100))
+        await router.start()
+        await router.feed(1, LOUD)
+        await _settle()
+        check("6m 内建了会话", len(created) == 1 and 1 in router.sessions)
+        sent = router.sent_chunks
+        dists[1] = 50.0                       # 人走远了
+        for _ in range(10):
+            await router.feed(1, LOUD)
+        await _settle(0.05)
+        check("走远后音频仍在上送（不按块丢）", router.sent_chunks > sent,
+              f"{router.sent_chunks} vs {sent}")
+        check("不算距离丢弃", router.stats()["distance_dropped"] == 0,
+              str(router.stats()))
+
+        dists[2] = 50.0
+        await router.feed(2, LOUD)
+        await _settle()
+        check("超出距离的人不建会话", len(created) == 1, str(len(created)))
+        check("记一次「因距离没建」", router.stats()["distance_dropped"] == 1,
+              str(router.stats()))
+        await router.close()
+    finally:
+        router_mod.create_session = original
+
+
+async def _case_raw_preroll() -> None:
+    """排队期缓存原始音频：门限以下的轻声句首也要补发。"""
+    created: list[FakeSession] = []
+    original = _install(created)
+    try:
+        print("[router] 原始音频补发（轻声句首不丢）")
+        router = _make(max_sessions=1, budget=ConnectionBudget(100))
+        await router.start()
+        soft = (46).to_bytes(2, "little", signed=True) * 320     # ≈ -57 dBFS
+        for _ in range(10):
+            await router.feed(1, soft)        # 门限以下：一块都不上送
+        await _settle(0.05)
+        check("轻声不建会话也不上送", created == [] and router.sent_chunks == 0)
+        await router.feed(1, LOUD)            # 终于过线
+        await _settle()
+        check("建会话", len(created) == 1, str(len(created)))
+        check("补发包含之前的轻声块", len(created[0].sent) >= 11,
+              str(len(created[0].sent)))
+        await router.close()
+    finally:
+        router_mod.create_session = original
+
+
+def _case_level_summary() -> None:
+    print("[router] 电平画像")
+    check("样本太少返回空", router_mod.level_summary([-30] * 5) == "")
+    text = router_mod.level_summary([-20, -30, -40, -50] * 10)
+    check("p50/p90 有值", text == "p50=-30 p90=-20", text)
+    check("空输入不炸", router_mod.level_summary([]) == "")
+
+
 async def _case_budget() -> None:
     """预算的两道闸：条数窗口 + 相邻建连最小间隔。"""
     print("[router] 建连预算：最大间隔与排队计数")
@@ -345,6 +439,10 @@ def main() -> int:
     asyncio.run(_case_distance())
     asyncio.run(_case_backoff())
     asyncio.run(_case_dead_session())
+    asyncio.run(_case_voice_signal())
+    asyncio.run(_case_distance_scope())
+    asyncio.run(_case_raw_preroll())
+    _case_level_summary()
     asyncio.run(_case_budget())
     print()
     if FAILS:

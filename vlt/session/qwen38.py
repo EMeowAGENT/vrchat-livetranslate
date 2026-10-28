@@ -155,6 +155,8 @@ class QwenLiveTranslateSession(LiveTranslateSession):
         # 服务端判定致命错误的原因（如 model repeat output happened）。
         # 一旦设置，说明本会话已被我们主动放弃，看门狗会直接走重连路径。
         self.fatal_reason = ""
+        # 日志标签（分玩家腿用来区分 actor）：空 = 主线，不加前缀。
+        self.label = ""
         self._buf: list[str] = []          # 本段已确认文本的增量累加
         self._src_buf: list[str] = []
         self._last_text_at: float = 0.0    # 最近一次文本增量时间（静默兜底用）
@@ -554,7 +556,8 @@ class QwenLiveTranslateSession(LiveTranslateSession):
             if self._t_stopped:
                 done_ms = (time.perf_counter() - self._t_stopped) * 1000
                 first = self._first_after_stop_ms
-                print(f"[turn] 断句→首字 {'—' if first is None else f'{first:.0f}ms'}"
+                tag = f"[{self.label}]" if self.label else ""
+                print(f"[turn]{tag} 断句→首字 {'—' if first is None else f'{first:.0f}ms'}"
                       f" | 断句→完成 {done_ms:.0f}ms | 终版 {len(''.join(self._buf))} 字",
                       flush=True)
                 self._t_stopped = 0.0

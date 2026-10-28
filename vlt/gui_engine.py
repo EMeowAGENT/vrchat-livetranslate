@@ -409,6 +409,10 @@ def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
         gate_db = float(players_cfg.get("gate_db", -55.0))
     except (TypeError, ValueError):
         gate_db = -55.0
+    try:
+        gate_hysteresis_db = float(players_cfg.get("gate_hysteresis_db", 6.0))
+    except (TypeError, ValueError):
+        gate_hysteresis_db = 6.0
 
     leg = PlayerLeg(
         scfg,
@@ -420,6 +424,7 @@ def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
             flush=True),
         max_sessions=max_sessions,
         gate_db=gate_db,
+        gate_hysteresis_db=gate_hysteresis_db,
         pre_seconds=float(players_cfg.get("pre_seconds", 120.0)),
         distance_mode=str(players_cfg.get("distance_mode") or "off"),
         max_distance_m=float(players_cfg.get("max_distance_m") or 0.0),

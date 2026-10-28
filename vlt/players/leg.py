@@ -51,6 +51,7 @@ class PlayerLeg:
 
     def __init__(self, cfg: SessionConfig, *, on_text=None, on_status=None,
                  on_names=None, max_sessions: int = 3, gate_db: float = -55.0,
+                 gate_hysteresis_db: float = 6.0,
                  pre_seconds: float = 120.0, port: int = 27002,
                  log_dir: str | Path | None = None,
                  distance_mode: str = "off", max_distance_m: float = 0.0) -> None:
@@ -60,6 +61,7 @@ class PlayerLeg:
         self.on_names = on_names or (lambda *_a: None)
         self.max_sessions = max_sessions
         self.gate_db = gate_db
+        self.gate_hysteresis_db = max(0.0, float(gate_hysteresis_db))
         self.pre_seconds = pre_seconds
         self.port = port
         # log_dir 为空时自动找 VRChat 的 output_log 目录：世界加载闸门与名字兜底
@@ -138,6 +140,7 @@ class PlayerLeg:
 
         self.router = PlayerRouter(
             self.cfg, max_sessions=self.max_sessions, gate_db=self.gate_db,
+            gate_hysteresis_db=self.gate_hysteresis_db,
             on_text=self.on_text, on_status=self.on_status,
             label_of=lambda actor: self._label(actor),
             distance_of=lambda actor: self.positions.distance(actor),
@@ -304,7 +307,8 @@ class PlayerLeg:
 
             self.on_status("info", f"密钥命中（指纹 {hit.fingerprint}），开始实时解码")
             self.on_status("info", f"每人门限：{self.gate_db:g} dBFS（RMS，hold 500ms / "
-                                   f"preroll 250ms / 关闸补 600ms 静音）")
+                                   f"preroll 250ms / 滞回 {self.gate_hysteresis_db:g}dB "
+                                   f"/ 关闸补 600ms 静音）")
 
             collector = VoiceCollector(report, log_names=log_names,
                                        pcm_sink=self._forward_pcm,

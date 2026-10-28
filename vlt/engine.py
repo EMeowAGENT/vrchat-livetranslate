@@ -28,7 +28,8 @@ from .platform.base import LoopbackTarget
 from .output.chatbox import Chatbox, TokenBucket
 from .output.merger import Merger
 from .output.overlay import DegradedNoteRelay, OverlayConfig
-from .audio_gate import LevelGate as _LevelGate, chunk_level_db  # noqa: F401  旧名字沿用
+from .audio_gate import (VOICE_PEAK, LevelGate as _LevelGate,  # noqa: F401  旧名字沿用
+                         chunk_level_db)
 from .output.level_match import LevelConfig, LevelMatcher, format_db
 from .output.level_match import MODE_OFF as LEVEL_MODE_OFF
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
@@ -84,7 +85,8 @@ def chatbox_text_mode(cfg) -> str:
 
 
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
-SILENCE_PEAK = 220
+# 实现只有一份：audio_gate.VOICE_PEAK（分玩家腿的 note_voice 用同一个常量）。
+SILENCE_PEAK = VOICE_PEAK
 
 # Linux 采集 VRChat 输出流时，每隔这么久回查一次 PipeWire 图 ——
 # 用来发现「VRChat 退出了」（目标节点消失），及时收尾回到等待。

@@ -21,10 +21,20 @@ import time
 from collections import deque
 
 from .output.level_match import LEVEL_FLOOR_DB, block_db
+from .output.level_match import peak_of as _peak_of
 
 DEFAULT_HOLD_MS = 500.0
 DEFAULT_PREROLL_MS = 250
 DEFAULT_TAIL_MS = 600.0
+#: 「这一块有人在说话」的峰值门限（16k s16le）。给 `note_voice()` 之类的
+#: 「上游还有人在说」判据用；RMS 门限（`gate_db`）管的是"要不要上送"，
+#: 两者是不同的问题，别混。
+VOICE_PEAK = 220
+
+
+def peak_of(chunk: bytes) -> int:
+    """一个音频块的峰值（实现只有一份：`level_match.peak_of`）。"""
+    return _peak_of(chunk)
 
 
 def chunk_level_db(chunk: bytes) -> float:
@@ -48,9 +58,14 @@ class LevelGate:
                  hold_ms: float = DEFAULT_HOLD_MS,
                  preroll_ms: int = DEFAULT_PREROLL_MS,
                  tail_ms: float = DEFAULT_TAIL_MS,
-                 *, verbose: bool = True) -> None:
+                 *, verbose: bool = True, hysteresis_db: float = 0.0) -> None:
         self.enabled = enabled
         self.threshold_db = threshold_db
+        # 滞回：开闸后要掉到 `close_db` 以下才关闸。默认 0 = 行为与以前逐字节一致；
+        # 分玩家腿用 6dB：轻柔/断续的说话人不会被「开一下 → 补 600ms 静音 → 再开」
+        # 切成好几轮（每轮都要等服务端 VAD + 封句，体感就是"这个人特别慢"）。
+        self.hysteresis_db = max(0.0, float(hysteresis_db))
+        self.close_db = threshold_db - self.hysteresis_db
         self.hold_ms = hold_ms
         self.preroll_ms = preroll_ms
         self.tail_ms = max(0.0, float(tail_ms))
@@ -78,8 +93,12 @@ class LevelGate:
         self.level_db = db
         if not self.enabled:
             return [chunk]
-        if db >= self.threshold_db:
-            self._last_loud_ts = now
+        loud = db >= self.threshold_db
+        # 已开闸时，只要还在「关闸线」以上就继续送（滞回）；hold 计时仍只由
+        # **真正过原门限**的块刷新，所以 hold 的语义没变。
+        if loud or (self.is_open and db >= self.close_db):
+            if loud:
+                self._last_loud_ts = now
             if self.is_open:
                 return [chunk]
             self.is_open = True
