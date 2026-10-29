@@ -66,6 +66,19 @@ def _rms_db(x: np.ndarray) -> float:
     return max(LEVEL_FLOOR_DB, 20.0 * math.log10(rms))
 
 
+def peak_of(chunk: bytes) -> int:
+    """一个音频块的峰值（int16 绝对值最大；纯函数）。
+
+    与 `block_db` 的分工：**RMS 判"要不要上送"（响度门限），峰值判"这一块是不是
+    有人在说话"**（`note_voice()` 的判据，与主线 `engine.SILENCE_PEAK` 同口径）。
+    采样解析只在这里做一次，别在别的模块再写一份 `frombuffer`。
+    """
+    if not chunk:
+        return 0
+    arr = np.frombuffer(chunk, dtype="<i2")
+    return int(np.abs(arr).max()) if arr.size else 0
+
+
 def block_db(pcm_s16: bytes) -> float:
     """一块 s16le PCM 的 RMS 电平（dBFS，满刻度 = 0）；纯静音回落 LEVEL_FLOOR_DB。
 

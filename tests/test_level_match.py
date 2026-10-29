@@ -776,27 +776,32 @@ def test_gain_and_ceiling_have_one_implementation():
 
 
 def test_block_level_has_one_implementation():
-    """★ 「块电平」只许有**一份**实现：`level_match.block_db`（engine.chunk_level_db 委托它）。
+    """★ 「块电平」只许有**一份**实现：`level_match.block_db`。
 
-    以前 engine.chunk_level_db 与 level_match 里那份各写一份同语义代码，注释给的理由是
-    「不能反向 import 成环」—— 但 engine **本来就** import level_match（单向），反向委托
-    并不成环。这里既钉源码形态（engine 那份只许是转发），也钉两条路数值一致。
+    历史：engine.chunk_level_db 与 level_match 里那份各写一份同语义代码，理由是
+    「不能反向 import 成环」。后来抽 `vlt/audio_gate.py` 时把块电平实现搬进了
+    `audio_gate.chunk_level_db`（engine 只 re-export），所以源码形态要钉**新家**：
+    audio_gate 那份只许是转发，数值与 level_match 逐位一致。
     """
+    import vlt.audio_gate as gate_mod
     import vlt.engine as engine_mod
 
     root = Path(LM.__file__).resolve().parents[2]
     lm_src = Path(LM.__file__).read_text(encoding="utf-8")
+    gate_src = (root / "vlt" / "audio_gate.py").read_text(encoding="utf-8")
     eng_src = (root / "vlt" / "engine.py").read_text(encoding="utf-8")
     assert lm_src.count("def block_db") == 1, "块电平只该有一份实现"
-    assert "return block_db(chunk)" in eng_src, \
-        "engine.chunk_level_db 必须委托给 level_match.block_db"
-    assert 'np.frombuffer(chunk, dtype="<i2")' not in eng_src, \
-        "engine 里不该再有一份自己的块电平实现（那份已删）"
+    assert "return block_db(chunk)" in gate_src, \
+        "audio_gate.chunk_level_db 必须委托给 level_match.block_db"
+    for name, src in (("audio_gate", gate_src), ("engine", eng_src)):
+        assert 'np.frombuffer(chunk, dtype="<i2")' not in src, \
+            f"{name} 里不该再有一份自己的块电平实现（那份已删）"
 
     for amp, n in ((10000, 1600), (3000, 4800), (1, 480)):
         pcm = _sine(amp, n)
         a, b = engine_mod.chunk_level_db(pcm), LM.block_db(pcm)
         assert a == b, f"两条路必须逐位一致：engine {a!r} vs level_match {b!r}"
+        assert gate_mod.chunk_level_db(pcm) == b, "audio_gate 与 level_match 必须逐位一致"
     assert engine_mod.chunk_level_db(b"") == LEVEL_FLOOR_DB
     assert engine_mod.chunk_level_db(_silence(480)) == LEVEL_FLOOR_DB
     print("  块电平单一实现：engine.chunk_level_db → level_match.block_db（源码形态 + 三档幅度逐位一致）OK")

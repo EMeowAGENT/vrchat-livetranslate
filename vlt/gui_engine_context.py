@@ -11,6 +11,12 @@ class EngineCtx:
     # ── 核心可变状态 ──
     engines: list = field(default_factory=list)
     engine_dirs: list = field(default_factory=list)
+    # 分玩家语音腿（`vlt/players/leg.py:PlayerLeg`）。与 engines 互斥：
+    # 分玩家模式可用时它替代「别人说」那条混音腿。
+    players_leg: Any = None
+    # 预热器（`vlt/players/warmup.py:PlayerWarmup`）：没开始翻译时也抓包、只记名字。
+    # App 级常驻（与麦克风代理同一层级），关窗时收摊。
+    players_warmup: Any = None
     specs: list = field(default_factory=list)
     sinks: set = field(default_factory=set)
     pending_starts: int = 0

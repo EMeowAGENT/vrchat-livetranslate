@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from typing import Any
 
 from .gui_engine_context import EngineCtx as EngineCtx
 from .gui_sinks import (start_overlay, push_overlay as push_overlay, desktop_cfg as desktop_cfg,
@@ -131,6 +132,10 @@ def start(ctx: EngineCtx) -> bool:
     """
     if any(e.running for e in ctx.engines):
         return
+    # 分玩家模式只有 leg、没有 Engine，上一条守卫拦不住重复点击。
+    leg_now = getattr(ctx, "players_leg", None)
+    if leg_now is not None and getattr(leg_now, "running", False):
+        return
 
     # 防呆：key 可能在运行期被保存/清除/改环境，先重解再检查
     if ctx.refresh_api_key_fn:
@@ -189,6 +194,16 @@ def start(ctx: EngineCtx) -> bool:
         specs.append(("mine", "mine", "mic", a, b))
     if d in ("theirs", "dual"):
         specs.append(("theirs", "theirs", "loopback", b, a or "zh"))
+
+    # 分玩家模式（实验性，Linux）：用它**替换**「别人说」那条混音腿。
+    # 替换而不是并存：同一句话翻两遍会重复上屏，也会双倍烧配额。
+    players_cfg = ctx.cfg.players if isinstance(ctx.cfg.players, dict) else {}
+    players_on = str(players_cfg.get("mode") or "off").lower() == "decrypt"
+    start_players = False
+    if players_on and any(s_[1] == "theirs" for s_ in specs):
+        specs = [s_ for s_ in specs if s_[1] != "theirs"]
+        start_players = True
+        print("[gui] 分玩家模式：用「每玩家一条会话」替代混音腿", flush=True)
 
     # chatbox 只承载「我说的话」的译文（气泡在别人眼里代表我发言）。
     # 若本次方向不含「我说」，用户勾了 chatbox 也一条都发不出去 —— 必须像
@@ -272,6 +287,11 @@ def start(ctx: EngineCtx) -> bool:
                       "（保持原档位；主界面按钮仍可手动切）", flush=True)
     # 启动第一个引擎（后续引擎由 start_engine 错开 300ms 调度）
     start_engine(ctx, 0)
+    if start_players:
+        # 预热器可能还没起（程序启动时没开游戏 / 配置刚改）：先确保它在跑，
+        # 翻译腿才能借用 socket + 密钥 + 名字表。
+        ensure_players_warmup(ctx)
+        _start_players_leg(ctx, players_cfg)
 
     # 按钮态
     set_power_state(ctx, "running")
@@ -372,6 +392,104 @@ def start_engine(ctx: EngineCtx, index: int) -> None:
         # 两个引擎错开 300ms 启动，避免同时抢占音频设备
         ctx.start_job = ctx.root.after(300, lambda: start_engine(ctx, index + 1))
 
+def _players_status_text(phase: str, detail: str) -> tuple[str, str]:
+    """预热器内部 phase → (状态栏级别, 人话)。"""
+    if phase == "recording":
+        return "info", "预热：正在记录玩家名（未开始翻译）"
+    if phase == "capturing":
+        return "info", "预热：已开始抓包，等待密钥/流量"
+    if phase in ("waiting_game",):
+        return "info", "预热：等待 VRChat 进程"
+    if phase in ("unauthorized", "blocked", "failed"):
+        return "warn", f"预热不可用：{detail}"
+    return "info", f"预热：{detail or phase}"
+
+
+def ensure_players_warmup(ctx: EngineCtx) -> Any:
+    """按配置启动/复用预热器（App 级；没有预热需求时什么都不做）。
+
+    检测到 VRChat 进程后由预热器自己弹一次 pkexec（开 socket）+ 扫一次内存取钥，
+    之后持续只解析玩家名；点开始翻译时翻译腿直接借用它的 socket/密钥/名字表。
+    """
+    from .players_settings import MODE_DECRYPT, PREWARM_AUTO, parse_players
+
+    ps = parse_players(getattr(ctx.cfg, "players", None) or {})
+    if ps.mode != MODE_DECRYPT or ps.prewarm != PREWARM_AUTO:
+        # 关掉预热：之前可能已经启动过（设置页刚改的），不能留着 socket 继续跑
+        stop_players_warmup(ctx)
+        return None
+    warmup = getattr(ctx, "players_warmup", None)
+    if warmup is None:
+        from .players.warmup import PlayerWarmup
+
+        def _on_status(phase: str, detail: str) -> None:
+            level, message = _players_status_text(phase, detail)
+            print(f"[warmup][{level}] {message}" + (f"（{detail}）" if detail else ""),
+                  flush=True)
+            # ⚠️ 这个回调来自**预热线程**：Tk 只能在主线程碰。所以**只走界面队列**，
+            #    绝不在没有队列时退回 `set_status_fn` —— 那会在后台线程里碰 Tk，
+            #    Linux 上直接 segfault（真机踩过：AppImage 启动瞬间崩）。
+            q = getattr(ctx, "q", None)
+            if q is not None:
+                q.put(("status", level, message))
+            # 队列还没接好（极早期）就只留日志，等界面轮询起来后状态页会显示
+
+        warmup = PlayerWarmup(ps, on_status=_on_status)
+        ctx.players_warmup = warmup
+        warmup.start()
+    else:
+        warmup.reconfigure(ps)
+    return warmup
+
+
+def stop_players_warmup(ctx: EngineCtx) -> None:
+    warmup = getattr(ctx, "players_warmup", None)
+    if warmup is None:
+        return
+    ctx.players_warmup = None
+    try:
+        warmup.close()
+    except Exception as exc:                        # noqa: BLE001 - 收尾不抛
+        print(f"[warmup] ⚠️ 关闭预热器失败（忽略）：{exc}", flush=True)
+
+
+def _start_players_leg(ctx: EngineCtx, players_cfg: dict) -> None:
+    """启动分玩家翻译腿（把关卡/限流/名字都在 leg 里处理）。"""
+    existing = getattr(ctx, "players_leg", None)
+    if existing is not None and getattr(existing, "running", False):
+        return
+    from .players.leg import PlayerLeg
+
+    # 方向配置：specs 里的 theirs 已被替换掉，这里要自己兜一个（与 start() 同口径）
+    dd = ctx.cfg.directions.setdefault("theirs", Direction())
+    dd.source_lang = dd.source_lang or ""
+    dd.target_lang = dd.target_lang or (ctx.lang_pair.get("source") or "zh")
+    scfg = dd.to_session_config(ctx.cfg.session_base)
+    # 默认值/范围校验只有一处：vlt/players/settings.py。界面与这里共用同一份。
+    from .players_settings import parse_players
+
+    ps = parse_players(players_cfg)
+
+    leg = PlayerLeg(
+        scfg,
+        on_text=lambda actor, label, src, txt, final:
+            ctx.q.put(("players", actor, label, src, txt, final)),
+        on_status=lambda lvl, msg: on_engine_status(ctx.q, lvl, msg, "players"),
+        on_names=lambda fresh: print(
+            "[players] 名字：" + "、".join(f"actor{a}={n!r}" for a, _u, n in fresh),
+            flush=True),
+        warmup=getattr(ctx, "players_warmup", None),
+        max_sessions=ps.max_sessions,
+        gate_db=ps.gate_db,
+        gate_hysteresis_db=ps.gate_hysteresis_db,
+        pre_seconds=ps.pre_seconds,
+        distance_mode=ps.distance_mode,
+        max_distance_m=ps.max_distance_m,
+    )
+    ctx.players_leg = leg
+    leg.start()
+
+
 def on_engine_status(q, lvl: str, msg: str, who: str) -> None:
     """引擎状态既要进状态栏，也要进日志（stdout）。
 
@@ -401,6 +519,13 @@ def stop(ctx: EngineCtx) -> None:
         except Exception:
             pass
         ctx.start_job = None
+
+    # 分玩家腿：独立线程，异步收尾（join 最多 8s，不能卡界面）
+    leg = getattr(ctx, "players_leg", None)
+    if leg is not None:
+        ctx.players_leg = None
+        threading.Thread(target=leg.stop, daemon=True,
+                         name="vlt-players-stop").start()
 
     engines = list(ctx.engines)
     for eng in engines:
@@ -478,6 +603,7 @@ def on_close(ctx: EngineCtx) -> None:
     Tk 事件循环上，界面看起来就是"卡死后闪退"。
     """
     ctx.closing = True
+    stop_players_warmup(ctx)
     # 先取消 poll 循环，防止窗口销毁后 after 回调仍在事件队列里
     if ctx.cancel_poll_fn:
         try:

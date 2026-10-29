@@ -28,7 +28,9 @@ from .platform.base import LoopbackTarget
 from .output.chatbox import Chatbox, TokenBucket
 from .output.merger import Merger
 from .output.overlay import DegradedNoteRelay, OverlayConfig
-from .output.level_match import LevelConfig, LevelMatcher, block_db, format_db
+from .audio_gate import (VOICE_PEAK, LevelGate as _LevelGate,  # noqa: F401  旧名字沿用
+                         chunk_level_db)
+from .output.level_match import LevelConfig, LevelMatcher, format_db
 from .output.level_match import MODE_OFF as LEVEL_MODE_OFF
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .session.base import SessionConfig, TextDelta, create_session
@@ -83,7 +85,8 @@ def chatbox_text_mode(cfg) -> str:
 
 
 # 输入音量判「有声音」的峰值门限（16k s16le）。只用于黑匣子统计，不影响功能。
-SILENCE_PEAK = 220
+# 实现只有一份：audio_gate.VOICE_PEAK（分玩家腿的 note_voice 用同一个常量）。
+SILENCE_PEAK = VOICE_PEAK
 
 # Linux 采集 VRChat 输出流时，每隔这么久回查一次 PipeWire 图 ——
 # 用来发现「VRChat 退出了」（目标节点消失），及时收尾回到等待。
@@ -156,18 +159,6 @@ def silence_gate_settings(base: dict | None) -> tuple[bool, float, float]:
     return enabled, after, preroll
 
 
-def chunk_level_db(chunk: bytes) -> float:
-    """一个 100ms 音频块的电平（dBFS，满量程 = 0）。纯函数，离线可测。
-
-    用 **RMS** 而不是峰值：峰值只反映块里最响的那几个采样 —— 按键、咳嗽、音效
-    的一个尖刺就能把峰值顶上来，但它不代表「这句话整体有多响」。远处玩家小声说话
-    的块峰值可能偶发偏高、RMS 却一直很低，正是要拦的对象。
-
-    实现**只有一份**：委托给 `level_match.block_db`（本模块已经 import 它，engine →
-    output.level_match 是单向依赖，反向不成环）。以前两处各写一份同语义实现 ——
-    改一处忘另一处就是两个口径。
-    """
-    return block_db(chunk)
 
 
 # dB 读数的格式化同样**只有一份**：`level_match.format_db`（本模块与 gui_proxy 都 import 它）。
@@ -299,111 +290,6 @@ class _SilenceGate:
             self._preroll_dur -= d
 
 
-class _LevelGate:
-    """输入响度门限：音量达不到门限的音频块**不上送**（只接 loopback 采集）。
-
-    治什么：VRChat 输出是所有人混好的一路音频，远处玩家声音小、本来就听不清，
-    以往照样送给模型 —— 白花钱，还容易被翻成乱话。这里按块 RMS（不是峰值）判响度，
-    低于门限就不送；门限以上的照常送，并保证不把句子切坏：
-
-    - **hold**：越阈值后的一段时间内，即使块回落到门限以下也继续送 ——
-      说话句中的停顿、句尾渐弱不会被切碎（默认 500ms）。
-    - **preroll**：开闸时把越阈值之前的一小段（默认 250ms）补上 ——
-      句首辅音/起音不丢，否则识别会掉字。
-    - **tail**：关闸时先补一小段**等长数字静音**（默认 600ms）再停 —— 上送流是一条
-      **时间轴**，只在轴上挖洞（什么也不发）会同时坏两件事：① 服务端 turn_detection
-      收不到「停顿」就永远不给这一轮收尾（实测有一轮拖到 196.7s，译文要等下一次长静音
-      才吐）；② 服务端把不相邻的两段语音当成同一轮连着听，ASR 会串出乱句。
-      补静音=明确给出停顿、保住时间轴；只补一小段是因为静音占比一高模型容易滑进
-      repeat 输出（麦克风腿就是这样被 `_SilenceGate` 闸住的），600ms 够触发一次收尾。
-
-    与 `_SilenceGate` 的关系：职责不同、串联工作。本闸门治「小声」（用户要的过滤），
-    静音闸门治「长时间真静音」（防服务端 repeat 掉线）。本闸门拦掉的块不会进入
-    静音闸门，所以也不会被算进它的静音计时 —— 两者不会互相抵消。
-    """
-
-    def __init__(self, enabled: bool, threshold_db: float, hold_ms: float,
-                 preroll_ms: int, tail_ms: float = INPUT_GATE_DEFAULT_TAIL_MS) -> None:
-        self.enabled = enabled
-        self.threshold_db = threshold_db
-        self.hold_ms = hold_ms
-        self.preroll_ms = preroll_ms
-        self.tail_ms = max(0.0, float(tail_ms))   # 0 = 关掉补静音（回到「只停送」的旧行为）
-        self.is_open = False                 # 当前是否在上送（开闸）
-        self._last_loud_ts: float | None = None
-        self._preroll: deque[tuple[bytes, float]] = deque()
-        self._preroll_ms = 0.0
-        self.level_db = LEVEL_FLOOR_DB       # 最近一块的电平（界面实时显示用）
-        self.dropped_chunks = 0              # 累计拦截（未上送）的块数
-        self.opened = 0                      # 开闸次数
-        self.replay_count = 0                # 补发 preroll 的次数
-        self.tail_chunks = 0                 # 累计补发的数字静音块数（关闸时那一下）
-
-    def feed(self, chunk: bytes, *, now: float, dur_s: float) -> list[bytes]:
-        """返回本次真正要上送的块序列（0..N 块；N>1 = 开闸补发 preroll 的情形）。"""
-        db = chunk_level_db(chunk)
-        self.level_db = db
-        if not self.enabled:
-            return [chunk]
-        if db >= self.threshold_db:
-            self._last_loud_ts = now
-            if self.is_open:
-                return [chunk]
-            self.is_open = True
-            self.opened += 1
-            replay = [c for c, _ in self._preroll]
-            self._preroll.clear()
-            self._preroll_ms = 0.0
-            if replay:
-                self.replay_count += 1
-                print(f"[gate] 输入门限：{db:.1f} dBFS ≥ 门限 {self.threshold_db:g} dBFS → "
-                      f"开始上送，并补发之前 {len(replay)} 块（{self.preroll_ms}ms 内，"
-                      f"防丢句首）", flush=True)
-            return replay + [chunk]
-
-        # —— 低于门限 ——
-        if self.is_open:
-            held = (self._last_loud_ts is not None
-                    and (now - self._last_loud_ts) * 1000.0 <= self.hold_ms)
-            if held:
-                return [chunk]              # hold 期内继续送：句中的停顿不切碎
-            self.is_open = False
-            tail = self._silence_tail(len(chunk))
-            self.tail_chunks += len(tail)
-            self.dropped_chunks += 1
-            self._remember(chunk, dur_s)
-            print(f"[gate] 输入门限：已回落 {self.hold_ms:g}ms 低于门限 "
-                  f"{self.threshold_db:g} dBFS（当前 {db:.1f}）→ 暂停上送"
-                  f"（并补发 {len(tail)} 块数字静音 ≈{self.tail_ms:g}ms，"
-                  f"让服务端收到停顿、及时给这一轮收尾；累计已拦截 {self.dropped_chunks} 块）",
-                  flush=True)
-            return tail
-        self.dropped_chunks += 1
-        self._remember(chunk, dur_s)
-        return []
-
-    def _silence_tail(self, nbytes: int) -> list[bytes]:
-        """关闸那一下补的**等长数字静音**（块数 = tail_ms / 单块时长，至少 1 块）。
-
-        块长必须与采集块一致：服务端按时间轴对齐，发不等长的块会把它自己的断句节奏带偏。
-        `tail_ms=0` 或空块 → 不补（回到「只停送」的旧行为）。
-        """
-        if self.tail_ms <= 0 or nbytes <= 0:
-            return []
-        block_ms = nbytes / 2 / 16000.0 * 1000.0        # 16k 单声道 s16le：2 字节/样本
-        if block_ms <= 0:
-            return []
-        return [b"\x00" * nbytes] * max(1, int(round(self.tail_ms / block_ms)))
-
-    def _remember(self, chunk: bytes, dur_s: float) -> None:
-        if self.preroll_ms <= 0:
-            return
-        self._preroll.append((chunk, dur_s))
-        self._preroll_ms += dur_s * 1000.0
-        # +1μs 容差：0.1+0.1+0.1=0.30000000000000004，没容差会多吃掉一块（同 _SilenceGate）
-        while self._preroll and self._preroll_ms > self.preroll_ms + 1e-3:
-            _, d = self._preroll.popleft()
-            self._preroll_ms -= d * 1000.0
 
 
 @dataclass
